@@ -1,3 +1,4 @@
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
@@ -18,6 +19,7 @@
 module Distribution.Simple.PreProcess.Types
   ( Suffix (..)
   , PreProcessor (..)
+  , PreProcessCommand
   , builtinHaskellSuffixes
   , builtinHaskellBootSuffixes
   )
@@ -28,6 +30,7 @@ import Prelude ()
 
 import Distribution.ModuleName (ModuleName)
 import Distribution.Pretty
+import Distribution.Utils.Path
 import Distribution.Verbosity
 import qualified Text.PrettyPrint as Disp
 
@@ -78,7 +81,7 @@ data PreProcessor = PreProcessor
 
     ppOrdering
       :: Verbosity
-      -> [FilePath] -- Source directories
+      -> [SymbolicPath Pkg (Dir Source)] -- Source directories
       -> [ModuleName] -- Module names
       -> IO [ModuleName] -- Sorted modules
 
@@ -88,11 +91,21 @@ data PreProcessor = PreProcessor
   --
   -- @since 3.8.1.0
   , runPreProcessor
-      :: (FilePath, FilePath) -- Location of the source file relative to a base dir
-      -> (FilePath, FilePath) -- Output file name, relative to an output base dir
-      -> Verbosity -- verbosity
-      -> IO () -- Should exit if the preprocessor fails
+      :: PreProcessCommand
   }
+
+-- | A command to run a given preprocessor on a single source file.
+--
+-- The input and output file paths are passed in as arguments, as it is
+-- the build system and not the package author which chooses the location of
+-- source files.
+type PreProcessCommand =
+  (FilePath, FilePath)
+  -- ^ Location of the source file relative to a base dir
+  -> (FilePath, FilePath)
+  -- ^ Output file name, relative to an output base dir
+  -> Verbosity
+  -> IO () -- Should exit if the preprocessor fails
 
 -- | A suffix (or file extension).
 --

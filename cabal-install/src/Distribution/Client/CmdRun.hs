@@ -59,9 +59,11 @@ import Distribution.Client.ProjectPlanning
   , binDirectoryFor
   )
 import Distribution.Client.ProjectPlanning.Types
-  ( dataDirsEnvironmentForPlan
+  ( ElaboratedPackageOrComponent (..)
+  , dataDirsEnvironmentForPlan
   , elabExeDependencyPaths
   )
+
 import Distribution.Client.ScriptUtils
   ( AcceptNoTargets (..)
   , TargetContext (..)
@@ -70,7 +72,8 @@ import Distribution.Client.ScriptUtils
   , withContextAndSelectors
   )
 import Distribution.Client.Setup
-  ( ConfigFlags (..)
+  ( CommonSetupFlags (setupVerbosity)
+  , ConfigFlags (..)
   , GlobalFlags (..)
   )
 import Distribution.Client.TargetProblem
@@ -79,6 +82,10 @@ import Distribution.Client.TargetProblem
 import Distribution.Client.Utils
   ( giveRTSWarning
   , occursOnlyOrBefore
+  )
+
+import Distribution.Simple.BuildToolDepends
+  ( getAllInternalToolDependencies
   )
 import Distribution.Simple.Command
   ( CommandUI (..)
@@ -106,8 +113,16 @@ import Distribution.Simple.Utils
   , warn
   , wrapText
   )
+
 import Distribution.Types.ComponentName
   ( componentNameRaw
+  )
+import Distribution.Types.Executable as PD
+  ( buildInfo
+  , exeName
+  )
+import qualified Distribution.Types.PackageDescription as PD
+  ( executables
   )
 import Distribution.Types.UnitId
   ( UnitId
@@ -199,7 +214,7 @@ runAction flags@NixStyleFlags{..} targetAndArgs globalFlags =
       GlobalContext -> return (ctx, normal)
       ScriptContext path exemeta -> (,silent) <$> updateContextAndWriteProjectFile ctx path exemeta
 
-    let verbosity = fromFlagOrDefault defaultVerbosity (configVerbosity configFlags)
+    let verbosity = fromFlagOrDefault defaultVerbosity (setupVerbosity $ configCommonFlags configFlags)
 
     buildCtx <-
       runProjectPreBuildPhase verbosity baseCtx $ \elaboratedPlan -> do
@@ -302,17 +317,34 @@ runAction flags@NixStyleFlags{..} targetAndArgs globalFlags =
           buildSettingDryRun (buildSettings baseCtx)
             || buildSettingOnlyDownload (buildSettings baseCtx)
 
-    let extraPath =
-          elabExeDependencyPaths pkg
-            ++ ( fromNubList
-                  . projectConfigProgPathExtra
-                  . projectConfigShared
-                  . projectConfig
-                  $ baseCtx
-               )
+    let
+      -- HACK alert: when doing a per-package build (e.g. with a Custom setup),
+      -- 'elabExeDependencyPaths' will not contain any internal executables
+      -- (they are deliberately filtered out; and even if they weren't, they have the wrong paths).
+      -- We add them back in here to ensure that any "build-tool-depends" of
+      -- the current executable is available in PATH at runtime.
+      internalToolDepsOfThisExe
+        | ElabPackage{} <- elabPkgOrComp pkg
+        , let pkg_descr = elabPkgDescription pkg
+        , thisExe : _ <- filter ((== exeName) . unUnqualComponentName . PD.exeName) $ PD.executables pkg_descr
+        , let thisExeBI = PD.buildInfo thisExe =
+            [ binDirectoryFor (distDirLayout baseCtx) (elaboratedShared buildCtx) pkg depExeNm
+            | depExe <- getAllInternalToolDependencies pkg_descr thisExeBI
+            , let depExeNm = unUnqualComponentName depExe
+            ]
+        | otherwise =
+            []
+      extraPath =
+        elabExeDependencyPaths pkg
+          ++ ( fromNubList
+                . projectConfigProgPathExtra
+                . projectConfigShared
+                . projectConfig
+                $ baseCtx
+             )
+          ++ internalToolDepsOfThisExe
 
     logExtraProgramSearchPath verbosity extraPath
-
     progPath <- programSearchPathAsPATHVar (map ProgramSearchPathDir extraPath ++ defaultProgramSearchPath)
 
     if dryRun

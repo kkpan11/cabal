@@ -119,9 +119,9 @@ GenericPackageDescription {
     testSuites = [],
     benchmarks = [],
     dataFiles = [],
-    dataDir = ".",
+    dataDir = SymbolicPath ".",
     extraSrcFiles = [
-      "CHANGELOG.md"],
+      SymbolicPath "CHANGELOG.md"],
     extraTmpFiles = [],
     extraDocFiles = []},
   gpdScannedVersion = Nothing,
@@ -241,6 +241,8 @@ GenericPackageDescription {
             []
             [],
           sharedOptions =
+          PerCompilerFlavor [] [],
+          profSharedOptions =
           PerCompilerFlavor [] [],
           staticOptions =
           PerCompilerFlavor [] [],
@@ -373,6 +375,8 @@ GenericPackageDescription {
                   [],
                 sharedOptions =
                 PerCompilerFlavor [] [],
+                profSharedOptions =
+                PerCompilerFlavor [] [],
                 staticOptions =
                 PerCompilerFlavor [] [],
                 customFieldsBI = [],
@@ -456,6 +460,8 @@ GenericPackageDescription {
                   []
                   [],
                 sharedOptions =
+                PerCompilerFlavor [] [],
+                profSharedOptions =
                 PerCompilerFlavor [] [],
                 staticOptions =
                 PerCompilerFlavor [] [],
@@ -561,6 +567,8 @@ GenericPackageDescription {
                   [],
                 sharedOptions =
                 PerCompilerFlavor [] [],
+                profSharedOptions =
+                PerCompilerFlavor [] [],
                 staticOptions =
                 PerCompilerFlavor [] [],
                 customFieldsBI = [],
@@ -631,6 +639,8 @@ GenericPackageDescription {
                   [],
                 sharedOptions =
                 PerCompilerFlavor [] [],
+                profSharedOptions =
+                PerCompilerFlavor [] [],
                 staticOptions =
                 PerCompilerFlavor [] [],
                 customFieldsBI = [],
@@ -651,7 +661,7 @@ GenericPackageDescription {
             "",
           testInterface = TestSuiteExeV10
             (mkVersion [1, 0])
-            "doctests.hs",
+            (SymbolicPath "doctests.hs"),
           testBuildInfo = BuildInfo {
             buildable = True,
             buildTools = [],
@@ -702,6 +712,8 @@ GenericPackageDescription {
               [],
             sharedOptions =
             PerCompilerFlavor [] [],
+            profSharedOptions =
+            PerCompilerFlavor [] [],
             staticOptions =
             PerCompilerFlavor [] [],
             customFieldsBI = [
@@ -746,7 +758,7 @@ GenericPackageDescription {
             "",
           testInterface = TestSuiteExeV10
             (mkVersion [1, 0])
-            "Example.hs",
+            (SymbolicPath "Example.hs"),
           testBuildInfo = BuildInfo {
             buildable = True,
             buildTools = [],
@@ -797,6 +809,8 @@ GenericPackageDescription {
               []
               [],
             sharedOptions =
+            PerCompilerFlavor [] [],
+            profSharedOptions =
             PerCompilerFlavor [] [],
             staticOptions =
             PerCompilerFlavor [] [],

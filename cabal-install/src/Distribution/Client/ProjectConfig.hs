@@ -8,6 +8,7 @@
 module Distribution.Client.ProjectConfig
   ( -- * Types for project config
     ProjectConfig (..)
+  , ProjectConfigToParse (..)
   , ProjectConfigBuildOnly (..)
   , ProjectConfigShared (..)
   , ProjectConfigProvenance (..)
@@ -57,6 +58,7 @@ module Distribution.Client.ProjectConfig
   ) where
 
 import Distribution.Client.Compat.Prelude
+import Text.PrettyPrint (nest, render, text, vcat)
 import Prelude ()
 
 import Distribution.Client.Glob
@@ -100,12 +102,12 @@ import Distribution.Client.HttpUtils
 import Distribution.Client.Types
 import Distribution.Client.Utils.Parsec (renderParseError)
 
+import Distribution.Solver.Types.ConstraintSource
 import Distribution.Solver.Types.PackageConstraint
-  ( PackageProperty (..)
-  )
 import Distribution.Solver.Types.Settings
 import Distribution.Solver.Types.SourcePackage
 
+import Distribution.Client.Errors
 import Distribution.Client.Setup
   ( defaultMaxBackjumps
   , defaultSolver
@@ -113,6 +115,7 @@ import Distribution.Client.Setup
 import Distribution.Client.SrcDist
   ( packageDirToSdist
   )
+import Distribution.Client.Targets
 import Distribution.Client.Types.SourceRepo
   ( SourceRepoList
   , SourceRepositoryPackage (..)
@@ -133,11 +136,6 @@ import Distribution.Fields
   , showPWarning
   )
 import Distribution.Package
-  ( PackageId
-  , PackageName
-  , UnitId
-  , packageId
-  )
 import Distribution.PackageDescription.Parsec
   ( parseGenericPackageDescription
   )
@@ -192,8 +190,6 @@ import Distribution.Verbosity
   , verbose
   )
 import Distribution.Version
-  ( Version
-  )
 
 import qualified Codec.Archive.Tar as Tar
 import qualified Codec.Archive.Tar.Entry as Tar
@@ -209,7 +205,6 @@ import qualified Data.Map as Map
 import qualified Data.Set as Set
 import Numeric (showHex)
 
-import Distribution.Client.Errors
 import Network.URI
   ( URI (..)
   , URIAuth (..)
@@ -217,11 +212,20 @@ import Network.URI
   , uriToString
   )
 import System.Directory
+  ( canonicalizePath
+  , doesDirectoryExist
+  , doesFileExist
+  , getCurrentDirectory
+  , getDirectoryContents
+  , getHomeDirectory
+  )
 import System.FilePath hiding (combine)
 import System.IO
   ( IOMode (ReadMode)
   , withBinaryFile
   )
+
+import Distribution.Solver.Types.ProjectConfigPath
 
 ----------------------------------------
 -- Resolving configuration to settings
@@ -306,9 +310,34 @@ resolveSolverSettings
     where
       -- TODO: [required eventually] some of these settings need validation, e.g.
       -- the flag assignments need checking.
+      cabalPkgname = mkPackageName "Cabal"
+
+      profilingDynamicConstraint =
+        ( UserConstraint
+            (UserAnySetupQualifier cabalPkgname)
+            (PackagePropertyVersion $ orLaterVersion (mkVersion [3, 13, 0]))
+        , ConstraintSourceProfiledDynamic
+        )
+
+      profDynEnabledGlobally = fromFlagOrDefault False (packageConfigProfShared projectConfigLocalPackages)
+
+      profDynEnabledAnyLocally =
+        or
+          [ fromFlagOrDefault False (packageConfigProfShared ppc)
+          | (_, ppc) <- Map.toList (getMapMappend projectConfigSpecificPackage)
+          ]
+
+      -- Add a setup.Cabal >= 3.13 constraint if prof+dyn is enabled globally
+      -- or any package in the project enables it.
+      -- Ideally we'd apply this constraint only on the closure of packages requiring prof+dyn,
+      -- but that would require another solver run for marginal advantages that
+      -- will further shrink as 3.13 is adopted.
+      solverCabalLibConstraints =
+        [profilingDynamicConstraint | profDynEnabledGlobally || profDynEnabledAnyLocally]
+
       solverSettingRemoteRepos = fromNubList projectConfigRemoteRepos
       solverSettingLocalNoIndexRepos = fromNubList projectConfigLocalNoIndexRepos
-      solverSettingConstraints = projectConfigConstraints
+      solverSettingConstraints = solverCabalLibConstraints ++ projectConfigConstraints
       solverSettingPreferences = projectConfigPreferences
       solverSettingFlagAssignment = packageConfigFlagAssignment projectConfigLocalPackages
       solverSettingFlagAssignments =
@@ -552,7 +581,7 @@ findProjectRoot verbosity mprojectDir mprojectFile = do
 
 probeProjectRoot :: Maybe FilePath -> IO (Either BadProjectRoot ProjectRoot)
 probeProjectRoot mprojectFile = do
-  startdir <- getCurrentDirectory
+  startdir <- System.Directory.getCurrentDirectory
   homedir <- getHomeDirectory
   probe startdir homedir
   where
@@ -741,7 +770,7 @@ readProjectFileSkeleton
       then do
         monitorFiles [monitorFileHashed extensionFile]
         pcs <- liftIO readExtensionFile
-        monitorFiles $ map monitorFileHashed (projectSkeletonImports pcs)
+        monitorFiles $ map monitorFileHashed (projectConfigPathRoot <$> projectSkeletonImports pcs)
         pure pcs
       else do
         monitorFiles [monitorNonExistentFile extensionFile]
@@ -751,7 +780,7 @@ readProjectFileSkeleton
 
       readExtensionFile =
         reportParseResult verbosity extensionDescription extensionFile
-          =<< parseProjectSkeleton distDownloadSrcDirectory httpTransport verbosity [] extensionFile
+          =<< parseProject extensionFile distDownloadSrcDirectory httpTransport verbosity . ProjectConfigToParse
           =<< BS.readFile extensionFile
 
 -- | Render the 'ProjectConfig' format.
@@ -788,7 +817,7 @@ readGlobalConfig verbosity configFileFlag = do
 reportParseResult :: Verbosity -> String -> FilePath -> OldParser.ParseResult ProjectConfigSkeleton -> IO ProjectConfigSkeleton
 reportParseResult verbosity _filetype filename (OldParser.ParseOk warnings x) = do
   unless (null warnings) $
-    let msg = unlines (map (OldParser.showPWarning (intercalate ", " $ filename : projectSkeletonImports x)) warnings)
+    let msg = unlines (map (OldParser.showPWarning (intercalate ", " $ filename : (projectConfigPathRoot <$> projectSkeletonImports x))) warnings)
      in warn verbosity msg
   return x
 reportParseResult verbosity filetype filename (OldParser.ParseFailed err) =
@@ -871,10 +900,10 @@ renderBadPackageLocations (BadPackageLocations provenance bpls)
     renderErrors f = unlines (map f bpls)
 
     renderExplicit =
-      "When using configuration(s) from "
-        ++ intercalate ", " (mapMaybe getExplicit (Set.toList provenance))
-        ++ ", the following errors occurred:\n"
-        ++ renderErrors renderBadPackageLocation
+      "When using configuration from:\n"
+        ++ render (nest 2 . docProjectConfigPaths $ mapMaybe getExplicit (Set.toList provenance))
+        ++ "\nThe following errors occurred:\n"
+        ++ render (nest 2 $ vcat ((text "-" <+>) . text <$> map renderBadPackageLocation bpls))
 
     getExplicit (Explicit path) = Just path
     getExplicit Implicit = Nothing

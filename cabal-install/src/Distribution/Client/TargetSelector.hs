@@ -101,6 +101,11 @@ import Control.Arrow ((&&&))
 import Control.Monad hiding
   ( mfilter
   )
+#if MIN_VERSION_base(4,20,0)
+import Data.Functor as UZ (unzip)
+#else
+import qualified Data.List.NonEmpty as UZ (unzip)
+#endif
 import Data.List
   ( stripPrefix
   )
@@ -126,6 +131,8 @@ import Distribution.Simple.Utils
   , ordNub
   )
 import Distribution.Utils.Path
+  ( getSymbolicPath
+  )
 import qualified System.Directory as IO
   ( canonicalizePath
   , doesDirectoryExist
@@ -133,18 +140,18 @@ import qualified System.Directory as IO
   , getCurrentDirectory
   )
 import System.FilePath
-  ( dropTrailingPathSeparator
+  ( dropExtension
+  , dropTrailingPathSeparator
   , equalFilePath
+  , joinPath
   , normalise
+  , splitDirectories
+  )
+import qualified System.FilePath as FilePath
+  ( splitPath
+  , takeExtension
   , (<.>)
   , (</>)
-  )
-import System.FilePath as FilePath
-  ( dropExtension
-  , joinPath
-  , splitDirectories
-  , splitPath
-  , takeExtension
   )
 import Text.EditDistance
   ( defaultEditCosts
@@ -322,13 +329,13 @@ parseTargetString =
     parseTargetApprox :: Parse.ReadP r TargetString
     parseTargetApprox =
       ( do
-          a <- tokenQ
+          a <- tokenQEnd
           return (TargetString1 a)
       )
         +++ ( do
                 a <- tokenQ0
                 _ <- Parse.char ':'
-                b <- tokenQ
+                b <- tokenQEnd
                 return (TargetString2 a b)
             )
         +++ ( do
@@ -336,7 +343,7 @@ parseTargetString =
                 _ <- Parse.char ':'
                 b <- tokenQ
                 _ <- Parse.char ':'
-                c <- tokenQ
+                c <- tokenQEnd
                 return (TargetString3 a b c)
             )
         +++ ( do
@@ -346,7 +353,7 @@ parseTargetString =
                 _ <- Parse.char ':'
                 c <- tokenQ
                 _ <- Parse.char ':'
-                d <- tokenQ
+                d <- tokenQEnd
                 return (TargetString4 a b c d)
             )
         +++ ( do
@@ -358,7 +365,7 @@ parseTargetString =
                 _ <- Parse.char ':'
                 d <- tokenQ
                 _ <- Parse.char ':'
-                e <- tokenQ
+                e <- tokenQEnd
                 return (TargetString5 a b c d e)
             )
         +++ ( do
@@ -374,7 +381,7 @@ parseTargetString =
                 _ <- Parse.char ':'
                 f <- tokenQ
                 _ <- Parse.char ':'
-                g <- tokenQ
+                g <- tokenQEnd
                 return (TargetString7 a b c d e f g)
             )
 
@@ -382,6 +389,8 @@ parseTargetString =
     tokenQ = parseHaskellString <++ token
     token0 = Parse.munch (\x -> not (isSpace x) && x /= ':')
     tokenQ0 = parseHaskellString <++ token0
+    tokenEnd = Parse.munch1 (/= ':')
+    tokenQEnd = parseHaskellString <++ tokenEnd
     parseHaskellString :: Parse.ReadP r String
     parseHaskellString = Parse.readS_to_P reads
 
@@ -468,7 +477,7 @@ getTargetStringFileStatus DirActions{..} t =
     fileStatus f = do
       fexists <- doesFileExist f
       dexists <- doesDirectoryExist f
-      case splitPath f of
+      case FilePath.splitPath f of
         _
           | fexists -> FileStatusExistsFile <$> canonicalizePath f
           | dexists -> FileStatusExistsDir <$> canonicalizePath f
@@ -581,7 +590,7 @@ resolveTargetSelector knowntargets@KnownTargets{..} mfilter targetStrStatus =
 
     classifyMatchErrors errs
       | Just expectedNE <- NE.nonEmpty expected =
-          let (things, got :| _) = NE.unzip expectedNE
+          let (things, got :| _) = UZ.unzip expectedNE
            in TargetSelectorExpected targetStr (NE.toList things) got
       | not (null nosuch) =
           TargetSelectorNoSuch targetStr nosuch
@@ -916,7 +925,7 @@ matchTargetSelector knowntargets = \usertarget ->
     let ql = targetQualLevel usertarget
      in foldSyntax
           (<|>)
-          (<//>)
+          (</>)
           (\ql' match _ -> guard (ql == ql') >> match usertarget)
           syntax
   where
@@ -1885,8 +1894,8 @@ collectKnownPackageInfo
           dirabs <- canonicalizePath dir
           dirrel <- makeRelativeToCwd dirActions dirabs
           -- TODO: ought to get this earlier in project reading
-          let fileabs = dirabs </> prettyShow (packageName pkg) <.> "cabal"
-              filerel = dirrel </> prettyShow (packageName pkg) <.> "cabal"
+          let fileabs = dirabs FilePath.</> prettyShow (packageName pkg) FilePath.<.> "cabal"
+              filerel = dirrel FilePath.</> prettyShow (packageName pkg) FilePath.<.> "cabal"
           exists <- doesFileExist fileabs
           return
             ( Just (dirabs, dirrel)
@@ -1913,8 +1922,8 @@ collectKnownComponentInfo pkg =
     , cinfoSrcDirs = ordNub (map getSymbolicPath (hsSourceDirs bi))
     , cinfoModules = ordNub (componentModules c)
     , cinfoHsFiles = ordNub (componentHsFiles c)
-    , cinfoCFiles = ordNub (cSources bi)
-    , cinfoJsFiles = ordNub (jsSources bi)
+    , cinfoCFiles = ordNub (map getSymbolicPath $ cSources bi)
+    , cinfoJsFiles = ordNub (map getSymbolicPath $ jsSources bi)
     }
   | c <- pkgComponents pkg
   , let bi = componentBuildInfo c
@@ -1938,19 +1947,19 @@ componentModules (CTest test) = testModules test
 componentModules (CBench bench) = benchmarkModules bench
 
 componentHsFiles :: Component -> [FilePath]
-componentHsFiles (CExe exe) = [modulePath exe]
+componentHsFiles (CExe exe) = [getSymbolicPath $ modulePath exe]
 componentHsFiles
   ( CTest
       TestSuite
         { testInterface = TestSuiteExeV10 _ mainfile
         }
-    ) = [mainfile]
+    ) = [getSymbolicPath mainfile]
 componentHsFiles
   ( CBench
       Benchmark
         { benchmarkInterface = BenchmarkExeV10 _ mainfile
         }
-    ) = [mainfile]
+    ) = [getSymbolicPath mainfile]
 componentHsFiles _ = []
 
 ------------------------------
@@ -2075,7 +2084,7 @@ guardPackageDir str _ = matchErrorExpected "package directory" str
 
 guardPackageFile :: String -> FileStatus -> Match ()
 guardPackageFile _ (FileStatusExistsFile file)
-  | takeExtension file == ".cabal" =
+  | FilePath.takeExtension file == ".cabal" =
       increaseConfidence
 guardPackageFile str _ = matchErrorExpected "package .cabal file" str
 
@@ -2083,10 +2092,10 @@ matchPackage :: [KnownPackage] -> String -> FileStatus -> Match KnownPackage
 matchPackage pinfo = \str fstatus ->
   orNoThingIn "project" "" $
     matchPackageName pinfo str
-      <//> ( matchPackageNameUnknown str
+      </> ( matchPackageNameUnknown str
               <|> matchPackageDir pinfo str fstatus
               <|> matchPackageFile pinfo str fstatus
-           )
+          )
 
 matchPackageName :: [KnownPackage] -> String -> Match KnownPackage
 matchPackageName ps = \str -> do
@@ -2252,7 +2261,7 @@ matchComponentOtherFile
   -> Match (FilePath, KnownComponent)
 matchComponentOtherFile cs =
   matchFile
-    [ (normalise (srcdir </> file), c)
+    [ (normalise (srcdir FilePath.</> file), c)
     | c <- cs
     , srcdir <- cinfoSrcDirs c
     , file <-
@@ -2268,7 +2277,7 @@ matchComponentModuleFile
   -> Match (FilePath, KnownComponent)
 matchComponentModuleFile cs str = do
   matchFile
-    [ (normalise (d </> toFilePath m), c)
+    [ (normalise (d FilePath.</> toFilePath m), c)
     | c <- cs
     , d <- cinfoSrcDirs c
     , m <- cinfoModules c
@@ -2382,10 +2391,10 @@ instance MonadPlus Match where
   mzero = empty
   mplus = matchPlus
 
-(<//>) :: Match a -> Match a -> Match a
-(<//>) = matchPlusShadowing
+(</>) :: Match a -> Match a -> Match a
+(</>) = matchPlusShadowing
 
-infixl 3 <//>
+infixl 3 </>
 
 -- | Combine two matchers. Exact matches are used over inexact matches
 -- but if we have multiple exact, or inexact then the we collect all the

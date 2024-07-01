@@ -216,6 +216,7 @@ import Distribution.Types.Flag
 import Distribution.Utils.NubList
   ( fromNubList
   )
+import Distribution.Utils.Path (makeSymbolicPath)
 import Distribution.Verbosity
 import Distribution.Version
   ( mkVersion
@@ -1042,13 +1043,17 @@ printPlan
 
       showConfigureFlags :: ElaboratedConfiguredPackage -> String
       showConfigureFlags elab =
-        let fullConfigureFlags =
+        let commonFlags =
+              setupHsCommonFlags
+                verbosity
+                Nothing -- omit working directory
+                (makeSymbolicPath "$builddir")
+            fullConfigureFlags =
               setupHsConfigureFlags
                 elaboratedPlan
                 (ReadyPackage elab)
                 elaboratedShared
-                verbosity
-                "$builddir"
+                commonFlags
             -- \| Given a default value @x@ for a flag, nub @Flag x@
             -- into @NoFlag@.  This gives us a tidier command line
             -- rendering.
@@ -1056,7 +1061,7 @@ printPlan
             nubFlag x (Setup.Flag x') | x == x' = Setup.NoFlag
             nubFlag _ f = f
 
-            (tryLibProfiling, tryExeProfiling) =
+            (tryLibProfiling, tryLibProfilingShared, tryExeProfiling) =
               computeEffectiveProfiling fullConfigureFlags
 
             partialConfigureFlags =
@@ -1067,7 +1072,8 @@ printPlan
                     nubFlag tryExeProfiling (configProfExe fullConfigureFlags)
                 , configProfLib =
                     nubFlag tryLibProfiling (configProfLib fullConfigureFlags)
-                    -- Maybe there are more we can add
+                , configProfShared =
+                    nubFlag tryLibProfilingShared (configProfShared fullConfigureFlags)
                 }
          in -- Not necessary to "escape" it, it's just for user output
             unwords . ("" :) $
