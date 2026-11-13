@@ -1,4 +1,5 @@
-{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE RecordWildCards #-}
 
 module Distribution.Client.Init.NonInteractive.Command
   ( genPkgDescription
@@ -51,7 +52,7 @@ import Distribution.Client.Init.Utils
 import Distribution.Client.Types (SourcePackageDb (..))
 import Distribution.ModuleName (ModuleName, components)
 import Distribution.Simple.PackageIndex (InstalledPackageIndex)
-import Distribution.Simple.Setup (Flag (..), fromFlagOrDefault)
+import Distribution.Simple.Setup (fromFlagOrDefault, pattern Flag, pattern NoFlag)
 import Distribution.Solver.Types.PackageIndex (elemByPackageName)
 import Distribution.Types.Dependency (Dependency (..))
 import Distribution.Types.PackageName (PackageName, unPackageName)
@@ -63,19 +64,17 @@ import Language.Haskell.Extension (Extension (..), Language (..))
 
 import qualified Data.Set as Set
 import Distribution.FieldGrammar.Newtypes
-import Distribution.Simple.Compiler
 import System.FilePath (splitDirectories, (</>))
 
 -- | Main driver for interactive prompt code.
 createProject
   :: Interactive m
-  => Compiler
-  -> Verbosity
+  => Verbosity
   -> InstalledPackageIndex
   -> SourcePackageDb
   -> InitFlags
   -> m ProjectSettings
-createProject comp v pkgIx srcDb initFlags = do
+createProject v pkgIx srcDb initFlags = do
   -- The workflow is as follows:
   --
   --  1. Get the package type, supplied as either a program input or
@@ -112,17 +111,17 @@ createProject comp v pkgIx srcDb initFlags = do
           doOverwrite
           isMinimal
           cs
-          v
+          (verbosityFlags v)
           pkgDir
           pkgType
           pkgName
 
   case pkgType of
     Library -> do
-      libTarget <- genLibTarget initFlags comp pkgIx cabalSpec
+      libTarget <- genLibTarget initFlags pkgIx cabalSpec
       testTarget <-
         addLibDepToTest pkgName
-          <$> genTestTarget initFlags comp pkgIx cabalSpec
+          <$> genTestTarget initFlags pkgIx cabalSpec
 
       return $
         ProjectSettings
@@ -132,7 +131,7 @@ createProject comp v pkgIx srcDb initFlags = do
           Nothing
           testTarget
     Executable -> do
-      exeTarget <- genExeTarget initFlags comp pkgIx cabalSpec
+      exeTarget <- genExeTarget initFlags pkgIx cabalSpec
 
       return $
         ProjectSettings
@@ -142,13 +141,13 @@ createProject comp v pkgIx srcDb initFlags = do
           (Just exeTarget)
           Nothing
     LibraryAndExecutable -> do
-      libTarget <- genLibTarget initFlags comp pkgIx cabalSpec
+      libTarget <- genLibTarget initFlags pkgIx cabalSpec
       exeTarget <-
         addLibDepToExe pkgName
-          <$> genExeTarget initFlags comp pkgIx cabalSpec
+          <$> genExeTarget initFlags pkgIx cabalSpec
       testTarget <-
         addLibDepToTest pkgName
-          <$> genTestTarget initFlags comp pkgIx cabalSpec
+          <$> genTestTarget initFlags pkgIx cabalSpec
 
       return $
         ProjectSettings
@@ -158,7 +157,7 @@ createProject comp v pkgIx srcDb initFlags = do
           (Just exeTarget)
           testTarget
     TestSuite -> do
-      testTarget <- genTestTarget initFlags comp pkgIx cabalSpec
+      testTarget <- genTestTarget initFlags pkgIx cabalSpec
 
       return $
         ProjectSettings
@@ -173,80 +172,74 @@ genPkgDescription
   => InitFlags
   -> SourcePackageDb
   -> m PkgDescription
-genPkgDescription flags srcDb =
-  PkgDescription
-    <$> cabalVersionHeuristics flags
-    <*> packageNameHeuristics srcDb flags
-    <*> versionHeuristics flags
-    <*> licenseHeuristics flags
-    <*> authorHeuristics flags
-    <*> emailHeuristics flags
-    <*> homepageHeuristics flags
-    <*> synopsisHeuristics flags
-    <*> categoryHeuristics flags
-    <*> getExtraSrcFiles flags
-    <*> extraDocFileHeuristics flags
+genPkgDescription flags srcDb = do
+  _pkgCabalVersion <- cabalVersionHeuristics flags
+  _pkgName <- packageNameHeuristics srcDb flags
+  _pkgVersion <- versionHeuristics flags
+  _pkgLicense <- licenseHeuristics flags
+  _pkgAuthor <- authorHeuristics flags
+  _pkgEmail <- emailHeuristics flags
+  _pkgHomePage <- homepageHeuristics flags
+  _pkgSynopsis <- synopsisHeuristics flags
+  _pkgCategory <- categoryHeuristics flags
+  _pkgExtraSrcFiles <- getExtraSrcFiles flags
+  _pkgExtraDocFiles <- extraDocFileHeuristics flags
+  pure PkgDescription{..}
 
 genLibTarget
   :: Interactive m
   => InitFlags
-  -> Compiler
   -> InstalledPackageIndex
   -> CabalSpecVersion
   -> m LibTarget
-genLibTarget flags comp pkgs v = do
-  srcDirs <- srcDirsHeuristics flags
-  let srcDir = fromMaybe defaultSourceDir $ safeHead srcDirs
-  LibTarget srcDirs
-    <$> languageHeuristics flags comp
-    <*> exposedModulesHeuristics flags
-    <*> libOtherModulesHeuristics flags
-    <*> otherExtsHeuristics flags srcDir
-    <*> dependenciesHeuristics flags srcDir pkgs
-    <*> buildToolsHeuristics flags srcDir v
+genLibTarget flags pkgs v = do
+  _libSourceDirs <- srcDirsHeuristics flags
+  let srcDir = fromMaybe defaultSourceDir $ safeHead _libSourceDirs
+  _libLanguage <- languageHeuristics flags
+  _libExposedModules <- exposedModulesHeuristics flags
+  _libOtherModules <- libOtherModulesHeuristics flags
+  _libOtherExts <- otherExtsHeuristics flags srcDir
+  _libDependencies <- dependenciesHeuristics flags srcDir pkgs
+  _libBuildTools <- buildToolsHeuristics flags srcDir v
+  pure LibTarget{..}
 
 genExeTarget
   :: Interactive m
   => InitFlags
-  -> Compiler
   -> InstalledPackageIndex
   -> CabalSpecVersion
   -> m ExeTarget
-genExeTarget flags comp pkgs v = do
-  appDirs <- appDirsHeuristics flags
-  let appDir = fromMaybe defaultApplicationDir $ safeHead appDirs
-  ExeTarget
-    <$> mainFileHeuristics flags
-    <*> pure appDirs
-    <*> languageHeuristics flags comp
-    <*> exeOtherModulesHeuristics flags
-    <*> otherExtsHeuristics flags appDir
-    <*> dependenciesHeuristics flags appDir pkgs
-    <*> buildToolsHeuristics flags appDir v
+genExeTarget flags pkgs v = do
+  _exeApplicationDirs <- appDirsHeuristics flags
+  let appDir = fromMaybe defaultApplicationDir $ safeHead _exeApplicationDirs
+  _exeMainIs <- mainFileHeuristics flags
+  _exeLanguage <- languageHeuristics flags
+  _exeOtherModules <- exeOtherModulesHeuristics flags
+  _exeOtherExts <- otherExtsHeuristics flags appDir
+  _exeDependencies <- dependenciesHeuristics flags appDir pkgs
+  _exeBuildTools <- buildToolsHeuristics flags appDir v
+  pure ExeTarget{..}
 
 genTestTarget
   :: Interactive m
   => InitFlags
-  -> Compiler
   -> InstalledPackageIndex
   -> CabalSpecVersion
   -> m (Maybe TestTarget)
-genTestTarget flags comp pkgs v = do
+genTestTarget flags pkgs v = do
   initialized <- initializeTestSuiteHeuristics flags
-  testDirs' <- testDirsHeuristics flags
-  let testDir = fromMaybe defaultTestDir $ safeHead testDirs'
+  _testDirs <- testDirsHeuristics flags
+  let testDir = fromMaybe defaultTestDir $ safeHead _testDirs
   if not initialized
     then return Nothing
-    else
-      fmap Just $
-        TestTarget
-          <$> testMainHeuristics flags
-          <*> pure testDirs'
-          <*> languageHeuristics flags comp
-          <*> testOtherModulesHeuristics flags
-          <*> otherExtsHeuristics flags testDir
-          <*> dependenciesHeuristics flags testDir pkgs
-          <*> buildToolsHeuristics flags testDir v
+    else do
+      _testMainIs <- testMainHeuristics flags
+      _testLanguage <- languageHeuristics flags
+      _testOtherModules <- testOtherModulesHeuristics flags
+      _testOtherExts <- otherExtsHeuristics flags testDir
+      _testDependencies <- dependenciesHeuristics flags testDir pkgs
+      _testBuildTools <- buildToolsHeuristics flags testDir v
+      pure $ Just TestTarget{..}
 
 -- -------------------------------------------------------------------- --
 -- Get flags from init config
@@ -361,8 +354,8 @@ testDirsHeuristics :: Interactive m => InitFlags -> m [String]
 testDirsHeuristics flags = getTestDirs flags $ return [defaultTestDir]
 
 -- | Ask for the Haskell base language of the package.
-languageHeuristics :: Interactive m => InitFlags -> Compiler -> m Language
-languageHeuristics flags comp = getLanguage flags $ guessLanguage comp
+languageHeuristics :: Interactive m => InitFlags -> m Language
+languageHeuristics flags = getLanguage flags $ return defaultLanguage
 
 -- | Ask whether to generate explanatory comments.
 noCommentsHeuristics :: Interactive m => InitFlags -> m Bool
@@ -493,11 +486,12 @@ dependenciesHeuristics flags fp pkgIx = getDependencies flags $ do
         Flag x -> x
         NoFlag -> map moduleName sources
 
-      groupedDeps = concatMap (\s -> map (\i -> (moduleName s, i)) (imports s)) sources
+      groupedDeps = concatMap (\s -> map (moduleName s,) (imports s)) sources
       filteredDeps = filter ((`notElem` mods) . snd) groupedDeps
       preludeNub = nubBy (\a b -> snd a == snd b) $ (fromString "Prelude", fromString "Prelude") : filteredDeps
+      verbosity = mkVerbosity defaultVerbosityHandles (fromFlagOrDefault normal $ initVerbosity flags)
 
-  retrieveDependencies (fromFlagOrDefault normal $ initVerbosity flags) flags preludeNub pkgIx
+  retrieveDependencies verbosity flags preludeNub pkgIx
 
 -- | Retrieve the list of extensions
 otherExtsHeuristics :: Interactive m => InitFlags -> FilePath -> m [Extension]

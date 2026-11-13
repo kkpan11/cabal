@@ -1,6 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-
 module Distribution.Types.PkgconfigVersionRange
   ( PkgconfigVersionRange (..)
   , anyPkgconfigVersion
@@ -37,11 +34,11 @@ data PkgconfigVersionRange
   | PcOrEarlierVersion PkgconfigVersion -- =< version
   | PcUnionVersionRanges PkgconfigVersionRange PkgconfigVersionRange
   | PcIntersectVersionRanges PkgconfigVersionRange PkgconfigVersionRange
-  deriving (Generic, Read, Show, Eq, Ord, Typeable, Data)
+  deriving (Generic, Read, Show, Eq, Ord, Data)
 
 instance Binary PkgconfigVersionRange
 instance Structured PkgconfigVersionRange
-instance NFData PkgconfigVersionRange where rnf = genericRnf
+instance NFData PkgconfigVersionRange
 
 instance Pretty PkgconfigVersionRange where
   pretty = pp 0

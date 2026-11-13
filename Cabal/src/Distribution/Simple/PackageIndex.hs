@@ -1,10 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE FlexibleInstances #-}
-
------------------------------------------------------------------------------
-
 -- |
 -- Module      :  Distribution.Simple.PackageIndex
 -- Copyright   :  (c) David Himmelstrup 2005,
@@ -68,6 +61,7 @@ module Distribution.Simple.PackageIndex
   , lookupSourcePackageId
   , lookupPackageId
   , lookupPackageName
+  , lookupInternalPackageName
   , lookupDependency
   , lookupInternalDependency
 
@@ -93,6 +87,10 @@ module Distribution.Simple.PackageIndex
   , dependencyCycles
   , dependencyGraph
   , moduleNameIndex
+
+    -- ** Filters on lookup results
+  , eligibleDependencies
+  , matchingDependencies
   ) where
 
 import qualified Data.Map.Strict as Map
@@ -142,7 +140,7 @@ data PackageIndex a = PackageIndex
     -- preserved. See #1463 for discussion.
     packageIdIndex :: !(Map (PackageName, LibraryName) (Map Version [a]))
   }
-  deriving (Eq, Generic, Show, Read, Typeable)
+  deriving (Eq, Generic, Show, Read)
 
 instance Binary a => Binary (PackageIndex a)
 instance Structured a => Structured (PackageIndex a)
@@ -153,11 +151,10 @@ type InstalledPackageIndex = PackageIndex IPI.InstalledPackageInfo
 
 instance Monoid (PackageIndex IPI.InstalledPackageInfo) where
   mempty = PackageIndex Map.empty Map.empty
-  mappend = (<>)
 
-  -- save one mappend with empty in the common case:
+  -- save one (<>) with empty in the common case:
   mconcat [] = mempty
-  mconcat xs = Prelude.foldr1 mappend xs
+  mconcat xs = Prelude.foldr1 (<>) xs
 
 instance Semigroup (PackageIndex IPI.InstalledPackageInfo) where
   (<>) = merge
@@ -180,7 +177,7 @@ invariant (PackageIndex pids pnames) =
                 all
                   (\g -> length g == 1)
                   (groupBy (equating installedUnitId) pinsts')
-        , pinst <- assert pinstsOk $ pinsts'
+        , pinst <- assert pinstsOk pinsts'
         , let pinstOk =
                 packageName pinst == pname
                   && packageVersion pinst == pver
@@ -272,7 +269,7 @@ merge (PackageIndex pids1 pnames1) (PackageIndex pids2 pnames2) =
 
 -- | Inserts a single package into the index.
 --
--- This is equivalent to (but slightly quicker than) using 'mappend' or
+-- This is equivalent to (but slightly quicker than) using '(<>)' or
 -- 'merge' with a singleton index.
 insert :: IPI.InstalledPackageInfo -> InstalledPackageIndex -> InstalledPackageIndex
 insert pkg (PackageIndex pids pnames) =
@@ -365,8 +362,8 @@ deletePackageName name original@(PackageIndex pids pnames) =
 -- | Removes all packages satisfying this dependency from the index.
 --
 deleteDependency :: Dependency -> PackageIndex -> PackageIndex
-deleteDependency (Dependency name verstionRange) =
-  delete' name (\pkg -> packageVersion pkg `withinRange` verstionRange)
+deleteDependency (Dependency name versionRange) =
+  delete' name (\pkg -> packageVersion pkg `withinRange` versionRange)
 -}
 
 --
@@ -455,9 +452,7 @@ lookupSourcePackageId index pkgid =
   -- Do not lookup internal libraries
   case Map.lookup (packageName pkgid, LMainLibName) (packageIdIndex index) of
     Nothing -> []
-    Just pvers -> case Map.lookup (packageVersion pkgid) pvers of
-      Nothing -> []
-      Just pkgs -> pkgs -- in preference order
+    Just pvers -> fromMaybe [] (Map.lookup (packageVersion pkgid) pvers) -- in preference order
 
 -- | Convenient alias of 'lookupSourcePackageId', but assuming only
 -- one package per package ID.
@@ -474,9 +469,18 @@ lookupPackageName
   -> [(Version, [a])]
 lookupPackageName index name =
   -- Do not match internal libraries
-  case Map.lookup (name, LMainLibName) (packageIdIndex index) of
-    Nothing -> []
-    Just pvers -> Map.toList pvers
+  lookupInternalPackageName index name LMainLibName
+
+-- | Does a lookup by source package name and library name.
+--
+-- Also looks up internal packages.
+lookupInternalPackageName
+  :: PackageIndex a
+  -> PackageName
+  -> LibraryName
+  -> [(Version, [a])]
+lookupInternalPackageName index name library =
+  maybe [] Map.toList (Map.lookup (name, library) (packageIdIndex index))
 
 -- | Does a lookup by source package name and a range of versions.
 --
@@ -509,22 +513,45 @@ lookupInternalDependency
   -> LibraryName
   -> [(Version, [IPI.InstalledPackageInfo])]
 lookupInternalDependency index name versionRange libn =
-  case Map.lookup (name, libn) (packageIdIndex index) of
-    Nothing -> []
-    Just pvers ->
-      [ (ver, pkgs')
-      | (ver, pkgs) <- Map.toList pvers
-      , ver `withinRange` versionRange
-      , let pkgs' = filter eligible pkgs
-      , -- Enforce the invariant
-      not (null pkgs')
-      ]
+  matchingDependencies versionRange $
+    lookupInternalPackageName index name libn
+
+-- | Filter a set of installed packages to ones eligible as dependencies.
+--
+-- When we select for dependencies, we ONLY want to pick up indefinite
+-- packages, or packages with no instantiations.  We'll do mix-in linking to
+-- improve any such package into an instantiated one later.
+--
+-- INVARIANT: List of eligible 'IPI.InstalledPackageInfo' is non-empty.
+eligibleDependencies
+  :: [(Version, [IPI.InstalledPackageInfo])]
+  -> [(Version, [IPI.InstalledPackageInfo])]
+eligibleDependencies versions =
+  [ (ver, pkgs')
+  | (ver, pkgs) <- versions
+  , let pkgs' = filter eligible pkgs
+  , -- Enforce the invariant
+  not (null pkgs')
+  ]
   where
-    -- When we select for dependencies, we ONLY want to pick up indefinite
-    -- packages, or packages with no instantiations.  We'll do mix-in
-    -- linking to improve any such package into an instantiated one
-    -- later.
     eligible pkg = IPI.indefinite pkg || null (IPI.instantiatedWith pkg)
+
+-- | Get eligible dependencies from a list of versions.
+--
+-- This can be used to filter the output of 'lookupPackageName' or
+-- 'lookupInternalPackageName'.
+--
+-- INVARIANT: List of eligible 'IPI.InstalledPackageInfo' is non-empty.
+matchingDependencies
+  :: VersionRange
+  -> [(Version, [IPI.InstalledPackageInfo])]
+  -> [(Version, [IPI.InstalledPackageInfo])]
+matchingDependencies versionRange versions =
+  let eligibleVersions = eligibleDependencies versions
+   in [ (ver, pkgs)
+      | (ver, pkgs) <- eligibleVersions
+      , ver `withinRange` versionRange
+      ]
 
 --
 
@@ -629,7 +656,7 @@ dependencyClosure
   :: InstalledPackageIndex
   -> [UnitId]
   -> Either
-      (InstalledPackageIndex)
+      InstalledPackageIndex
       [(IPI.InstalledPackageInfo, [UnitId])]
 dependencyClosure index pkgids0 = case closure mempty [] pkgids0 of
   (completed, []) -> Left completed
@@ -696,7 +723,7 @@ dependencyGraph index = (graph, vertex_to_pkg, id_to_vertex)
     graph =
       Array.listArray
         bounds
-        [ [v | Just v <- map id_to_vertex (installedDepends pkg)]
+        [ mapMaybe id_to_vertex (installedDepends pkg)
         | pkg <- pkgs
         ]
 

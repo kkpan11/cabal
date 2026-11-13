@@ -9,6 +9,7 @@ module UnitTests.Distribution.Solver.Modular.DSL.TestCaseUtils
   , minimizeConflictSet
   , independentGoals
   , preferOldest
+  , preferLatest
   , allowBootLibInstalls
   , onlyConstrained
   , disableBackjumping
@@ -18,6 +19,7 @@ module UnitTests.Distribution.Solver.Modular.DSL.TestCaseUtils
   , preferences
   , setVerbose
   , enableAllTests
+  , wiredInUnitIds
   , solverSuccess
   , solverFailure
   , anySolverFailure
@@ -33,6 +35,7 @@ import Distribution.Solver.Compat.Prelude
 import Prelude ()
 
 import Data.List (elemIndex)
+import GHC.Stack (withFrozenCallStack)
 
 -- test-framework
 import Test.Tasty as TF
@@ -50,6 +53,7 @@ import qualified Distribution.Solver.Types.PackagePath as P
 import Distribution.Solver.Types.PkgConfigDb (PkgConfigDb (..), pkgConfigDbFromList)
 import Distribution.Solver.Types.Settings
 import Distribution.Solver.Types.Variable
+import Distribution.Types.UnitId (UnitId, mkUnitId)
 import UnitTests.Distribution.Solver.Modular.DSL
 import UnitTests.Options
 
@@ -71,7 +75,11 @@ independentGoals test = test{testIndepGoals = IndependentGoals True}
 
 -- | Combinator to turn on --prefer-oldest
 preferOldest :: SolverTest -> SolverTest
-preferOldest test = test{testPreferOldest = PreferOldest True}
+preferOldest test = test{testPreferVersion = PreferOldest}
+
+-- | Combinator to turn on --prefer-version=latest
+preferLatest :: SolverTest -> SolverTest
+preferLatest test = test{testPreferVersion = PreferLatest}
 
 allowBootLibInstalls :: SolverTest -> SolverTest
 allowBootLibInstalls test =
@@ -106,6 +114,16 @@ setVerbose test = test{testVerbosity = verbose}
 enableAllTests :: SolverTest -> SolverTest
 enableAllTests test = test{testEnableAllTests = EnableAllTests True}
 
+wiredInUnitIds :: SolverTest -> SolverTest
+wiredInUnitIds test =
+  test
+    { testWiredInUnitIds =
+        Just
+          [ (C.mkPackageName "ghc-internal", mkUnitId "ghc-internal-1")
+          , (C.mkPackageName "ghc", mkUnitId "ghc-1")
+          ]
+    }
+
 {-------------------------------------------------------------------------------
   Solver tests
 -------------------------------------------------------------------------------}
@@ -118,7 +136,7 @@ data SolverTest = SolverTest
   , testFineGrainedConflicts :: FineGrainedConflicts
   , testMinimizeConflictSet :: MinimizeConflictSet
   , testIndepGoals :: IndependentGoals
-  , testPreferOldest :: PreferOldest
+  , testPreferVersion :: PreferVersion
   , testAllowBootLibInstalls :: AllowBootLibInstalls
   , testOnlyConstrained :: OnlyConstrained
   , testEnableBackjumping :: EnableBackjumping
@@ -126,11 +144,12 @@ data SolverTest = SolverTest
   , testGoalOrder :: Maybe [ExampleVar]
   , testConstraints :: [ExConstraint]
   , testSoftConstraints :: [ExPreference]
-  , testVerbosity :: Verbosity
+  , testVerbosity :: VerbosityFlags
   , testDb :: ExampleDb
   , testSupportedExts :: Maybe [Extension]
   , testSupportedLangs :: Maybe [Language]
-  , testPkgConfigDb :: PkgConfigDb
+  , testWiredInUnitIds :: Maybe [(C.PackageName, UnitId)]
+  , testPkgConfigDb :: Maybe PkgConfigDb
   , testEnableAllTests :: EnableAllTests
   }
 
@@ -221,7 +240,7 @@ mkTestExtLangPC exts langs mPkgConfigDb db label targets result =
     , testFineGrainedConflicts = FineGrainedConflicts True
     , testMinimizeConflictSet = MinimizeConflictSet False
     , testIndepGoals = IndependentGoals False
-    , testPreferOldest = PreferOldest False
+    , testPreferVersion = PreferInstalledOrLatest
     , testAllowBootLibInstalls = AllowBootLibInstalls False
     , testOnlyConstrained = OnlyConstrainedNone
     , testEnableBackjumping = EnableBackjumping True
@@ -233,18 +252,20 @@ mkTestExtLangPC exts langs mPkgConfigDb db label targets result =
     , testDb = db
     , testSupportedExts = exts
     , testSupportedLangs = langs
-    , testPkgConfigDb = maybe NoPkgConfigDb pkgConfigDbFromList mPkgConfigDb
+    , testWiredInUnitIds = Nothing
+    , testPkgConfigDb = pkgConfigDbFromList <$> mPkgConfigDb
     , testEnableAllTests = EnableAllTests False
     }
 
 runTest :: SolverTest -> TF.TestTree
-runTest SolverTest{..} = askOption $ \(OptionShowSolverLog showSolverLog) ->
+runTest SolverTest{..} = withFrozenCallStack $ askOption $ \(OptionShowSolverLog showSolverLog) ->
   testCase testLabel $ do
     let progress =
           exResolve
             testDb
             testSupportedExts
             testSupportedLangs
+            testWiredInUnitIds
             testPkgConfigDb
             testTargets
             testMaxBackjumps
@@ -252,7 +273,7 @@ runTest SolverTest{..} = askOption $ \(OptionShowSolverLog showSolverLog) ->
             testFineGrainedConflicts
             testMinimizeConflictSet
             testIndepGoals
-            testPreferOldest
+            testPreferVersion
             (ReorderGoals False)
             testAllowBootLibInstalls
             testOnlyConstrained
@@ -261,7 +282,7 @@ runTest SolverTest{..} = askOption $ \(OptionShowSolverLog showSolverLog) ->
             (sortGoals <$> testGoalOrder)
             testConstraints
             testSoftConstraints
-            testVerbosity
+            (mkVerbosity defaultVerbosityHandles testVerbosity)
             testEnableAllTests
         printMsg msg = when showSolverLog $ putStrLn msg
         msgs = foldProgress (:) (const []) (const []) progress

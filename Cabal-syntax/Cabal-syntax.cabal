@@ -1,7 +1,7 @@
-cabal-version: 2.2
+cabal-version: 3.6
 name:          Cabal-syntax
-version:       3.11.0.0
-copyright:     2003-2024, Cabal Development Team (see AUTHORS file)
+version:       3.19.0.0
+copyright:     2003-2026, Cabal Development Team (see AUTHORS file)
 license:       BSD-3-Clause
 license-file:  LICENSE
 author:        Cabal Development Team <cabal-devel@haskell.org>
@@ -24,39 +24,45 @@ source-repository head
   subdir:   Cabal-syntax
 
 library
-  default-language: Haskell2010
+  default-language: GHC2021
+  -- Disabling ImportQualifiedPost, otherwise fourmolu jumps ahead to apply it everywhere
+  default-extensions: NoImportQualifiedPost
   hs-source-dirs: src
 
   build-depends:
-    array      >= 0.4.0.1  && < 0.6,
-    base       >= 4.9      && < 5,
-    binary     >= 0.7      && < 0.9,
-    bytestring >= 0.10.0.0 && < 0.13,
-    containers >= 0.5.0.0  && < 0.8,
-    deepseq    >= 1.3.0.1  && < 1.6,
-    directory  >= 1.2      && < 1.4,
-    filepath   >= 1.3.0.1  && < 1.6,
-    mtl        >= 2.1      && < 2.4,
-    parsec     >= 3.1.13.0 && < 3.2,
-    pretty     >= 1.1.1    && < 1.2,
-    text       (>= 1.2.3.0 && < 1.3) || (>= 2.0 && < 2.2),
-    time       >= 1.4.0.1  && < 1.13,
+    , array      >= 0.4.0.1  && < 0.6
+    , base       >= 4.18     && < 5
+    , binary     >= 0.8.1    && < 0.9
+    , bytestring >= 0.10.4.0 && < 0.13
+    , containers >= 0.5.2    && < 0.9
+    , deepseq    >= 1.4      && < 1.7
+    , directory  >= 1.3.8.5  && < 1.4
+    , filepath   >= 1.4.301  && < 1.6
+    , mtl        >= 2.1      && < 2.4
+    , parsec     >= 3.1.13.0 && < 3.2
+    , pretty     >= 1.1.1    && < 1.2
+    , text       >= 2.0.2    && < 2.2
+    , time       >= 1.4.0.1  && < 1.17
     -- transformers-0.4.0.0 doesn't have record syntax e.g. for Identity
     -- See also https://github.com/ekmett/transformers-compat/issues/35
-    transformers (>= 0.3      && < 0.4) || (>=0.4.1.0 && <0.7)
+    , transformers (>= 0.3      && < 0.4) || (>=0.4.1.0 && <0.7)
 
-  ghc-options: -Wall -fno-ignore-asserts -fwarn-tabs -fwarn-incomplete-uni-patterns -fwarn-incomplete-record-updates
-
-  if impl(ghc >= 8.0)
-    ghc-options: -Wcompat -Wnoncanonical-monad-instances
+  ghc-options:
+    -Wall
+    -fno-ignore-asserts
+    -Wtabs
+    -Wincomplete-uni-patterns
+    -Wincomplete-record-updates
+    -Wno-unticked-promoted-constructors
+    -Wcompat
+    -Wnoncanonical-monad-instances
 
   if impl(ghc >= 8.0) && impl(ghc < 8.8)
     ghc-options: -Wnoncanonical-monadfail-instances
 
-  if impl(ghc >= 8.10)
-    ghc-options: -Wunused-packages
-
-  build-tool-depends: alex:alex
+  build-tool-depends:
+    -- https://github.com/haskell/alex/issues/288
+    alex:alex < 3.5.4.1 || > 3.5.4.1
 
   exposed-modules:
     Distribution.Backpack
@@ -67,13 +73,9 @@ library
     Distribution.Compat.Exception
     Distribution.Compat.Graph
     Distribution.Compat.Lens
-    Distribution.Compat.MonadFail
-    Distribution.Compat.Newtype
     Distribution.Compat.NonEmptySet
     Distribution.Compat.Parsing
     Distribution.Compat.Prelude
-    Distribution.Compat.Semigroup
-    Distribution.Compat.Typeable
     Distribution.Compiler
     Distribution.FieldGrammar
     Distribution.FieldGrammar.Class
@@ -105,6 +107,7 @@ library
     Distribution.Parsec.FieldLineStream
     Distribution.Parsec.Position
     Distribution.Parsec.Warning
+    Distribution.Parsec.Source
     Distribution.Pretty
     Distribution.SPDX
     Distribution.SPDX.License
@@ -133,6 +136,7 @@ library
     Distribution.Types.ConfVar
     Distribution.Types.Dependency
     Distribution.Types.DependencyMap
+    Distribution.Types.DependencySatisfaction
     Distribution.Types.ExeDependency
     Distribution.Types.Executable
     Distribution.Types.Executable.Lens
@@ -156,6 +160,8 @@ library
     Distribution.Types.Library.Lens
     Distribution.Types.LibraryName
     Distribution.Types.LibraryVisibility
+    Distribution.Types.MissingDependency
+    Distribution.Types.MissingDependencyReason
     Distribution.Types.Mixin
     Distribution.Types.Module
     Distribution.Types.ModuleReexport

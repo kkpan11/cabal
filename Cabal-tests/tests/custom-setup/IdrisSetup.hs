@@ -45,14 +45,11 @@ module IdrisSetup (main) where
 # define MIN_VERSION_Cabal(x,y,z) 0
 #endif
 
-#if !defined(MIN_VERSION_base)
-# define MIN_VERSION_base(x,y,z) 0
-#endif
-
 import Control.Monad
 import Data.IORef
 import Control.Exception (SomeException, catch)
 import Data.String (fromString)
+import qualified Data.Text as T
 
 import Distribution.Simple
 import Distribution.Simple.BuildPaths
@@ -60,11 +57,16 @@ import Distribution.Simple.InstallDirs as I
 import Distribution.Simple.LocalBuildInfo as L
 import qualified Distribution.Simple.Setup as S
 import qualified Distribution.Simple.Program as P
+import qualified Distribution.Verbosity as V
 import Distribution.Simple.Utils (createDirectoryIfMissingVerbose, notice, installOrdinaryFiles)
 import Distribution.Simple.Utils (rewriteFileEx)
 import Distribution.Compiler
 import Distribution.PackageDescription
 import Distribution.Text
+#if MIN_VERSION_Cabal(3,11,0)
+import Distribution.Utils.Path
+  (getSymbolicPath, makeSymbolicPath)
+#endif
 
 import System.Environment
 import System.Exit
@@ -81,11 +83,6 @@ configConfigurationsFlags = unFlagAssignment . S.configConfigurationsFlags
 configConfigurationsFlags = S.configConfigurationsFlags
 #endif
 
-#if !MIN_VERSION_base(4,6,0)
-lookupEnv :: String -> IO (Maybe String)
-lookupEnv v = lookup v `fmap` getEnvironment
-#endif
-
 -- After Idris is built, we need to check and install the prelude and other libs
 
 -- -----------------------------------------------------------------------------
@@ -93,11 +90,18 @@ lookupEnv v = lookup v `fmap` getEnvironment
 
 -- make on mingw32 expects unix style separators
 #ifdef mingw32_HOST_OS
-(<//>) = (Px.</>)
-idrisCmd local = Px.joinPath $ splitDirectories $ ".." <//> ".." <//> buildDir local <//> "idris" <//> "idris"
+idrisCmd local = Px.joinPath $ splitDirectories $ ".." Px.</> ".." Px.</> bd Px.</> "idris" Px.</> "idris"
 #else
-idrisCmd local = ".." </> ".." </>  buildDir local </>  "idris" </>  "idris"
+idrisCmd local = ".." </> ".." </> bd </> "idris" </> "idris"
 #endif
+{- FOURMOLU_DISABLE -}
+  where
+    bd =
+#if MIN_VERSION_Cabal(3,11,0)
+        getSymbolicPath $
+#endif
+        buildDir local
+{- FOURMOLU_ENABLE -}
 
 -- -----------------------------------------------------------------------------
 -- Make Commands
@@ -109,11 +113,14 @@ mymake = "gmake"
 #else
 mymake = "make"
 #endif
-make verbosity =
-   P.runProgramInvocation verbosity . P.simpleProgramInvocation mymake
+
+make verbosity dir args =
+  P.runProgramInvocation verbosity $ P.simpleProgramInvocation mymake $
+    [ "-C", dir ] ++ args
 
 #ifdef mingw32_HOST_OS
-windres verbosity = P.runProgramInvocation verbosity . P.simpleProgramInvocation "windres"
+windres verbosity =
+  P.runProgramInvocation verbosity . P.simpleProgramInvocation "windres"
 #endif
 -- -----------------------------------------------------------------------------
 -- Flags
@@ -151,16 +158,30 @@ mkFlagName :: String -> FlagName
 mkFlagName = FlagName
 #endif
 
+mkVerbosity
+  ::
+#if MIN_VERSION_Cabal(3,17,0)
+    S.Flag V.VerbosityFlags
+#else
+    S.Flag V.Verbosity
+#endif
+  -> V.Verbosity
+mkVerbosity v =
+#if MIN_VERSION_Cabal(3,17,0)
+  V.mkVerbosity V.defaultVerbosityHandles $
+#endif
+  S.fromFlag v
+
 -- -----------------------------------------------------------------------------
 -- Clean
 
 idrisClean _ flags _ _ = cleanStdLib
    where
-      verbosity = S.fromFlag $ S.cleanVerbosity flags
+      verbosity = mkVerbosity $ S.cleanVerbosity flags
 
       cleanStdLib = makeClean "libs"
 
-      makeClean dir = make verbosity [ "-C", dir, "clean", "IDRIS=idris" ]
+      makeClean dir = make verbosity dir [ "clean", "IDRIS=idris" ]
 
 -- -----------------------------------------------------------------------------
 -- Configure
@@ -220,10 +241,15 @@ generateToolchainModule verbosity srcDir toolDir = do
     createDirectoryIfMissingVerbose verbosity True srcDir
     rewriteFileEx verbosity toolPath (commonContent ++ toolContent)
 
+{- FOURMOLU_DISABLE -}
 idrisConfigure _ flags pkgdesc local = do
     configureRTS
     withLibLBI pkgdesc local $ \_ libcfg -> do
-      let libAutogenDir = autogenComponentModulesDir local libcfg
+      let libAutogenDir =
+#if MIN_VERSION_Cabal(3,11,0)
+            getSymbolicPath $
+#endif
+            autogenComponentModulesDir local libcfg
       generateVersionModule verbosity libAutogenDir (isRelease (configFlags local))
       if isFreestanding $ configFlags local
           then do
@@ -237,18 +263,19 @@ idrisConfigure _ flags pkgdesc local = do
           else
                   generateToolchainModule verbosity libAutogenDir Nothing
     where
-      verbosity = S.fromFlag $ S.configVerbosity flags
+      verbosity = mkVerbosity $ S.configVerbosity flags
       version   = pkgVersion . package $ localPkgDescr local
 
       -- This is a hack. I don't know how to tell cabal that a data file needs
       -- installing but shouldn't be in the distribution. And it won't make the
       -- distribution if it's not there, so instead I just delete
       -- the file after configure.
-      configureRTS = make verbosity ["-C", "rts", "clean"]
+      configureRTS = make verbosity "rts" ["clean"]
 
 #if !(MIN_VERSION_Cabal(2,0,0))
       autogenComponentModulesDir lbi _ = autogenModulesDir lbi
 #endif
+{- FOURMOLU_ENABLE -}
 
 #if !MIN_VERSION_Cabal(3,0,0)
 idrisPreSDist args flags = do
@@ -275,8 +302,8 @@ idrisPostSDist args flags desc lbi = do
                               let targetFile = "src" </> "Target_idris" Px.<.> "hs"
                               putStrLn $ "Removing generated modules:\n "
                                         ++ file ++ "\n" ++ targetFile
-                              removeFile file
-                              removeFile targetFile)
+                              removeFileForcible file
+                              removeFileForcible targetFile)
              (\e -> let e' = (e :: SomeException) in return ())
   postSDist simpleUserHooks args flags desc lbi
 #endif
@@ -287,17 +314,24 @@ idrisPostSDist args flags desc lbi = do
 getVersion :: Args -> S.BuildFlags -> IO HookedBuildInfo
 getVersion args flags = do
       hash <- gitHash
-      let buildinfo = (emptyBuildInfo { cppOptions = ["-DVERSION="++hash] }) :: BuildInfo
+      let buildinfo = (emptyBuildInfo { cppOptions = [T.pack $ "-DVERSION=" ++ hash] }) :: BuildInfo
       return (Just buildinfo, [])
 
 idrisPreBuild args flags = do
 #ifdef mingw32_HOST_OS
         createDirectoryIfMissingVerbose verbosity True dir
         windres verbosity ["icons/idris_icon.rc","-o", dir++"/idris_icon.o"]
-        return (Nothing, [(fromString "idris", emptyBuildInfo { ldOptions = [dir ++ "/idris_icon.o"] })])
+        return (Nothing, [(fromString "idris", emptyBuildInfo { ldOptions = [T.pack $ dir ++ "/idris_icon.o"] })])
      where
-        verbosity = S.fromFlag $ S.buildVerbosity flags
-        dir = S.fromFlagOrDefault "dist" $ S.buildDistPref flags
+        verbosity = mkVerbosity $ S.buildVerbosity flags
+
+        dir =
+#if MIN_VERSION_Cabal(3,11,0)
+           getSymbolicPath $ S.fromFlagOrDefault (makeSymbolicPath "dist") $
+#else
+           S.fromFlagOrDefault "dist" $
+#endif
+           S.buildDistPref flags
 #else
         return (Nothing, [])
 #endif
@@ -307,16 +341,15 @@ idrisBuild _ flags _ local
         else do buildStdLib
                 buildRTS
    where
-      verbosity = S.fromFlag $ S.buildVerbosity flags
+      verbosity = mkVerbosity $ S.buildVerbosity flags
 
       buildStdLib = do
             putStrLn "Building libraries..."
             makeBuild "libs"
          where
-            makeBuild dir = make verbosity [ "-C", dir, "build" , "IDRIS=" ++ idrisCmd local]
+            makeBuild dir = make verbosity dir ["IDRIS=" ++ idrisCmd local]
 
-      buildRTS = make verbosity (["-C", "rts", "build"] ++
-                                   gmpflag (usesGMP (configFlags local)))
+      buildRTS = make verbosity "rts" $ gmpflag (usesGMP (configFlags local))
 
       gmpflag False = []
       gmpflag True = ["GMP=-DIDRIS_GMP"]
@@ -348,7 +381,7 @@ idrisInstall verbosity copy pkg local
          installOrdinaryFiles verbosity mandest [("man", "idris.1")]
 
       makeInstall src target =
-         make verbosity [ "-C", src, "install" , "TARGET=" ++ target, "IDRIS=" ++ idrisCmd local]
+         make verbosity src [ "install", "TARGET=" ++ target, "IDRIS=" ++ idrisCmd local]
 
 -- -----------------------------------------------------------------------------
 -- Test
@@ -359,8 +392,13 @@ idrisInstall verbosity copy pkg local
 -- We want it to be the install directory where we put the idris libraries.
 fixPkg pkg target = pkg { dataDir = target }
 
+{- FOURMOLU_DISABLE -}
 idrisTestHook args pkg local hooks flags = do
-  let target = datadir $ L.absoluteInstallDirs pkg local NoCopyDest
+  let target =
+#if MIN_VERSION_Cabal(3,11,0)
+        makeSymbolicPath $
+#endif
+        datadir $ L.absoluteInstallDirs pkg local NoCopyDest
   testHook simpleUserHooks args (fixPkg pkg target) local hooks flags
 
 -- -----------------------------------------------------------------------------
@@ -374,10 +412,10 @@ main = defaultMainWithHooks $ simpleUserHooks
    , preBuild = idrisPreBuild
    , postBuild = idrisBuild
    , postCopy = \_ flags pkg local ->
-                  idrisInstall (S.fromFlag $ S.copyVerbosity flags)
+                  idrisInstall (mkVerbosity $ S.copyVerbosity flags)
                                (S.fromFlag $ S.copyDest flags) pkg local
    , postInst = \_ flags pkg local ->
-                  idrisInstall (S.fromFlag $ S.installVerbosity flags)
+                  idrisInstall (mkVerbosity $ S.installVerbosity flags)
                                NoCopyDest pkg local
 #if !MIN_VERSION_Cabal(3,0,0)
    , preSDist = idrisPreSDist
@@ -386,3 +424,4 @@ main = defaultMainWithHooks $ simpleUserHooks
 #endif
    , testHook = idrisTestHook
    }
+{- FOURMOLU_ENABLE -}

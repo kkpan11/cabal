@@ -1,12 +1,6 @@
-{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-
------------------------------------------------------------------------------
-
------------------------------------------------------------------------------
+{-# LANGUAGE PatternSynonyms #-}
 
 -- |
 -- Module      :  Distribution.Client.Setup
@@ -23,8 +17,10 @@ module Distribution.Client.Setup
   , RepoContext (..)
   , withRepoContext
   , configureCommand
+  , CommonSetupFlags (..)
   , ConfigFlags (..)
   , configureOptions
+  , filterCommonFlags
   , filterConfigureFlags
   , configPackageDB'
   , configCompilerAux'
@@ -33,12 +29,15 @@ module Distribution.Client.Setup
   , defaultConfigExFlags
   , buildCommand
   , BuildFlags (..)
+  , filterBuildFlags
   , filterTestFlags
   , replCommand
+  , filterReplFlags
   , testCommand
   , benchmarkCommand
   , testOptions
   , benchmarkOptions
+  , filterBenchmarkFlags
   , configureExOptions
   , reconfigureCommand
   , installCommand
@@ -85,11 +84,9 @@ module Distribution.Client.Setup
   , haddockCommand
   , cleanCommand
   , copyCommand
+  , filterCopyFlags
   , registerCommand
-  , Path (..)
-  , pathName
-  , PathFlags (..)
-  , pathCommand
+  , filterRegisterFlags
   , liftOptions
   , yesNoOpt
   ) where
@@ -100,6 +97,7 @@ import Prelude ()
 import Distribution.Client.Types.AllowNewer (AllowNewer (..), AllowOlder (..), RelaxDeps (..))
 import Distribution.Client.Types.Credentials (Password (..), Token (..), Username (..))
 import Distribution.Client.Types.Repo (LocalRepo (..), RemoteRepo (..))
+import Distribution.Client.Types.RepoName
 import Distribution.Client.Types.WriteGhcEnvironmentFilesPolicy
 
 import Distribution.Client.BuildReports.Types
@@ -167,7 +165,7 @@ import Distribution.Simple.Configure
   , interpretPackageDbFlags
   )
 import Distribution.Simple.Flag
-  ( Flag (..)
+  ( Flag
   , flagElim
   , flagToList
   , flagToMaybe
@@ -175,6 +173,8 @@ import Distribution.Simple.Flag
   , maybeToFlag
   , mergeListFlag
   , toFlag
+  , pattern Flag
+  , pattern NoFlag
   )
 import Distribution.Simple.InstallDirs
   ( InstallDirs (..)
@@ -185,15 +185,16 @@ import Distribution.Simple.InstallDirs
   )
 import Distribution.Simple.Program (ProgramDb, defaultProgramDb)
 import Distribution.Simple.Setup
-  ( BenchmarkFlags
+  ( BenchmarkFlags (benchmarkCommonFlags)
   , BooleanFlag (..)
   , BuildFlags (..)
   , CleanFlags (..)
+  , CommonSetupFlags (..)
   , ConfigFlags (..)
   , CopyFlags (..)
   , HaddockFlags (..)
   , RegisterFlags (..)
-  , ReplFlags
+  , ReplFlags (..)
   , TestFlags
   , boolOpt
   , boolOpt'
@@ -201,6 +202,7 @@ import Distribution.Simple.Setup
   , optionVerbosity
   , readPackageDbList
   , showPackageDbList
+  , testCommonFlags
   , trueArg
   )
 import qualified Distribution.Simple.Setup as Cabal
@@ -210,7 +212,9 @@ import Distribution.Simple.Utils
 import Distribution.System (Platform)
 import Distribution.Types.GivenComponent
   ( GivenComponent (..)
+  , PromisedComponent (..)
   )
+import Distribution.Types.PackageId
 import Distribution.Types.PackageVersionConstraint
   ( PackageVersionConstraint (..)
   )
@@ -218,7 +222,9 @@ import Distribution.Types.UnqualComponentName
   ( unqualComponentNameToPackageName
   )
 import Distribution.Verbosity
-  ( lessVerbose
+  ( VerbosityFlags
+  , defaultVerbosityHandles
+  , lessVerbose
   , normal
   , verboseNoFlags
   , verboseNoTimestamp
@@ -226,11 +232,13 @@ import Distribution.Verbosity
 import Distribution.Version
   ( Version
   , mkVersion
+  , nullVersion
   )
 
 import Control.Exception
   ( assert
   )
+import Data.Functor (($>))
 import Data.List
   ( deleteFirstsBy
   )
@@ -275,6 +283,7 @@ globalCommand commands =
               , "unpack"
               , "init"
               , "configure"
+              , "target"
               , "build"
               , "clean"
               , "run"
@@ -295,6 +304,7 @@ globalCommand commands =
               , "path"
               , "new-build"
               , "new-configure"
+              , "new-target"
               , "new-repl"
               , "new-freeze"
               , "new-run"
@@ -307,6 +317,8 @@ globalCommand commands =
               , "new-clean"
               , "new-sdist"
               , "new-haddock-project"
+              , "new-gen-bounds"
+              , "new-outdated"
               , "list-bin"
               , -- v1 commands, stateful style
                 "v1-build"
@@ -326,8 +338,10 @@ globalCommand commands =
               , "v1-copy"
               , "v1-register"
               , "v1-reconfigure"
+              , "v1-gen-bounds"
               , -- v2 commands, nix-style
-                "v2-build"
+                "v2-target"
+              , "v2-build"
               , "v2-configure"
               , "v2-repl"
               , "v2-freeze"
@@ -341,6 +355,8 @@ globalCommand commands =
               , "v2-install"
               , "v2-clean"
               , "v2-sdist"
+              , "v2-gen-bounds"
+              , "v2-outdated"
               ]
           maxlen = maximum $ [length name | (name, _) <- cmdDescs]
           align str = str ++ replicate (maxlen - length str) ' '
@@ -354,7 +370,6 @@ globalCommand commands =
             ++ unlines
               ( [ startGroup "global"
                 , addCmd "user-config"
-                , addCmd "path"
                 , addCmd "help"
                 , par
                 , startGroup "package database"
@@ -372,6 +387,8 @@ globalCommand commands =
                 , addCmd "freeze"
                 , addCmd "gen-bounds"
                 , addCmd "outdated"
+                , addCmd "path"
+                , addCmd "target"
                 , par
                 , startGroup "project building and installing"
                 , addCmd "build"
@@ -399,6 +416,7 @@ globalCommand commands =
                 , addCmd "hscolour"
                 , par
                 , startGroup "new-style projects (forwards-compatible aliases)"
+                , addCmd "v2-target"
                 , addCmd "v2-build"
                 , addCmd "v2-configure"
                 , addCmd "v2-repl"
@@ -412,6 +430,8 @@ globalCommand commands =
                 , addCmd "v2-install"
                 , addCmd "v2-clean"
                 , addCmd "v2-sdist"
+                , addCmd "v2-outdated"
+                , addCmd "v2-gen-bounds"
                 , par
                 , startGroup "legacy command aliases"
                 , addCmd "v1-build"
@@ -427,6 +447,7 @@ globalCommand commands =
                 , addCmd "v1-copy"
                 , addCmd "v1-register"
                 , addCmd "v1-reconfigure"
+                , addCmd "v1-gen-bounds"
                 ]
                   ++ if null otherCmds
                     then []
@@ -474,6 +495,13 @@ globalCommand commands =
           trueArg
       , option
           []
+          ["full-version"]
+          "Print full version information with git revision (if available) and compiler"
+          globalFullVersion
+          (\v flags -> flags{globalFullVersion = v})
+          trueArg
+      , option
+          []
           ["numeric-version"]
           "Print just the version number"
           globalNumericVersion
@@ -500,32 +528,6 @@ globalCommand commands =
           globalHttpTransport
           (\v flags -> flags{globalHttpTransport = v})
           (reqArgFlag "HttpTransport")
-      , multiOption
-          "nix"
-          globalNix
-          (\v flags -> flags{globalNix = v})
-          [ optArg'
-              "(True or False)"
-              (maybeToFlag . (readMaybe =<<))
-              ( \case
-                  Flag True -> [Just "enable"]
-                  Flag False -> [Just "disable"]
-                  NoFlag -> []
-              )
-              ""
-              ["nix"] -- Must be empty because we need to return PP.empty from viewAsFieldDescr
-              "[DEPRECATED] Nix integration: run commands through nix-shell if a 'shell.nix' file exists (default is False)"
-          , noArg
-              (Flag True)
-              []
-              ["enable-nix"]
-              "[DEPRECATED] Enable Nix integration: run commands through nix-shell if a 'shell.nix' file exists"
-          , noArg
-              (Flag False)
-              []
-              ["disable-nix"]
-              "[DEPRECATED] Disable Nix integration"
-          ]
       , option
           []
           ["store-dir", "storedir"]
@@ -631,6 +633,36 @@ configureCommand =
 configureOptions :: ShowOrParseArgs -> [OptionField ConfigFlags]
 configureOptions = commandOptions configureCommand
 
+filterCommonFlags :: CommonSetupFlags -> Version -> CommonSetupFlags
+filterCommonFlags flags cabalLibVersion
+  -- NB: we expect the latest version to be the most common case,
+  -- so test it first.
+  | cabalLibVersion >= mkVersion [3, 13, 0] = flags_latest
+  | cabalLibVersion < mkVersion [1, 2, 5] = flags_1_2_5
+  | cabalLibVersion < mkVersion [2, 1, 0] = flags_2_1_0
+  | cabalLibVersion < mkVersion [3, 13, 0] = flags_3_13_0
+  | otherwise = error "the impossible just happened" -- see first guard
+  where
+    flags_latest = flags
+    flags_3_13_0 =
+      flags_latest
+        { -- Cabal < 3.13 does not support the --working-dir flag.
+          setupWorkingDir = NoFlag
+        , -- Or the --keep-temp-files flag.
+          setupKeepTempFiles = NoFlag
+        }
+    flags_2_1_0 =
+      flags_3_13_0
+        { -- Cabal < 2.1 doesn't know about -v +timestamp modifier
+          setupVerbosity = fmap verboseNoTimestamp (setupVerbosity flags_3_13_0)
+        }
+    flags_1_2_5 =
+      flags_2_1_0
+        { -- Cabal < 1.25 doesn't have extended verbosity syntax
+          setupVerbosity =
+            fmap verboseNoFlags (setupVerbosity flags_2_1_0)
+        }
+
 -- | Given some 'ConfigFlags' for the version of Cabal that
 -- cabal-install was built with, and a target older 'Version' of
 -- Cabal that we want to pass these flags to, convert the
@@ -640,10 +672,18 @@ configureOptions = commandOptions configureCommand
 -- in some cases it may also mean "emulating" a feature using
 -- some more legacy flags.
 filterConfigureFlags :: ConfigFlags -> Version -> ConfigFlags
-filterConfigureFlags flags cabalLibVersion
+filterConfigureFlags flags cabalLibVersion =
+  let flags' = filterConfigureFlags' flags cabalLibVersion
+   in flags'
+        { configCommonFlags =
+            filterCommonFlags (configCommonFlags flags') cabalLibVersion
+        }
+
+filterConfigureFlags' :: ConfigFlags -> Version -> ConfigFlags
+filterConfigureFlags' flags cabalLibVersion
   -- NB: we expect the latest version to be the most common case,
   -- so test it first.
-  | cabalLibVersion >= mkVersion [3, 11, 0] = flags_latest
+  | cabalLibVersion >= mkVersion [3, 17, 0] = flags_latest
   -- The naming convention is that flags_version gives flags with
   -- all flags *introduced* in version eliminated.
   -- It is NOT the latest version of Cabal library that
@@ -665,6 +705,8 @@ filterConfigureFlags flags cabalLibVersion
   | cabalLibVersion < mkVersion [2, 5, 0] = flags_2_5_0
   | cabalLibVersion < mkVersion [3, 7, 0] = flags_3_7_0
   | cabalLibVersion < mkVersion [3, 11, 0] = flags_3_11_0
+  | cabalLibVersion < mkVersion [3, 13, 0] = flags_3_13_0
+  | cabalLibVersion < mkVersion [3, 17, 0] = flags_3_17_0
   | otherwise = error "the impossible just happened" -- see first guard
   where
     flags_latest =
@@ -676,8 +718,32 @@ filterConfigureFlags flags cabalLibVersion
           configConstraints = []
         }
 
-    flags_3_11_0 =
+    flags_3_17_0 =
       flags_latest
+        { configBytecodeLib = NoFlag
+        , configInstallDirs = (configInstallDirs flags){bytecodelibdir = NoFlag}
+        }
+
+    flags_3_13_0 =
+      let scrubVersion pc =
+            pc
+              { promisedComponentPackage =
+                  (promisedComponentPackage pc){pkgVersion = nullVersion}
+              }
+       in -- Earlier Cabal versions don't understand about ..
+          flags_3_17_0
+            { -- Building profiled shared libraries
+              configProfShared = NoFlag
+            , configIgnoreBuildTools = NoFlag
+            , -- Older versions of Cabal don't include the package version in the
+              -- --promised-dependency flag, by setting the version to nullVersion,
+              -- it won't be printed.
+              configPromisedDependencies =
+                map scrubVersion (configPromisedDependencies flags)
+            }
+
+    flags_3_11_0 =
+      flags_3_13_0
         { -- It's too late to convert configPromisedDependencies to anything
           -- meaningful, so we just assert that it's empty.
           -- We add a Cabal>=3.11 constraint before solving when multi-repl is
@@ -712,7 +778,7 @@ filterConfigureFlags flags cabalLibVersion
                       cid
                 convertToLegacyInternalDep (GivenComponent pn LMainLibName cid) =
                   Just $ GivenComponent pn LMainLibName cid
-             in catMaybes $ convertToLegacyInternalDep <$> configDependencies flags
+             in mapMaybe convertToLegacyInternalDep (configDependencies flags)
         , -- Cabal < 2.5 doesn't know about '--allow-depending-on-private-libs'.
           configAllowDependingOnPrivateLibs = NoFlag
         , -- Cabal < 2.5 doesn't know about '--enable/disable-executable-static'.
@@ -721,9 +787,7 @@ filterConfigureFlags flags cabalLibVersion
 
     flags_2_1_0 =
       flags_2_5_0
-        { -- Cabal < 2.1 doesn't know about -v +timestamp modifier
-          configVerbosity = fmap verboseNoTimestamp (configVerbosity flags_latest)
-        , -- Cabal < 2.1 doesn't know about --<enable|disable>-static
+        { -- Cabal < 2.1 doesn't know about --<enable|disable>-static
           configStaticLib = NoFlag
         , configSplitSections = NoFlag
         }
@@ -732,8 +796,6 @@ filterConfigureFlags flags cabalLibVersion
       flags_2_1_0
         { -- Cabal < 1.25.0 doesn't know about --dynlibdir.
           configInstallDirs = configInstallDirs_1_25_0
-        , -- Cabal < 1.25 doesn't have extended verbosity syntax
-          configVerbosity = fmap verboseNoFlags (configVerbosity flags_2_1_0)
         , -- Cabal < 1.25 doesn't support --deterministic
           configDeterministic = mempty
         }
@@ -751,7 +813,7 @@ filterConfigureFlags flags cabalLibVersion
     -- Cabal < 1.23 doesn't know about '--profiling-detail'.
     -- Cabal < 1.23 has a hacked up version of 'enable-profiling'
     -- which we shouldn't use.
-    (tryLibProfiling, tryExeProfiling) = computeEffectiveProfiling flags
+    (tryLibProfiling, _tryLibProfilingShared, tryExeProfiling) = computeEffectiveProfiling flags
     flags_1_23_0 =
       flags_1_25_0
         { configProfDetail = NoFlag
@@ -826,11 +888,16 @@ configPackageDB' cfg =
 
 -- | Configure the compiler, but reduce verbosity during this step.
 configCompilerAux' :: ConfigFlags -> IO (Compiler, Platform, ProgramDb)
-configCompilerAux' configFlags =
+configCompilerAux' configFlags = do
+  let commonFlags = configCommonFlags configFlags
   configCompilerAuxEx
+    defaultVerbosityHandles
     configFlags
       { -- FIXME: make configCompilerAux use a sensible verbosity
-        configVerbosity = fmap lessVerbose (configVerbosity configFlags)
+        configCommonFlags =
+          commonFlags
+            { setupVerbosity = fmap lessVerbose (setupVerbosity commonFlags)
+            }
       }
 
 -- ------------------------------------------------------------
@@ -853,6 +920,7 @@ data ConfigExFlags = ConfigExFlags
       :: Flag WriteGhcEnvironmentFilesPolicy
   }
   deriving (Eq, Show, Generic)
+  deriving (Semigroup, Monoid) via Generically ConfigExFlags
 
 defaultConfigExFlags :: ConfigExFlags
 defaultConfigExFlags = mempty{configSolver = Flag defaultSolver}
@@ -944,25 +1012,25 @@ configureExOptions _showOrParseArgs src =
   , option
       []
       ["allow-older"]
-      ("Ignore lower bounds in all dependencies or DEPS")
+      "Ignore lower bounds in all dependencies or DEPS"
       (fmap unAllowOlder . configAllowOlder)
       (\v flags -> flags{configAllowOlder = fmap AllowOlder v})
       ( optArg
           "DEPS"
           (parsecToReadEErr unexpectMsgString relaxDepsParser)
-          (show RelaxDepsAll, Just RelaxDepsAll)
+          (Just RelaxDepsAll)
           relaxDepsPrinter
       )
   , option
       []
       ["allow-newer"]
-      ("Ignore upper bounds in all dependencies or DEPS")
+      "Ignore upper bounds in all dependencies or DEPS"
       (fmap unAllowNewer . configAllowNewer)
       (\v flags -> flags{configAllowNewer = fmap AllowNewer v})
       ( optArg
           "DEPS"
           (parsecToReadEErr unexpectMsgString relaxDepsParser)
-          (show RelaxDepsAll, Just RelaxDepsAll)
+          (Just RelaxDepsAll)
           relaxDepsPrinter
       )
   , option
@@ -1010,17 +1078,10 @@ relaxDepsParser = do
           ++ "packages to use newer versions."
     else return . Just . RelaxDepsSome . toList $ rs
 
-relaxDepsPrinter :: (Maybe RelaxDeps) -> [Maybe String]
+relaxDepsPrinter :: Maybe RelaxDeps -> [Maybe String]
 relaxDepsPrinter Nothing = []
 relaxDepsPrinter (Just RelaxDepsAll) = [Nothing]
-relaxDepsPrinter (Just (RelaxDepsSome pkgs)) = map (Just . prettyShow) $ pkgs
-
-instance Monoid ConfigExFlags where
-  mempty = gmempty
-  mappend = (<>)
-
-instance Semigroup ConfigExFlags where
-  (<>) = gmappend
+relaxDepsPrinter (Just (RelaxDepsSome pkgs)) = map (Just . prettyShow) pkgs
 
 reconfigureCommand :: CommandUI (ConfigFlags, ConfigExFlags)
 reconfigureCommand =
@@ -1068,8 +1129,7 @@ buildCommand =
             ++ "Affected by configuration options, see `v1-configure`.\n"
     , commandDefaultFlags = commandDefaultFlags parent
     , commandUsage =
-        usageAlternatives "v1-build" $
-          ["[FLAGS]", "COMPONENTS [FLAGS]"]
+        usageAlternatives "v1-build" ["[FLAGS]", "COMPONENTS [FLAGS]"]
     , commandOptions = commandOptions parent
     , commandNotes = Just $ \pname ->
         "Examples:\n"
@@ -1086,6 +1146,21 @@ buildCommand =
   where
     parent = Cabal.buildCommand defaultProgramDb
 
+-- | Given some 'BuildFlags' for the version of @Cabal@ that
+-- @cabal-install@ was built with, and a target older 'Version' of
+-- @Cabal@ that we want to pass these flags to, convert the
+-- flags into a form that will be accepted by the older
+-- @Setup@ script.  Generally speaking, this just means filtering
+-- out flags that the old @Cabal@ library doesn't understand, but
+-- in some cases it may also mean "emulating" a feature using
+-- some more legacy flags.
+filterBuildFlags :: BuildFlags -> Version -> BuildFlags
+filterBuildFlags flags cabalLibVersion =
+  flags
+    { buildCommonFlags =
+        filterCommonFlags (buildCommonFlags flags) cabalLibVersion
+    }
+
 -- ------------------------------------------------------------
 
 -- * Test flags
@@ -1101,7 +1176,15 @@ buildCommand =
 -- in some cases it may also mean "emulating" a feature using
 -- some more legacy flags.
 filterTestFlags :: TestFlags -> Version -> TestFlags
-filterTestFlags flags cabalLibVersion
+filterTestFlags flags cabalLibVersion =
+  let flags' = filterTestFlags' flags cabalLibVersion
+   in flags'
+        { testCommonFlags =
+            filterCommonFlags (testCommonFlags flags') cabalLibVersion
+        }
+
+filterTestFlags' :: TestFlags -> Version -> TestFlags
+filterTestFlags' flags cabalLibVersion
   -- NB: we expect the latest version to be the most common case,
   -- so test it first.
   | cabalLibVersion >= mkVersion [3, 0, 0] = flags_latest
@@ -1169,6 +1252,24 @@ replCommand =
     }
   where
     parent = Cabal.replCommand defaultProgramDb
+
+-- | Given some 'ReplFlags' for the version of @Cabal@ that
+-- @cabal-install@ was built with, and a target older 'Version' of
+-- @Cabal@ that we want to pass these flags to, convert the
+-- flags into a form that will be accepted by the older
+-- @Setup@ script.  Generally speaking, this just means filtering
+-- out flags that the old @Cabal@ library doesn't understand, but
+-- in some cases it may also mean "emulating" a feature using
+-- some more legacy flags.
+filterReplFlags :: ReplFlags -> Version -> ReplFlags
+filterReplFlags flags cabalLibVersion =
+  flags
+    { replCommonFlags =
+        (filterCommonFlags (replCommonFlags flags) cabalLibVersion)
+          { -- `cabal repl` knew about `--keep-temp-files` before other commands did.
+            setupKeepTempFiles = setupKeepTempFiles (replCommonFlags flags)
+          }
+    }
 
 -- ------------------------------------------------------------
 
@@ -1265,6 +1366,21 @@ benchmarkCommand =
     parent = Cabal.benchmarkCommand
     progDb = defaultProgramDb
 
+-- | Given some 'BenchmarkFlags' for the version of @Cabal@ that
+-- @cabal-install@ was built with, and a target older 'Version' of
+-- @Cabal@ that we want to pass these flags to, convert the
+-- flags into a form that will be accepted by the older
+-- @Setup@ script.  Generally speaking, this just means filtering
+-- out flags that the old @Cabal@ library doesn't understand, but
+-- in some cases it may also mean "emulating" a feature using
+-- some more legacy flags.
+filterBenchmarkFlags :: BenchmarkFlags -> Version -> BenchmarkFlags
+filterBenchmarkFlags flags cabalLibVersion =
+  flags
+    { benchmarkCommonFlags =
+        filterCommonFlags (benchmarkCommonFlags flags) cabalLibVersion
+    }
+
 -- ------------------------------------------------------------
 
 -- * Fetch command
@@ -1282,14 +1398,14 @@ data FetchFlags = FetchFlags
   , fetchFineGrainedConflicts :: Flag FineGrainedConflicts
   , fetchMinimizeConflictSet :: Flag MinimizeConflictSet
   , fetchIndependentGoals :: Flag IndependentGoals
-  , fetchPreferOldest :: Flag PreferOldest
+  , fetchPreferVersion :: Flag PreferVersion
   , fetchShadowPkgs :: Flag ShadowPkgs
   , fetchStrongFlags :: Flag StrongFlags
   , fetchAllowBootLibInstalls :: Flag AllowBootLibInstalls
   , fetchOnlyConstrained :: Flag OnlyConstrained
   , fetchTests :: Flag Bool
   , fetchBenchmarks :: Flag Bool
-  , fetchVerbosity :: Flag Verbosity
+  , fetchVerbosity :: Flag VerbosityFlags
   }
 
 defaultFetchFlags :: FetchFlags
@@ -1305,7 +1421,7 @@ defaultFetchFlags =
     , fetchFineGrainedConflicts = Flag (FineGrainedConflicts True)
     , fetchMinimizeConflictSet = Flag (MinimizeConflictSet False)
     , fetchIndependentGoals = Flag (IndependentGoals False)
-    , fetchPreferOldest = Flag (PreferOldest False)
+    , fetchPreferVersion = Flag PreferInstalledOrLatest
     , fetchShadowPkgs = Flag (ShadowPkgs False)
     , fetchStrongFlags = Flag (StrongFlags False)
     , fetchAllowBootLibInstalls = Flag (AllowBootLibInstalls False)
@@ -1388,8 +1504,8 @@ fetchCommand =
             (\v flags -> flags{fetchMinimizeConflictSet = v})
             fetchIndependentGoals
             (\v flags -> flags{fetchIndependentGoals = v})
-            fetchPreferOldest
-            (\v flags -> flags{fetchPreferOldest = v})
+            fetchPreferVersion
+            (\v flags -> flags{fetchPreferVersion = v})
             fetchShadowPkgs
             (\v flags -> flags{fetchShadowPkgs = v})
             fetchStrongFlags
@@ -1417,12 +1533,12 @@ data FreezeFlags = FreezeFlags
   , freezeFineGrainedConflicts :: Flag FineGrainedConflicts
   , freezeMinimizeConflictSet :: Flag MinimizeConflictSet
   , freezeIndependentGoals :: Flag IndependentGoals
-  , freezePreferOldest :: Flag PreferOldest
+  , freezePreferVersion :: Flag PreferVersion
   , freezeShadowPkgs :: Flag ShadowPkgs
   , freezeStrongFlags :: Flag StrongFlags
   , freezeAllowBootLibInstalls :: Flag AllowBootLibInstalls
   , freezeOnlyConstrained :: Flag OnlyConstrained
-  , freezeVerbosity :: Flag Verbosity
+  , freezeVerbosity :: Flag VerbosityFlags
   }
 
 defaultFreezeFlags :: FreezeFlags
@@ -1438,7 +1554,7 @@ defaultFreezeFlags =
     , freezeFineGrainedConflicts = Flag (FineGrainedConflicts True)
     , freezeMinimizeConflictSet = Flag (MinimizeConflictSet False)
     , freezeIndependentGoals = Flag (IndependentGoals False)
-    , freezePreferOldest = Flag (PreferOldest False)
+    , freezePreferVersion = Flag PreferInstalledOrLatest
     , freezeShadowPkgs = Flag (ShadowPkgs False)
     , freezeStrongFlags = Flag (StrongFlags False)
     , freezeAllowBootLibInstalls = Flag (AllowBootLibInstalls False)
@@ -1510,8 +1626,8 @@ freezeCommand =
             (\v flags -> flags{freezeMinimizeConflictSet = v})
             freezeIndependentGoals
             (\v flags -> flags{freezeIndependentGoals = v})
-            freezePreferOldest
-            (\v flags -> flags{freezePreferOldest = v})
+            freezePreferVersion
+            (\v flags -> flags{freezePreferVersion = v})
             freezeShadowPkgs
             (\v flags -> flags{freezeShadowPkgs = v})
             freezeStrongFlags
@@ -1552,10 +1668,10 @@ genBoundsCommand =
 -- ------------------------------------------------------------
 
 data CheckFlags = CheckFlags
-  { checkVerbosity :: Flag Verbosity
+  { checkVerbosity :: Flag VerbosityFlags
   , checkIgnore :: [CheckExplanationIDString]
   }
-  deriving (Show, Typeable)
+  deriving (Show)
 
 defaultCheckFlags :: CheckFlags
 defaultCheckFlags =
@@ -1604,7 +1720,7 @@ checkOptions' _showOrParseArgs =
 -- ------------------------------------------------------------
 
 data UpdateFlags = UpdateFlags
-  { updateVerbosity :: Flag Verbosity
+  { updateVerbosity :: Flag VerbosityFlags
   , updateIndexState :: Flag TotalIndexState
   }
   deriving (Generic)
@@ -1629,7 +1745,7 @@ cleanCommand =
         "Usage: " ++ pname ++ " v1-clean [FLAGS]\n"
     }
 
-formatCommand :: CommandUI (Flag Verbosity)
+formatCommand :: CommandUI (Flag VerbosityFlags)
 formatCommand =
   CommandUI
     { commandName = "format"
@@ -1699,9 +1815,11 @@ data ReportFlags = ReportFlags
   { reportToken :: Flag Token
   , reportUsername :: Flag Username
   , reportPassword :: Flag Password
-  , reportVerbosity :: Flag Verbosity
+  , reportVerbosity :: Flag VerbosityFlags
+  , reportRepoName :: Flag RepoName
   }
   deriving (Generic)
+  deriving (Semigroup, Monoid) via Generically ReportFlags
 
 defaultReportFlags :: ReportFlags
 defaultReportFlags =
@@ -1710,6 +1828,7 @@ defaultReportFlags =
     , reportUsername = mempty
     , reportPassword = mempty
     , reportVerbosity = toFlag normal
+    , reportRepoName = mempty
     }
 
 reportCommand :: CommandUI ReportFlags
@@ -1758,15 +1877,15 @@ reportCommand =
                 (toFlag . Password)
                 (flagToList . fmap unPassword)
             )
+        , option
+            ['R']
+            ["repository"]
+            "Package repository to upload to."
+            reportRepoName
+            (\v flags -> flags{reportRepoName = v})
+            (reqArg' "REPOSITORY" (toFlag . RepoName) (flagToList . fmap unRepoName))
         ]
     }
-
-instance Monoid ReportFlags where
-  mempty = gmempty
-  mappend = (<>)
-
-instance Semigroup ReportFlags where
-  (<>) = gmappend
 
 -- ------------------------------------------------------------
 
@@ -1781,9 +1900,11 @@ data GetFlags = GetFlags
   , getIndexState :: Flag TotalIndexState
   , getActiveRepos :: Flag ActiveRepos
   , getSourceRepository :: Flag (Maybe RepoKind)
-  , getVerbosity :: Flag Verbosity
+  , getVerbosity :: Flag VerbosityFlags
+  , getRepoName :: Flag RepoName
   }
   deriving (Generic)
+  deriving (Semigroup, Monoid) via Generically GetFlags
 
 defaultGetFlags :: GetFlags
 defaultGetFlags =
@@ -1795,6 +1916,7 @@ defaultGetFlags =
     , getActiveRepos = mempty
     , getSourceRepository = mempty
     , getVerbosity = toFlag normal
+    , getRepoName = mempty
     }
 
 getCommand :: CommandUI GetFlags
@@ -1827,7 +1949,7 @@ getCommand =
                     (const "invalid source-repository")
                     (fmap (toFlag . Just) parsec)
                 )
-                ("", Flag Nothing)
+                (Flag Nothing)
                 (map (fmap show) . flagToList)
             )
         , option
@@ -1877,6 +1999,13 @@ getCommand =
             getPristine
             (\v flags -> flags{getPristine = v})
             trueArg
+        , option
+            ['R']
+            ["repository"]
+            "Package repository to fetch from."
+            getRepoName
+            (\v flags -> flags{getRepoName = v})
+            (reqArg' "REPOSITORY" (toFlag . RepoName) (flagToList . fmap unRepoName))
         ]
     }
 
@@ -1918,13 +2047,6 @@ unpackCommand =
   where
     synopsis = "Deprecated alias for 'get'."
 
-instance Monoid GetFlags where
-  mempty = gmempty
-  mappend = (<>)
-
-instance Semigroup GetFlags where
-  (<>) = gmappend
-
 -- ------------------------------------------------------------
 
 -- * List flags
@@ -1935,11 +2057,12 @@ data ListFlags = ListFlags
   { listInstalled :: Flag Bool
   , listSimpleOutput :: Flag Bool
   , listCaseInsensitive :: Flag Bool
-  , listVerbosity :: Flag Verbosity
+  , listVerbosity :: Flag VerbosityFlags
   , listPackageDBs :: [Maybe PackageDB]
   , listHcPath :: Flag FilePath
   }
   deriving (Generic)
+  deriving (Semigroup, Monoid) via Generically ListFlags
 
 defaultListFlags :: ListFlags
 defaultListFlags =
@@ -2020,7 +2143,7 @@ listOptions =
   , option
       "w"
       ["with-compiler"]
-      "give the path to a particular compiler"
+      "Give the path to a particular compiler"
       listHcPath
       (\v flags -> flags{listHcPath = v})
       (reqArgFlag "PATH")
@@ -2031,13 +2154,6 @@ listNeedsCompiler f =
   flagElim False (const True) (listHcPath f)
     || fromFlagOrDefault False (listInstalled f)
 
-instance Monoid ListFlags where
-  mempty = gmempty
-  mappend = (<>)
-
-instance Semigroup ListFlags where
-  (<>) = gmappend
-
 -- ------------------------------------------------------------
 
 -- * Info flags
@@ -2045,10 +2161,11 @@ instance Semigroup ListFlags where
 -- ------------------------------------------------------------
 
 data InfoFlags = InfoFlags
-  { infoVerbosity :: Flag Verbosity
+  { infoVerbosity :: Flag VerbosityFlags
   , infoPackageDBs :: [Maybe PackageDB]
   }
   deriving (Generic)
+  deriving (Semigroup, Monoid) via Generically InfoFlags
 
 defaultInfoFlags :: InfoFlags
 defaultInfoFlags =
@@ -2087,13 +2204,6 @@ infoCommand =
         ]
     }
 
-instance Monoid InfoFlags where
-  mempty = gmempty
-  mappend = (<>)
-
-instance Semigroup InfoFlags where
-  (<>) = gmappend
-
 -- ------------------------------------------------------------
 
 -- * Install flags
@@ -2113,7 +2223,7 @@ data InstallFlags = InstallFlags
   , installFineGrainedConflicts :: Flag FineGrainedConflicts
   , installMinimizeConflictSet :: Flag MinimizeConflictSet
   , installIndependentGoals :: Flag IndependentGoals
-  , installPreferOldest :: Flag PreferOldest
+  , installPreferVersion :: Flag PreferVersion
   , installShadowPkgs :: Flag ShadowPkgs
   , installStrongFlags :: Flag StrongFlags
   , installAllowBootLibInstalls :: Flag AllowBootLibInstalls
@@ -2139,8 +2249,10 @@ data InstallFlags = InstallFlags
   , installKeepGoing :: Flag Bool
   , installRunTests :: Flag Bool
   , installOfflineMode :: Flag Bool
+  , installBuildTimings :: Flag Bool
   }
   deriving (Eq, Show, Generic)
+  deriving (Semigroup, Monoid) via Generically InstallFlags
 
 instance Binary InstallFlags
 
@@ -2158,7 +2270,7 @@ defaultInstallFlags =
     , installFineGrainedConflicts = Flag (FineGrainedConflicts True)
     , installMinimizeConflictSet = Flag (MinimizeConflictSet False)
     , installIndependentGoals = Flag (IndependentGoals False)
-    , installPreferOldest = Flag (PreferOldest False)
+    , installPreferVersion = Flag PreferInstalledOrLatest
     , installShadowPkgs = Flag (ShadowPkgs False)
     , installStrongFlags = Flag (StrongFlags False)
     , installAllowBootLibInstalls = Flag (AllowBootLibInstalls False)
@@ -2182,6 +2294,7 @@ defaultInstallFlags =
     , installKeepGoing = Flag False
     , installRunTests = mempty
     , installOfflineMode = Flag False
+    , installBuildTimings = Flag False
     }
   where
     docIndexFile =
@@ -2266,7 +2379,7 @@ installCommand =
           ++ pname
           ++ " v1-install haddock --bindir=$HOME/hask-bin/ --datadir=$HOME/hask-data/\n"
           ++ "  "
-          ++ (map (const ' ') pname)
+          ++ map (const ' ') pname
           ++ "                         "
           ++ "    Change installation destination\n"
     , commandDefaultFlags = (mempty, mempty, mempty, mempty, mempty, mempty)
@@ -2323,8 +2436,7 @@ haddockCommand :: CommandUI HaddockFlags
 haddockCommand =
   Cabal.haddockCommand
     { commandUsage =
-        usageAlternatives "v1-haddock" $
-          ["[FLAGS]", "COMPONENTS [FLAGS]"]
+        usageAlternatives "v1-haddock" ["[FLAGS]", "COMPONENTS [FLAGS]"]
     }
 
 filterHaddockArgs :: [String] -> Version -> [String]
@@ -2338,18 +2450,36 @@ filterHaddockArgs args cabalLibVersion
     -- Cabal < 2.3 doesn't know about per-component haddock
     args_2_3_0 = []
 
+-- | Given some 'HaddockFlags' for the version of @Cabal@ that
+-- @cabal-install@ was built with, and a target older 'Version' of
+-- @Cabal@ that we want to pass these flags to, convert the
+-- flags into a form that will be accepted by the older
+-- @Setup@ script.  Generally speaking, this just means filtering
+-- out flags that the old @Cabal@ library doesn't understand, but
+-- in some cases it may also mean "emulating" a feature using
+-- some more legacy flags.
 filterHaddockFlags :: HaddockFlags -> Version -> HaddockFlags
 filterHaddockFlags flags cabalLibVersion
   | cabalLibVersion >= mkVersion [2, 3, 0] = flags_latest
   | cabalLibVersion < mkVersion [2, 3, 0] = flags_2_3_0
   | otherwise = flags_latest
   where
-    flags_latest = flags
+    flags_latest =
+      flags
+        { haddockCommonFlags =
+            (filterCommonFlags (haddockCommonFlags flags) cabalLibVersion)
+              { -- `cabal haddock` knew about `--keep-temp-files` before other commands did.
+                setupKeepTempFiles = setupKeepTempFiles (haddockCommonFlags flags)
+              }
+        }
 
     flags_2_3_0 =
       flags_latest
         { -- Cabal < 2.3 doesn't know about per-component haddock
-          haddockArgs = []
+          haddockCommonFlags =
+            (haddockCommonFlags flags_latest)
+              { setupTargets = []
+              }
         }
 
 haddockOptions :: ShowOrParseArgs -> [OptionField HaddockFlags]
@@ -2380,8 +2510,9 @@ haddockOptions showOrParseArgs =
              , "use-index"
              , "for-hackage"
              , "base-url"
-             , "lib"
+             , "resources-dir"
              , "output-dir"
+             , "use-unicode"
              ]
   ]
 
@@ -2412,6 +2543,9 @@ testOptions showOrParseArgs =
       | "test-" `isPrefixOf` name = name
       | otherwise = "test-" ++ name
 
+-- | Options for the @bench@ command.
+--
+-- Not to be confused with the @benchmarkOptions@ field of the `BenchmarkFlags` record!
 benchmarkOptions :: ShowOrParseArgs -> [OptionField BenchmarkFlags]
 benchmarkOptions showOrParseArgs =
   [ opt
@@ -2479,7 +2613,7 @@ installOptions showOrParseArgs =
       ( reqArg
           "DATABASE"
           (succeedReadE (Flag . Cabal.CopyToDb))
-          (\f -> case f of Flag (Cabal.CopyToDb p) -> [p]; _ -> [])
+          (\case Flag (Cabal.CopyToDb p) -> [p]; _ -> [])
       )
   ]
     ++ optionSolverFlags
@@ -2496,8 +2630,8 @@ installOptions showOrParseArgs =
       (\v flags -> flags{installMinimizeConflictSet = v})
       installIndependentGoals
       (\v flags -> flags{installIndependentGoals = v})
-      installPreferOldest
-      (\v flags -> flags{installPreferOldest = v})
+      installPreferVersion
+      (\v flags -> flags{installPreferVersion = v})
       installShadowPkgs
       (\v flags -> flags{installShadowPkgs = v})
       installStrongFlags
@@ -2664,6 +2798,13 @@ installOptions showOrParseArgs =
           installOfflineMode
           (\v flags -> flags{installOfflineMode = v})
           (yesNoOpt showOrParseArgs)
+       , option
+          []
+          ["build-timings"]
+          "Print elapsed time for each build phase."
+          installBuildTimings
+          (\v flags -> flags{installBuildTimings = v})
+          (yesNoOpt showOrParseArgs)
        ]
     ++ case showOrParseArgs of -- TODO: remove when "cabal install"
     -- avoids
@@ -2692,7 +2833,7 @@ optionNumJobs get set =
     ( optArg
         "NUM"
         (fmap Flag numJobsParser)
-        ("", Flag Nothing)
+        (Flag Nothing)
         (map (Just . maybe "$ncpus" show) . flagToList)
     )
   where
@@ -2705,13 +2846,6 @@ optionNumJobs get set =
             | n < 1 -> Left "The number of jobs should be 1 or more."
             | otherwise -> Right (Just n)
           _ -> Left "The jobs value should be a number or '$ncpus'"
-
-instance Monoid InstallFlags where
-  mempty = gmempty
-  mappend = (<>)
-
-instance Semigroup InstallFlags where
-  (<>) = gmappend
 
 -- ------------------------------------------------------------
 
@@ -2727,12 +2861,15 @@ data UploadFlags = UploadFlags
   { uploadCandidate :: Flag IsCandidate
   , uploadDoc :: Flag Bool
   , uploadToken :: Flag Token
+  , uploadTokenCmd :: Flag [String]
   , uploadUsername :: Flag Username
   , uploadPassword :: Flag Password
   , uploadPasswordCmd :: Flag [String]
-  , uploadVerbosity :: Flag Verbosity
+  , uploadVerbosity :: Flag VerbosityFlags
+  , uploadRepoName :: Flag RepoName
   }
   deriving (Generic)
+  deriving (Semigroup, Monoid) via Generically UploadFlags
 
 defaultUploadFlags :: UploadFlags
 defaultUploadFlags =
@@ -2740,10 +2877,12 @@ defaultUploadFlags =
     { uploadCandidate = toFlag IsCandidate
     , uploadDoc = toFlag False
     , uploadToken = mempty
+    , uploadTokenCmd = mempty
     , uploadUsername = mempty
     , uploadPassword = mempty
     , uploadPasswordCmd = mempty
     , uploadVerbosity = toFlag normal
+    , uploadRepoName = mempty
     }
 
 uploadCommand :: CommandUI UploadFlags
@@ -2755,7 +2894,7 @@ uploadCommand =
     , commandNotes = Just $ \_ ->
         "You can store your Hackage login in the ~/.config/cabal/config file\n"
           ++ "(the %APPDATA%\\cabal\\config file on Windows)\n"
-          ++ relevantConfigValuesText ["token", "username", "password", "password-command"]
+          ++ relevantConfigValuesText ["token", "token-command", "username", "password", "password-command"]
     , commandUsage = \pname ->
         "Usage: " ++ pname ++ " upload [FLAGS] TARFILES\n"
     , commandDefaultFlags = defaultUploadFlags
@@ -2793,6 +2932,20 @@ uploadCommand =
                 (flagToList . fmap unToken)
             )
         , option
+            ['T']
+            ["token-command"]
+            "Command to get Hackage authentication token."
+            uploadTokenCmd
+            (\v flags -> flags{uploadTokenCmd = v})
+            ( reqArg
+                "COMMAND"
+                ( readP_to_E
+                    ("Cannot parse command: " ++)
+                    (Flag <$> parseSpaceList parseTokenQ)
+                )
+                (flagElim [] (pure . unwords . fmap show))
+            )
+        , option
             ['u']
             ["username"]
             "Hackage username."
@@ -2828,15 +2981,15 @@ uploadCommand =
                 )
                 (flagElim [] (pure . unwords . fmap show))
             )
+        , option
+            ['R']
+            ["repository"]
+            "Package repository to upload to."
+            uploadRepoName
+            (\v flags -> flags{uploadRepoName = v})
+            (reqArg' "REPOSITORY" (toFlag . RepoName) (flagToList . fmap unRepoName))
         ]
     }
-
-instance Monoid UploadFlags where
-  mempty = gmempty
-  mappend = (<>)
-
-instance Semigroup UploadFlags where
-  (<>) = gmappend
 
 -- ------------------------------------------------------------
 
@@ -2853,12 +3006,12 @@ initCommand =
         wrapText $
           "Create a .cabal, CHANGELOG.md, minimal initial Haskell code and optionally a LICENSE file.\n"
             ++ "\n"
-            ++ "Calling init with no arguments runs interactive mode, "
+            ++ "Calling init with no arguments runs interactive mode by default, "
             ++ "which will try to guess as much as possible and prompt you for the rest.\n"
             ++ "Non-interactive mode can be invoked by the -n/--non-interactive flag, "
-            ++ "which will let you specify the options via flags and will use the defaults for the rest.\n"
-            ++ "It is also possible to call init with a single argument, which denotes the project's desired "
-            ++ "root directory.\n"
+            ++ "which will let you specify the options via flags and will either use the defaults for the rest, "
+            ++ "or attempt to infer sensible defaults from your local development environment (e.g. $PATH).\n"
+            ++ "For a basic simple project with minimal prompting and sensible defaults, issue the --simple flag.\n"
     , commandNotes = Nothing
     , commandUsage = \pname ->
         "Usage: " ++ pname ++ " init [PROJECT ROOT] [FLAGS]\n"
@@ -2871,7 +3024,10 @@ initOptions _ =
   [ option
       ['i']
       ["interactive"]
-      "interactive mode."
+      ( "Interactive mode. Creates a prompt tree for project creation. \n"
+          ++ "If -n/--non-interactive is issued, a simple project with inferred defaults \n"
+          ++ "is created. If --simple is issued, then sensible defaults will be chosen as well."
+      )
       IT.interactive
       (\v flags -> flags{IT.interactive = v})
       (boolOpt' (['i'], ["interactive"]) (['n'], ["non-interactive"]))
@@ -3193,7 +3349,7 @@ initOptions _ =
   , option
       "w"
       ["with-compiler"]
-      "give the path to a particular compiler. For 'init', this flag is used \
+      "Give the path to a particular compiler. For 'init', this flag is used \
       \to set the bounds inferred for the 'base' package."
       IT.initHcPath
       (\v flags -> flags{IT.initHcPath = v})
@@ -3227,7 +3383,8 @@ copyCommand =
           ++ " v1-copy foo       "
           ++ "    A component (i.e. lib, exe, test suite)"
     , commandUsage =
-        usageAlternatives "v1-copy" $
+        usageAlternatives
+          "v1-copy"
           [ "[FLAGS]"
           , "COMPONENTS [FLAGS]"
           ]
@@ -3237,6 +3394,35 @@ registerCommand :: CommandUI RegisterFlags
 registerCommand =
   Cabal.registerCommand
     { commandUsage = \pname -> "Usage: " ++ pname ++ " v1-register [FLAGS]\n"
+    }
+
+-- | Given some 'RegisterFlags' for the version of @Cabal@ that
+-- @cabal-install@ was built with, and a target older 'Version' of
+-- @Cabal@ that we want to pass these flags to, convert the
+-- flags into a form that will be accepted by the older
+-- @Setup@ script.  Generally speaking, this just means filtering
+-- out flags that the old @Cabal@ library doesn't understand, but
+-- in some cases it may also mean "emulating" a feature using
+-- some more legacy flags.
+filterRegisterFlags :: RegisterFlags -> Version -> RegisterFlags
+filterRegisterFlags flags cabalLibVersion =
+  flags
+    { registerCommonFlags =
+        filterCommonFlags (registerCommonFlags flags) cabalLibVersion
+    }
+
+-- | Given some 'CopyFlags' for the version of @Cabal@ that
+-- @cabal-install@ was built with, and a target older 'Version' of
+-- @Cabal@ that we want to pass these flags to, convert the
+-- flags into a form that will be accepted by the older
+-- @Setup@ script.  Generally speaking, this just means filtering
+-- out flags that the old @Cabal@ library doesn't understand, but
+-- in some cases it may also mean "emulating" a feature using
+-- some more legacy flags.
+filterCopyFlags :: CopyFlags -> Version -> CopyFlags
+filterCopyFlags flags cabalLibVersion =
+  flags
+    { copyCommonFlags = filterCommonFlags (copyCommonFlags flags) cabalLibVersion
     }
 
 -- ------------------------------------------------------------
@@ -3249,6 +3435,7 @@ data ActAsSetupFlags = ActAsSetupFlags
   { actAsSetupBuildType :: Flag BuildType
   }
   deriving (Generic)
+  deriving (Semigroup, Monoid) via Generically ActAsSetupFlags
 
 defaultActAsSetupFlags :: ActAsSetupFlags
 defaultActAsSetupFlags =
@@ -3284,13 +3471,6 @@ actAsSetupCommand =
         ]
     }
 
-instance Monoid ActAsSetupFlags where
-  mempty = gmempty
-  mappend = (<>)
-
-instance Semigroup ActAsSetupFlags where
-  (<>) = gmappend
-
 -- ------------------------------------------------------------
 
 -- * UserConfig flags
@@ -3298,11 +3478,12 @@ instance Semigroup ActAsSetupFlags where
 -- ------------------------------------------------------------
 
 data UserConfigFlags = UserConfigFlags
-  { userConfigVerbosity :: Flag Verbosity
+  { userConfigVerbosity :: Flag VerbosityFlags
   , userConfigForce :: Flag Bool
   , userConfigAppendLines :: Flag [String]
   }
   deriving (Generic)
+  deriving (Semigroup) via Generically UserConfigFlags
 
 instance Monoid UserConfigFlags where
   mempty =
@@ -3311,10 +3492,6 @@ instance Monoid UserConfigFlags where
       , userConfigForce = toFlag False
       , userConfigAppendLines = toFlag []
       }
-  mappend = (<>)
-
-instance Semigroup UserConfigFlags where
-  (<>) = gmappend
 
 userConfigCommand :: CommandUI UserConfigFlags
 userConfigCommand =
@@ -3363,73 +3540,6 @@ userConfigCommand =
             (reqArg' "CONFIGLINE" (Flag . (: [])) (fromMaybe [] . flagToMaybe))
         ]
     }
-
--- ------------------------------------------------------------
-
--- * Dirs
-
--- ------------------------------------------------------------
-
--- | A path that can be retrieved by the @cabal path@ command.
-data Path
-  = PathCacheDir
-  | PathLogsDir
-  | PathStoreDir
-  | PathConfigFile
-  | PathInstallDir
-  deriving (Eq, Ord, Show, Enum, Bounded)
-
--- | The configuration name for this path.
-pathName :: Path -> String
-pathName PathCacheDir = "cache-dir"
-pathName PathLogsDir = "logs-dir"
-pathName PathStoreDir = "store-dir"
-pathName PathConfigFile = "config-file"
-pathName PathInstallDir = "installdir"
-
-data PathFlags = PathFlags
-  { pathVerbosity :: Flag Verbosity
-  , pathDirs :: Flag [Path]
-  }
-  deriving (Generic)
-
-instance Monoid PathFlags where
-  mempty =
-    PathFlags
-      { pathVerbosity = toFlag normal
-      , pathDirs = toFlag []
-      }
-  mappend = (<>)
-
-instance Semigroup PathFlags where
-  (<>) = gmappend
-
-pathCommand :: CommandUI PathFlags
-pathCommand =
-  CommandUI
-    { commandName = "path"
-    , commandSynopsis = "Display paths used by cabal."
-    , commandDescription = Just $ \_ ->
-        wrapText $
-          "This command prints the directories that are used by cabal,"
-            ++ " taking into account the contents of the configuration file and any"
-            ++ " environment variables."
-    , commandNotes = Nothing
-    , commandUsage = \pname -> "Usage: " ++ pname ++ " path\n"
-    , commandDefaultFlags = mempty
-    , commandOptions = \_ ->
-        map pathOption [minBound .. maxBound]
-          ++ [optionVerbosity pathVerbosity (\v flags -> flags{pathVerbosity = v})]
-    }
-  where
-    pathOption s =
-      option
-        []
-        [pathName s]
-        ("Print " <> pathName s)
-        pathDirs
-        (\v flags -> flags{pathDirs = Flag $ concat (flagToList (pathDirs flags) ++ flagToList v)})
-        (noArg (Flag [s]))
 
 -- ------------------------------------------------------------
 
@@ -3487,8 +3597,8 @@ optionSolverFlags
   -> (Flag MinimizeConflictSet -> flags -> flags)
   -> (flags -> Flag IndependentGoals)
   -> (Flag IndependentGoals -> flags -> flags)
-  -> (flags -> Flag PreferOldest)
-  -> (Flag PreferOldest -> flags -> flags)
+  -> (flags -> Flag PreferVersion)
+  -> (Flag PreferVersion -> flags -> flags)
   -> (flags -> Flag ShadowPkgs)
   -> (Flag ShadowPkgs -> flags -> flags)
   -> (flags -> Flag StrongFlags)
@@ -3575,9 +3685,23 @@ optionSolverFlags
         []
         ["prefer-oldest"]
         "Prefer the oldest (instead of the latest) versions of packages available. Useful to determine lower bounds in the build-depends section."
-        (fmap asBool . getpo)
-        (setpo . fmap PreferOldest)
+        ((\x -> if x == Flag PreferOldest then Flag True else NoFlag) . getpo)
+        (setpo . ($> PreferOldest))
         (yesNoOpt showOrParseArgs)
+    , option
+        []
+        ["prefer-version"]
+        "Select which version of a package that the solver should prefer. Oldest is useful to determine lower bounds in build-depends section. Latest will prefer the latest version. Installed-or-latest will prefer installed versions and the latest version otherwise."
+        getpo
+        setpo
+        ( reqArg
+            "oldest|latest|installed-or-latest"
+            ( parsecToReadE
+                (\err -> "Error parsing prefer-version: " ++ err)
+                (toFlag `fmap` parsec)
+            )
+            (flagToList . fmap prettyShow)
+        )
     , option
         []
         ["shadow-installed-packages"]

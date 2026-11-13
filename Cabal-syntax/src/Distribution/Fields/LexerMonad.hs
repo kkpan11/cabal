@@ -55,7 +55,6 @@ instance Applicative Lex where
   (<*>) = ap
 
 instance Monad Lex where
-  return = pure
   (>>=) = thenLex
 
 data LexResult a = LexResult {-# UNPACK #-} !LexState a
@@ -94,7 +93,7 @@ toPWarnings =
       Just $ PWarning PWTLexTab (NE.head poss) $ "Tabs used as indentation at " ++ intercalate ", " (NE.toList $ fmap showPos poss)
     toWarning LexInconsistentIndentation poss =
       Just $ PWarning PWTInconsistentIndentation (NE.head poss) $ "Inconsistent indentation. Indentation jumps at lines " ++ intercalate ", " (NE.toList $ fmap (show . positionRow) poss)
-    -- LexBraces warning about using { } delimeters is not reported as parser warning.
+    -- LexBraces warning about using { } delimiters is not reported as parser warning.
     toWarning LexBraces _ =
       Nothing
 
@@ -149,7 +148,7 @@ returnLex a = Lex $ \s -> LexResult s a
 
 {-# INLINE thenLex #-}
 thenLex :: Lex a -> (a -> Lex b) -> Lex b
-(Lex m) `thenLex` k = Lex $ \s -> case m s of LexResult s' a -> (unLex (k a)) s'
+(Lex m) `thenLex` k = Lex $ \s -> case m s of LexResult s' a -> unLex (k a) s'
 
 setPos :: Position -> Lex ()
 setPos pos = Lex $ \s -> LexResult s{curPos = pos} ()

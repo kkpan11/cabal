@@ -1,11 +1,11 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE TypeFamilies #-}
 
 module Distribution.Types.ComponentLocalBuildInfo
   ( ComponentLocalBuildInfo (..)
   , componentIsIndefinite
   , maybeComponentInstantiatedWith
+  , maybeComponentCompatPackageKey
+  , maybeComponentExposedModules
   ) where
 
 import Distribution.Compat.Prelude
@@ -108,7 +108,7 @@ data ComponentLocalBuildInfo
       , componentExeDeps :: [UnitId]
       , componentInternalDeps :: [UnitId]
       }
-  deriving (Generic, Read, Show, Typeable)
+  deriving (Generic, Read, Show)
 
 instance Binary ComponentLocalBuildInfo
 instance Structured ComponentLocalBuildInfo
@@ -126,3 +126,13 @@ maybeComponentInstantiatedWith :: ComponentLocalBuildInfo -> Maybe [(ModuleName,
 maybeComponentInstantiatedWith
   LibComponentLocalBuildInfo{componentInstantiatedWith = insts} = Just insts
 maybeComponentInstantiatedWith _ = Nothing
+
+maybeComponentCompatPackageKey :: ComponentLocalBuildInfo -> Maybe String
+maybeComponentCompatPackageKey
+  LibComponentLocalBuildInfo{componentCompatPackageKey = key} = Just key
+maybeComponentCompatPackageKey _ = Nothing
+
+maybeComponentExposedModules :: ComponentLocalBuildInfo -> Maybe [Installed.ExposedModule]
+maybeComponentExposedModules
+  LibComponentLocalBuildInfo{componentExposedModules = exposed} = Just exposed
+maybeComponentExposedModules _ = Nothing

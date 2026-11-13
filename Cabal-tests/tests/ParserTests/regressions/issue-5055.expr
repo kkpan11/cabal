@@ -31,10 +31,11 @@ GenericPackageDescription {
     testSuites = [],
     benchmarks = [],
     dataFiles = [],
-    dataDir = ".",
+    dataDir = SymbolicPath ".",
     extraSrcFiles = [],
     extraTmpFiles = [],
-    extraDocFiles = []},
+    extraDocFiles = [],
+    extraFiles = []},
   gpdScannedVersion = Nothing,
   genPackageFlags = [],
   condLibrary = Nothing,
@@ -48,7 +49,8 @@ GenericPackageDescription {
         condTreeData = Executable {
           exeName = UnqualComponentName
             "flag-test-exe",
-          modulePath = "FirstMain.hs",
+          modulePath = SymbolicPath
+            "FirstMain.hs",
           exeScope = ExecutablePublic,
           buildInfo = BuildInfo {
             buildable = True,
@@ -59,6 +61,7 @@ GenericPackageDescription {
             cmmOptions = [],
             ccOptions = [],
             cxxOptions = [],
+            jsppOptions = [],
             ldOptions = [],
             hsc2hsOptions = [],
             pkgconfigDepends = [],
@@ -98,6 +101,8 @@ GenericPackageDescription {
               []
               [],
             sharedOptions =
+            PerCompilerFlavor [] [],
+            profSharedOptions =
             PerCompilerFlavor [] [],
             staticOptions =
             PerCompilerFlavor [] [],
@@ -112,15 +117,6 @@ GenericPackageDescription {
                     (mkVersion [5])))
                 mainLibSet],
             mixins = []}},
-        condTreeConstraints = [
-          Dependency
-            (PackageName "base")
-            (IntersectVersionRanges
-              (OrLaterVersion
-                (mkVersion [4, 8]))
-              (EarlierVersion
-                (mkVersion [5])))
-            mainLibSet],
         condTreeComponents = []}],
   condTestSuites = [
     _×_
@@ -132,7 +128,7 @@ GenericPackageDescription {
             "",
           testInterface = TestSuiteExeV10
             (mkVersion [1, 0])
-            "SecondMain.hs",
+            (SymbolicPath "SecondMain.hs"),
           testBuildInfo = BuildInfo {
             buildable = True,
             buildTools = [],
@@ -142,6 +138,7 @@ GenericPackageDescription {
             cmmOptions = [],
             ccOptions = [],
             cxxOptions = [],
+            jsppOptions = [],
             ldOptions = [],
             hsc2hsOptions = [],
             pkgconfigDepends = [],
@@ -181,6 +178,8 @@ GenericPackageDescription {
               []
               [],
             sharedOptions =
+            PerCompilerFlavor [] [],
+            profSharedOptions =
             PerCompilerFlavor [] [],
             staticOptions =
             PerCompilerFlavor [] [],
@@ -196,15 +195,6 @@ GenericPackageDescription {
                 mainLibSet],
             mixins = []},
           testCodeGenerators = []},
-        condTreeConstraints = [
-          Dependency
-            (PackageName "base")
-            (IntersectVersionRanges
-              (OrLaterVersion
-                (mkVersion [4, 8]))
-              (EarlierVersion
-                (mkVersion [5])))
-            mainLibSet],
         condTreeComponents = [
           CondBranch {
             condBranchCondition =
@@ -227,6 +217,7 @@ GenericPackageDescription {
                   cmmOptions = [],
                   ccOptions = [],
                   cxxOptions = [],
+                  jsppOptions = [],
                   ldOptions = [],
                   hsc2hsOptions = [],
                   pkgconfigDepends = [],
@@ -266,13 +257,14 @@ GenericPackageDescription {
                     [],
                   sharedOptions =
                   PerCompilerFlavor [] [],
+                  profSharedOptions =
+                  PerCompilerFlavor [] [],
                   staticOptions =
                   PerCompilerFlavor [] [],
                   customFieldsBI = [],
                   targetBuildDepends = [],
                   mixins = []},
                 testCodeGenerators = []},
-              condTreeConstraints = [],
               condTreeComponents = []},
             condBranchIfFalse = Nothing}]}],
   condBenchmarks = []}

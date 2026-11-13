@@ -1,15 +1,7 @@
 {-# LANGUAGE CPP #-}
-{-# LANGUAGE DeriveFunctor #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE ScopedTypeVariables #-}
--- TODO
-{-# OPTIONS_GHC -fno-warn-incomplete-uni-patterns #-}
-
------------------------------------------------------------------------------
-
------------------------------------------------------------------------------
+{-# LANGUAGE ViewPatterns #-}
 
 -- |
 -- Module      :  Distribution.Client.TargetSelector
@@ -101,6 +93,12 @@ import Control.Arrow ((&&&))
 import Control.Monad hiding
   ( mfilter
   )
+import Data.Bifunctor (bimap, second)
+#if MIN_VERSION_base(4,20,0)
+import Data.Functor as UZ (unzip)
+#else
+import qualified Data.List.NonEmpty as UZ (unzip)
+#endif
 import Data.List
   ( stripPrefix
   )
@@ -126,6 +124,8 @@ import Distribution.Simple.Utils
   , ordNub
   )
 import Distribution.Utils.Path
+  ( getSymbolicPath
+  )
 import qualified System.Directory as IO
   ( canonicalizePath
   , doesDirectoryExist
@@ -133,18 +133,18 @@ import qualified System.Directory as IO
   , getCurrentDirectory
   )
 import System.FilePath
-  ( dropTrailingPathSeparator
+  ( dropExtension
+  , dropTrailingPathSeparator
   , equalFilePath
+  , joinPath
   , normalise
+  , splitDirectories
+  )
+import qualified System.FilePath as FilePath
+  ( splitPath
+  , takeExtension
   , (<.>)
   , (</>)
-  )
-import System.FilePath as FilePath
-  ( dropExtension
-  , joinPath
-  , splitDirectories
-  , splitPath
-  , takeExtension
   )
 import Text.EditDistance
   ( defaultEditCosts
@@ -158,8 +158,8 @@ import qualified Prelude (foldr1)
 
 -- ------------------------------------------------------------
 
--- | A target selector is expression selecting a set of components (as targets
--- for a actions like @build@, @run@, @test@ etc). A target selector
+-- | A target selector is an expression selecting a set of components (as targets
+-- for actions like @build@, @run@, @test@ etc). A target selector
 -- corresponds to the user syntax for referring to targets on the command line.
 --
 -- From the users point of view a target can be many things: packages, dirs,
@@ -251,7 +251,7 @@ readTargetSelectors
 readTargetSelectors = readTargetSelectorsWith defaultDirActions
 
 readTargetSelectorsWith
-  :: (Applicative m, Monad m)
+  :: Monad m
   => DirActions m
   -> [PackageSpecifier (SourcePackage (PackageLocation a))]
   -> Maybe ComponentKindFilter
@@ -319,70 +319,23 @@ parseTargetString :: String -> Maybe TargetString
 parseTargetString =
   readPToMaybe parseTargetApprox
   where
-    parseTargetApprox :: Parse.ReadP r TargetString
+    colon = Parse.char ':'
+    parseTargetApprox :: Parse.ReadP TargetString
     parseTargetApprox =
-      ( do
-          a <- tokenQ
-          return (TargetString1 a)
-      )
-        +++ ( do
-                a <- tokenQ0
-                _ <- Parse.char ':'
-                b <- tokenQ
-                return (TargetString2 a b)
-            )
-        +++ ( do
-                a <- tokenQ0
-                _ <- Parse.char ':'
-                b <- tokenQ
-                _ <- Parse.char ':'
-                c <- tokenQ
-                return (TargetString3 a b c)
-            )
-        +++ ( do
-                a <- tokenQ0
-                _ <- Parse.char ':'
-                b <- token
-                _ <- Parse.char ':'
-                c <- tokenQ
-                _ <- Parse.char ':'
-                d <- tokenQ
-                return (TargetString4 a b c d)
-            )
-        +++ ( do
-                a <- tokenQ0
-                _ <- Parse.char ':'
-                b <- token
-                _ <- Parse.char ':'
-                c <- tokenQ
-                _ <- Parse.char ':'
-                d <- tokenQ
-                _ <- Parse.char ':'
-                e <- tokenQ
-                return (TargetString5 a b c d e)
-            )
-        +++ ( do
-                a <- tokenQ0
-                _ <- Parse.char ':'
-                b <- token
-                _ <- Parse.char ':'
-                c <- tokenQ
-                _ <- Parse.char ':'
-                d <- tokenQ
-                _ <- Parse.char ':'
-                e <- tokenQ
-                _ <- Parse.char ':'
-                f <- tokenQ
-                _ <- Parse.char ':'
-                g <- tokenQ
-                return (TargetString7 a b c d e f g)
-            )
+      (TargetString1 <$> tokenQEnd)
+        +++ (TargetString2 <$> tokenQ0 <* colon <*> tokenQEnd)
+        +++ (TargetString3 <$> tokenQ0 <* colon <*> tokenQ <* colon <*> tokenQEnd)
+        +++ (TargetString4 <$> tokenQ0 <* colon <*> token <* colon <*> tokenQ <* colon <*> tokenQEnd)
+        +++ (TargetString5 <$> tokenQ0 <* colon <*> token <* colon <*> tokenQ <* colon <*> tokenQ <* colon <*> tokenQEnd)
+        +++ (TargetString7 <$> tokenQ0 <* colon <*> token <* colon <*> tokenQ <* colon <*> tokenQ <* colon <*> tokenQ <* colon <*> tokenQ <* colon <*> tokenQEnd)
 
     token = Parse.munch1 (\x -> not (isSpace x) && x /= ':')
     tokenQ = parseHaskellString <++ token
     token0 = Parse.munch (\x -> not (isSpace x) && x /= ':')
     tokenQ0 = parseHaskellString <++ token0
-    parseHaskellString :: Parse.ReadP r String
+    tokenEnd = Parse.munch1 (/= ':')
+    tokenQEnd = parseHaskellString <++ tokenEnd
+    parseHaskellString :: Parse.ReadP String
     parseHaskellString = Parse.readS_to_P reads
 
 -- | Render a 'TargetString' back as the external syntax. This is mainly for
@@ -446,7 +399,7 @@ noFileStatus :: FileStatus
 noFileStatus = FileStatusNotExists False
 
 getTargetStringFileStatus
-  :: (Applicative m, Monad m)
+  :: Monad m
   => DirActions m
   -> TargetString
   -> m TargetStringFileStatus
@@ -468,7 +421,7 @@ getTargetStringFileStatus DirActions{..} t =
     fileStatus f = do
       fexists <- doesFileExist f
       dexists <- doesDirectoryExist f
-      case splitPath f of
+      case FilePath.splitPath f of
         _
           | fexists -> FileStatusExistsFile <$> canonicalizePath f
           | dexists -> FileStatusExistsDir <$> canonicalizePath f
@@ -581,7 +534,7 @@ resolveTargetSelector knowntargets@KnownTargets{..} mfilter targetStrStatus =
 
     classifyMatchErrors errs
       | Just expectedNE <- NE.nonEmpty expected =
-          let (things, got :| _) = NE.unzip expectedNE
+          let (things, got :| _) = UZ.unzip expectedNE
            in TargetSelectorExpected targetStr (NE.toList things) got
       | not (null nosuch) =
           TargetSelectorNoSuch targetStr nosuch
@@ -756,9 +709,7 @@ disambiguateTargetSelectors matcher matchInput exactMatch matchResults =
           Left
             ( originalMatch
             , [ (forgetFileStatus rendering, matches)
-              | rendering <- matchRenderings
-              , let Match m _ matches =
-                      memoisedMatches Map.! rendering
+              | rendering@((memoisedMatches Map.!?) -> Just (Match m _ matches)) <- matchRenderings
               , m /= Inexact
               ]
             )
@@ -800,10 +751,9 @@ reportTargetSelectorProblems verbosity problems = do
           (showTargetSelector originalMatch)
           (showTargetSelectorKind originalMatch)
         $ map
-          ( \(rendering, matches) ->
-              ( showTargetString rendering
-              , (map (\match -> showTargetSelector match ++ " (" ++ showTargetSelectorKind match ++ ")") matches)
-              )
+          ( bimap
+              showTargetString
+              (map (\match -> showTargetSelector match ++ " (" ++ showTargetSelectorKind match ++ ")"))
           )
           renderingsAndMatches
 
@@ -819,7 +769,7 @@ reportTargetSelectorProblems verbosity problems = do
     targets ->
       dieWithException verbosity $
         NoSuchTargetSelectorErr $
-          map (\(target, nosuch) -> (showTargetString target, nosuch)) targets
+          map (first showTargetString) targets
 
   case [(t, ts) | TargetSelectorAmbiguous t ts <- problems] of
     [] -> return ()
@@ -827,10 +777,9 @@ reportTargetSelectorProblems verbosity problems = do
       dieWithException verbosity $
         TargetSelectorAmbiguousErr $
           map
-            ( \(target, amb) ->
-                ( showTargetString target
-                , (map (\(ut, bt) -> (showTargetString ut, showTargetSelectorKind bt)) amb)
-                )
+            ( bimap
+                showTargetString
+                (map (bimap showTargetString showTargetSelectorKind))
             )
             targets
 
@@ -916,7 +865,7 @@ matchTargetSelector knowntargets = \usertarget ->
     let ql = targetQualLevel usertarget
      in foldSyntax
           (<|>)
-          (<//>)
+          (</>)
           (\ql' match _ -> guard (ql == ql') >> match usertarget)
           syntax
   where
@@ -1098,7 +1047,7 @@ syntaxForm1File ps =
   -- all the other forms we don't require that.
   syntaxForm1 render $ \str1 fstatus1 ->
     expecting "file" str1 $ do
-      (pkgfile, ~KnownPackage{pinfoId, pinfoComponents}) <-
+      (pkgfile, KnownPackage{pinfoId, pinfoComponents}) <-
         -- always returns the KnownPackage case
         matchPackageDirectoryPrefix ps fstatus1
       orNoThingIn "package" (prettyShow (packageName pinfoId)) $ do
@@ -1125,7 +1074,7 @@ syntaxForm2MetaAll =
       [TargetStringFileStatus2 "" noFileStatus "all"]
     render _ = []
 
--- | Syntax:  all : filer
+-- | Syntax:  all : filter
 --
 -- > cabal build all:tests
 syntaxForm2AllFilter :: Syntax
@@ -1139,7 +1088,7 @@ syntaxForm2AllFilter =
       [TargetStringFileStatus2 "all" noFileStatus (dispF kfilter)]
     render _ = []
 
--- | Syntax:  package : filer
+-- | Syntax:  package : filter
 --
 -- > cabal build foo:tests
 syntaxForm2PackageFilter :: [KnownPackage] -> Syntax
@@ -1713,44 +1662,41 @@ syntaxForm3 :: Renderer -> Match3 -> Syntax
 syntaxForm4 :: Renderer -> Match4 -> Syntax
 syntaxForm5 :: Renderer -> Match5 -> Syntax
 syntaxForm7 :: Renderer -> Match7 -> Syntax
-syntaxForm1 render f =
-  Syntax QL1 match render
+syntaxForm1 render f = Syntax QL1 match render
   where
-    match = \(TargetStringFileStatus1 str1 fstatus1) ->
-      f str1 fstatus1
+    match = \case
+      TargetStringFileStatus1 str1 fstatus1 -> f str1 fstatus1
+      _ -> mzero
 
-syntaxForm2 render f =
-  Syntax QL2 match render
+syntaxForm2 render f = Syntax QL2 match render
   where
-    match = \(TargetStringFileStatus2 str1 fstatus1 str2) ->
-      f str1 fstatus1 str2
+    match = \case
+      TargetStringFileStatus2 str1 fstatus1 str2 -> f str1 fstatus1 str2
+      _ -> mzero
 
-syntaxForm3 render f =
-  Syntax QL3 match render
+syntaxForm3 render f = Syntax QL3 match render
   where
-    match = \(TargetStringFileStatus3 str1 fstatus1 str2 str3) ->
-      f str1 fstatus1 str2 str3
+    match = \case
+      TargetStringFileStatus3 str1 fstatus1 str2 str3 -> f str1 fstatus1 str2 str3
+      _ -> mzero
 
-syntaxForm4 render f =
-  Syntax QLFull match render
+syntaxForm4 render f = Syntax QLFull match render
   where
-    match (TargetStringFileStatus4 str1 str2 str3 str4) =
-      f str1 str2 str3 str4
-    match _ = mzero
+    match = \case
+      TargetStringFileStatus4 str1 str2 str3 str4 -> f str1 str2 str3 str4
+      _ -> mzero
 
-syntaxForm5 render f =
-  Syntax QLFull match render
+syntaxForm5 render f = Syntax QLFull match render
   where
-    match (TargetStringFileStatus5 str1 str2 str3 str4 str5) =
-      f str1 str2 str3 str4 str5
-    match _ = mzero
+    match = \case
+      TargetStringFileStatus5 str1 str2 str3 str4 str5 -> f str1 str2 str3 str4 str5
+      _ -> mzero
 
-syntaxForm7 render f =
-  Syntax QLFull match render
+syntaxForm7 render f = Syntax QLFull match render
   where
-    match (TargetStringFileStatus7 str1 str2 str3 str4 str5 str6 str7) =
-      f str1 str2 str3 str4 str5 str6 str7
-    match _ = mzero
+    match = \case
+      TargetStringFileStatus7 str1 str2 str3 str4 str5 str6 str7 -> f str1 str2 str3 str4 str5 str6 str7
+      _ -> mzero
 
 dispP :: Package p => p -> String
 dispP = prettyShow . packageName
@@ -1828,7 +1774,7 @@ emptyKnownTargets = KnownTargets [] [] [] [] [] []
 
 getKnownTargets
   :: forall m a
-   . (Applicative m, Monad m)
+   . Monad m
   => DirActions m
   -> [PackageSpecifier (SourcePackage (PackageLocation a))]
   -> m KnownTargets
@@ -1864,7 +1810,7 @@ getKnownTargets dirActions@DirActions{..} pkgs = do
       [c | KnownPackage{pinfoComponents} <- ps, c <- pinfoComponents]
 
 collectKnownPackageInfo
-  :: (Applicative m, Monad m)
+  :: Monad m
   => DirActions m
   -> PackageSpecifier (SourcePackage (PackageLocation a))
   -> m KnownPackage
@@ -1885,8 +1831,8 @@ collectKnownPackageInfo
           dirabs <- canonicalizePath dir
           dirrel <- makeRelativeToCwd dirActions dirabs
           -- TODO: ought to get this earlier in project reading
-          let fileabs = dirabs </> prettyShow (packageName pkg) <.> "cabal"
-              filerel = dirrel </> prettyShow (packageName pkg) <.> "cabal"
+          let fileabs = dirabs FilePath.</> prettyShow (packageName pkg) FilePath.<.> "cabal"
+              filerel = dirrel FilePath.</> prettyShow (packageName pkg) FilePath.<.> "cabal"
           exists <- doesFileExist fileabs
           return
             ( Just (dirabs, dirrel)
@@ -1913,8 +1859,8 @@ collectKnownComponentInfo pkg =
     , cinfoSrcDirs = ordNub (map getSymbolicPath (hsSourceDirs bi))
     , cinfoModules = ordNub (componentModules c)
     , cinfoHsFiles = ordNub (componentHsFiles c)
-    , cinfoCFiles = ordNub (cSources bi)
-    , cinfoJsFiles = ordNub (jsSources bi)
+    , cinfoCFiles = ordNub (map getSymbolicPath $ cSources bi)
+    , cinfoJsFiles = ordNub (map getSymbolicPath $ jsSources bi)
     }
   | c <- pkgComponents pkg
   , let bi = componentBuildInfo c
@@ -1938,19 +1884,19 @@ componentModules (CTest test) = testModules test
 componentModules (CBench bench) = benchmarkModules bench
 
 componentHsFiles :: Component -> [FilePath]
-componentHsFiles (CExe exe) = [modulePath exe]
+componentHsFiles (CExe exe) = [getSymbolicPath $ modulePath exe]
 componentHsFiles
   ( CTest
       TestSuite
         { testInterface = TestSuiteExeV10 _ mainfile
         }
-    ) = [mainfile]
+    ) = [getSymbolicPath mainfile]
 componentHsFiles
   ( CBench
       Benchmark
         { benchmarkInterface = BenchmarkExeV10 _ mainfile
         }
-    ) = [mainfile]
+    ) = [getSymbolicPath mainfile]
 componentHsFiles _ = []
 
 ------------------------------
@@ -2075,21 +2021,21 @@ guardPackageDir str _ = matchErrorExpected "package directory" str
 
 guardPackageFile :: String -> FileStatus -> Match ()
 guardPackageFile _ (FileStatusExistsFile file)
-  | takeExtension file == ".cabal" =
+  | FilePath.takeExtension file == ".cabal" =
       increaseConfidence
 guardPackageFile str _ = matchErrorExpected "package .cabal file" str
 
 matchPackage :: [KnownPackage] -> String -> FileStatus -> Match KnownPackage
-matchPackage pinfo = \str fstatus ->
+matchPackage pinfo str fstatus =
   orNoThingIn "project" "" $
     matchPackageName pinfo str
-      <//> ( matchPackageNameUnknown str
+      </> ( matchPackageNameUnknown str
               <|> matchPackageDir pinfo str fstatus
               <|> matchPackageFile pinfo str fstatus
-           )
+          )
 
 matchPackageName :: [KnownPackage] -> String -> Match KnownPackage
-matchPackageName ps = \str -> do
+matchPackageName ps str = do
   guard (validPackageName str)
   orNoSuchThing
     "package"
@@ -2112,9 +2058,7 @@ matchPackageDir ps = \str fstatus ->
   case fstatus of
     FileStatusExistsDir canondir ->
       orNoSuchThing "package directory" str (map (snd . fst) dirs) $
-        increaseConfidenceFor $
-          fmap snd $
-            matchExactly (fst . fst) dirs canondir
+        increaseConfidenceFor (snd <$> matchExactly (fst . fst) dirs canondir)
     _ -> mzero
   where
     dirs =
@@ -2127,9 +2071,7 @@ matchPackageFile ps = \str fstatus -> do
   case fstatus of
     FileStatusExistsFile canonfile ->
       orNoSuchThing "package .cabal file" str (map (snd . fst) files) $
-        increaseConfidenceFor $
-          fmap snd $
-            matchExactly (fst . fst) files canonfile
+        increaseConfidenceFor (snd <$> matchExactly (fst . fst) files canonfile)
     _ -> mzero
   where
     files =
@@ -2178,7 +2120,7 @@ matchComponentKindAndName cs ckind str =
     (map render cs)
     $ increaseConfidenceFor
     $ matchInexactly
-      (\(ck, cn) -> (ck, caseFold cn))
+      (second caseFold)
       (\c -> (cinfoKind c, cinfoStrName c))
       cs
       (ckind, str)
@@ -2252,7 +2194,7 @@ matchComponentOtherFile
   -> Match (FilePath, KnownComponent)
 matchComponentOtherFile cs =
   matchFile
-    [ (normalise (srcdir </> file), c)
+    [ (normalise (srcdir FilePath.</> file), c)
     | c <- cs
     , srcdir <- cinfoSrcDirs c
     , file <-
@@ -2268,7 +2210,7 @@ matchComponentModuleFile
   -> Match (FilePath, KnownComponent)
 matchComponentModuleFile cs str = do
   matchFile
-    [ (normalise (d </> toFilePath m), c)
+    [ (normalise (d FilePath.</> toFilePath m), c)
     | c <- cs
     , d <- cinfoSrcDirs c
     , m <- cinfoModules c
@@ -2281,7 +2223,7 @@ matchComponentModuleFile cs str = do
 -- | Compare two filepaths for equality using DirActions' canonicalizePath
 -- to normalize AND canonicalize filepaths before comparison.
 compareFilePath
-  :: (Applicative m, Monad m)
+  :: Monad m
   => DirActions m
   -> FilePath
   -> FilePath
@@ -2363,7 +2305,6 @@ instance Alternative Match where
   (<|>) = matchPlus
 
 instance Monad Match where
-  return = pure
   NoMatch d ms >>= _ = NoMatch d ms
   Match m d xs >>= f =
     -- To understand this, it needs to be read in context with the
@@ -2382,10 +2323,13 @@ instance MonadPlus Match where
   mzero = empty
   mplus = matchPlus
 
-(<//>) :: Match a -> Match a -> Match a
-(<//>) = matchPlusShadowing
+instance MonadFail Match where
+  fail _ = mzero
 
-infixl 3 <//>
+(</>) :: Match a -> Match a -> Match a
+(</>) = matchPlusShadowing
+
+infixl 3 </>
 
 -- | Combine two matchers. Exact matches are used over inexact matches
 -- but if we have multiple exact, or inexact then the we collect all the
@@ -2393,8 +2337,8 @@ infixl 3 <//>
 --
 -- This operator is associative, has unit 'mzero' and is also commutative.
 matchPlus :: Match a -> Match a -> Match a
-matchPlus a@(Match _ _ _) (NoMatch _ _) = a
-matchPlus (NoMatch _ _) b@(Match _ _ _) = b
+matchPlus a@Match{} NoMatch{} = a
+matchPlus NoMatch{} b@Match{} = b
 matchPlus a@(NoMatch d_a ms_a) b@(NoMatch d_b ms_b)
   | d_a > d_b = a -- We only really make use of the depth in the NoMatch case.
   | d_a < d_b = b
@@ -2491,10 +2435,7 @@ data MaybeAmbiguous a
 -- | A primitive matcher that looks up a value in a finite 'Map'. The
 -- value must match exactly.
 matchExactly :: Ord k => (a -> k) -> [a] -> (k -> Match a)
-matchExactly key xs =
-  \k -> case Map.lookup k m of
-    Nothing -> mzero
-    Just ys -> exactMatches ys
+matchExactly key xs = \k -> maybe mzero exactMatches (Map.lookup k m)
   where
     m = Map.fromListWith (++) [(key x, [x]) | x <- xs]
 
@@ -2515,9 +2456,7 @@ matchInexactly
 matchInexactly cannonicalise key xs =
   \k -> case Map.lookup k m of
     Just ys -> exactMatches ys
-    Nothing -> case Map.lookup (cannonicalise k) m' of
-      Just ys -> inexactMatches ys
-      Nothing -> mzero
+    Nothing -> maybe mzero inexactMatches (Map.lookup (cannonicalise k) m')
   where
     m = Map.fromListWith (++) [(key x, [x]) | x <- xs]
 

@@ -1,10 +1,4 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE NamedFieldPuns #-}
-{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TypeFamilies #-}
 
 -- | Types used while planning how to build everything in a project.
@@ -38,6 +32,7 @@ module Distribution.Client.ProjectPlanning.Types
   , pkgOrderDependencies
   , ElaboratedPlanPackage
   , ElaboratedSharedConfig (..)
+  , ElaboratedPackageSource (..)
   , ElaboratedReadyPackage
   , BuildStyle (..)
   , MemoryOrDisk (..)
@@ -59,14 +54,18 @@ module Distribution.Client.ProjectPlanning.Types
   , isTestComponentTarget
   , isBenchComponentTarget
   , componentOptionalStanza
+  , componentTargetName
 
     -- * Setup script
   , SetupScriptStyle (..)
+  , SetupCliVersion (..)
+  , setupCliVersion
   ) where
 
 import Distribution.Client.Compat.Prelude
 import Prelude ()
 
+import Distribution.Client.HashValue (HashValue)
 import Distribution.Client.PackageHash
 import Distribution.Client.TargetSelector
   ( SubComponentTarget (..)
@@ -86,6 +85,7 @@ import Distribution.Client.Types
 import Distribution.Backpack
 import Distribution.Backpack.ModuleShape
 
+import Distribution.Compat.Graph (IsNode (..))
 import Distribution.InstalledPackageInfo (InstalledPackageInfo)
 import Distribution.ModuleName (ModuleName)
 import Distribution.Package
@@ -106,24 +106,23 @@ import Distribution.Simple.Setup
   , ReplOptions
   , TestShowDetails
   )
+import Distribution.Simple.Utils (cabalVersion, ordNub)
+import Distribution.Solver.Types.ComponentDeps (ComponentDeps)
+import qualified Distribution.Solver.Types.ComponentDeps as CD
+import Distribution.Solver.Types.OptionalStanza
 import Distribution.System
 import Distribution.Types.ComponentRequestedSpec
 import qualified Distribution.Types.LocalBuildConfig as LBC
 import Distribution.Types.PackageDescription (PackageDescription (..))
 import Distribution.Types.PkgconfigVersion
-import Distribution.Verbosity (normal)
+import Distribution.Utils.Path (getSymbolicPath)
 import Distribution.Version
 
-import Distribution.Compat.Graph (IsNode (..))
-import Distribution.Simple.Utils (ordNub)
-import Distribution.Solver.Types.ComponentDeps (ComponentDeps)
-import qualified Distribution.Solver.Types.ComponentDeps as CD
-import Distribution.Solver.Types.OptionalStanza
-
 import qualified Data.ByteString.Lazy as LBS
+import Data.Foldable (fold)
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Map as Map
-import qualified Data.Monoid as Mon
+import Distribution.Verbosity
 import System.FilePath ((</>))
 import Text.PrettyPrint (hsep, parens, text)
 
@@ -146,7 +145,7 @@ type ElaboratedPlanPackage =
 -- | User-friendly display string for an 'ElaboratedPlanPackage'.
 elabPlanPackageName :: Verbosity -> ElaboratedPlanPackage -> String
 elabPlanPackageName verbosity (PreExisting ipkg)
-  | verbosity <= normal = prettyShow (packageName ipkg)
+  | verbosityLevel verbosity <= Normal = prettyShow (packageName ipkg)
   | otherwise = prettyShow (installedUnitId ipkg)
 elabPlanPackageName verbosity (Configured elab) =
   elabConfiguredName verbosity elab
@@ -163,13 +162,12 @@ showElaboratedInstallPlan = InstallPlan.showInstallPlan_gen showNode
         }
       where
         herald =
-          ( hsep
-              [ text (InstallPlan.showPlanPackageTag pkg)
-              , InstallPlan.foldPlanPackage (const mempty) in_mem pkg
-              , pretty (packageId pkg)
-              , parens (pretty (nodeKey pkg))
-              ]
-          )
+          hsep
+            [ text (InstallPlan.showPlanPackageTag pkg)
+            , InstallPlan.foldPlanPackage (const mempty) in_mem pkg
+            , pretty (packageId pkg)
+            , parens (pretty (nodeKey pkg))
+            ]
 
         in_mem elab = case elabBuildStyle elab of
           BuildInplaceOnly InMemory -> parens (text "In Memory")
@@ -183,22 +181,37 @@ showElaboratedInstallPlan = InstallPlan.showInstallPlan_gen showNode
 
 -- TODO: [code cleanup] decide if we really need this, there's not much in it, and in principle
 --      even platform and compiler could be different if we're building things
---      like a server + client with ghc + ghcjs
+--      like a server + client with native ghc + the ghc javascript backend
 data ElaboratedSharedConfig = ElaboratedSharedConfig
   { pkgConfigPlatform :: Platform
   , pkgConfigCompiler :: Compiler -- TODO: [code cleanup] replace with CompilerInfo
   , pkgConfigCompilerProgs :: ProgramDb
-  -- ^ The programs that the compiler configured (e.g. for GHC, the progs
-  -- ghc & ghc-pkg). Once constructed, only the 'configuredPrograms' are
-  -- used.
+  -- ^ All known programs configured once for the project: the compiler
+  -- (e.g. ghc & ghc-pkg) plus associated tools (hsc2hs, haddock, hpc,
+  -- runghc) and toolchain programs (ar, ld, strip). Once constructed,
+  -- only the 'configuredPrograms' are used.
   , pkgConfigReplOptions :: ReplOptions
+  , pkgConfigPackageSources :: Map PackageId ElaboratedPackageSource
+  -- ^ Package-level information shared by all components and instantiations.
   }
-  deriving (Show, Generic, Typeable)
+  deriving (Show, Generic)
 
 -- TODO: [code cleanup] no Eq instance
 
 instance Binary ElaboratedSharedConfig
 instance Structured ElaboratedSharedConfig
+
+-- | Source information shared by all components and instantiations of a package.
+data ElaboratedPackageSource = ElaboratedPackageSource
+  { pkgSourceGPkgDescription :: Cabal.GenericPackageDescription
+  -- ^ The generic description the package was solved with, including any
+  -- rewrites made before solving. The in-library configure reads it for
+  -- internal libraries and package checks.
+  }
+  deriving (Show, Generic)
+
+instance Binary ElaboratedPackageSource
+instance Structured ElaboratedPackageSource
 
 data ElaboratedConfiguredPackage = ElaboratedConfiguredPackage
   { elabUnitId :: UnitId
@@ -224,6 +237,9 @@ data ElaboratedConfiguredPackage = ElaboratedConfiguredPackage
   , elabFlagDefaults :: Cabal.FlagAssignment
   -- ^ The original default flag assignment, used only for reporting.
   , elabPkgDescription :: Cabal.PackageDescription
+  , elabGPkgDescriptionHash :: HashValue
+  -- ^ Fingerprint of the original generic description for config cache invalidation,
+  -- including changes to conditionals that do not affect 'elabPkgDescription'.
   , elabPkgSourceLocation :: PackageLocation (Maybe FilePath)
   -- ^ Where the package comes from, e.g. tarball, local dir etc. This
   --   is not the same as where it may be unpacked to for the build.
@@ -262,13 +278,13 @@ data ElaboratedConfiguredPackage = ElaboratedConfiguredPackage
   -- that a user enabled tests globally, and some local packages
   -- just happen not to have any tests.  (But perhaps we should
   -- warn if ALL local packages don't have any tests.)
-  , elabPackageDbs :: [Maybe PackageDB]
-  , elabSetupPackageDBStack :: PackageDBStack
-  , elabBuildPackageDBStack :: PackageDBStack
-  , elabRegisterPackageDBStack :: PackageDBStack
-  , elabInplaceSetupPackageDBStack :: PackageDBStack
-  , elabInplaceBuildPackageDBStack :: PackageDBStack
-  , elabInplaceRegisterPackageDBStack :: PackageDBStack
+  , elabPackageDbs :: [Maybe PackageDBCWD]
+  , elabSetupPackageDBStack :: PackageDBStackCWD
+  , elabBuildPackageDBStack :: PackageDBStackCWD
+  , elabRegisterPackageDBStack :: PackageDBStackCWD
+  , elabInplaceSetupPackageDBStack :: PackageDBStackCWD
+  , elabInplaceBuildPackageDBStack :: PackageDBStackCWD
+  , elabInplaceRegisterPackageDBStack :: PackageDBStackCWD
   , elabPkgDescriptionOverride :: Maybe CabalFileText
   , -- TODO: make per-component variants of these flags
     elabBuildOptions :: LBC.BuildOptions
@@ -276,6 +292,7 @@ data ElaboratedConfiguredPackage = ElaboratedConfiguredPackage
   , elabProgramPaths :: Map String FilePath
   , elabProgramArgs :: Map String [String]
   , elabProgramPathExtra :: [FilePath]
+  , elabConfiguredPrograms :: [ConfiguredProgram]
   , elabConfigureScriptArgs :: [String]
   , elabExtraLibDirs :: [FilePath]
   , elabExtraLibDirsStatic :: [FilePath]
@@ -300,8 +317,9 @@ data ElaboratedConfiguredPackage = ElaboratedConfiguredPackage
   , elabHaddockContents :: Maybe PathTemplate
   , elabHaddockIndex :: Maybe PathTemplate
   , elabHaddockBaseUrl :: Maybe String
-  , elabHaddockLib :: Maybe String
+  , elabHaddockResourcesDir :: Maybe String
   , elabHaddockOutputDir :: Maybe FilePath
+  , elabHaddockUseUnicode :: Bool
   , elabTestMachineLog :: Maybe PathTemplate
   , elabTestHumanLog :: Maybe PathTemplate
   , elabTestShowDetails :: Maybe TestShowDetails
@@ -314,15 +332,10 @@ data ElaboratedConfiguredPackage = ElaboratedConfiguredPackage
 
     elabSetupScriptStyle :: SetupScriptStyle
   -- ^ One of four modes for how we build and interact with the Setup.hs
-  -- script, based on whether it's a build-type Custom, with or without
-  -- explicit deps and the cabal spec version the .cabal file needs.
-  , elabSetupScriptCliVersion :: Version
-  -- ^ The version of the Cabal command line interface that we are using
-  -- for this package. This is typically the version of the Cabal lib
-  -- that the Setup.hs is built against.
-  --
-  -- TODO: We might want to turn this into a enum,
-  -- yet different enum than 'CabalSpecVersion'.
+  -- script, based on whether it's a build-type Custom or Hooks, with or
+  -- without explicit deps, and the cabal spec version the .cabal file needs.
+  , elabSetupScriptCliVersion :: SetupCliVersion
+  -- ^ The Cabal library version used to provide the Setup CLI.
   , -- Build time related:
     elabConfigureTargets :: [ComponentTarget]
   , elabBuildTargets :: [ComponentTarget]
@@ -337,7 +350,7 @@ data ElaboratedConfiguredPackage = ElaboratedConfiguredPackage
     elabPkgOrComp :: ElaboratedPackageOrComponent
   -- ^ Component/package specific information
   }
-  deriving (Eq, Show, Generic, Typeable)
+  deriving (Eq, Show, Generic)
 
 normaliseConfiguredPackage
   :: ElaboratedSharedConfig
@@ -432,12 +445,11 @@ dataDirsEnvironmentForPlan
   -> ElaboratedInstallPlan
   -> [(String, Maybe FilePath)]
 dataDirsEnvironmentForPlan distDirLayout =
-  catMaybes
-    . fmap
-      ( InstallPlan.foldPlanPackage
-          (const Nothing)
-          (dataDirEnvVarForPackage distDirLayout)
-      )
+  mapMaybe
+    ( InstallPlan.foldPlanPackage
+        (const Nothing)
+        (dataDirEnvVarForPackage distDirLayout)
+    )
     . InstallPlan.toList
 
 -- | Construct an environment variable that points
@@ -457,9 +469,7 @@ dataDirEnvVarForPackage distDirLayout pkg =
     BuildInplaceOnly{} ->
       Just
         ( pkgPathEnvVar (elabPkgDescription pkg) "datadir"
-        , Just $
-            srcPath (elabPkgSourceLocation pkg)
-              </> dataDir (elabPkgDescription pkg)
+        , Just dataDirPath
         )
   where
     srcPath (LocalUnpackedPackage path) = path
@@ -473,6 +483,16 @@ dataDirEnvVarForPackage distDirLayout pkg =
         "calling dataDirEnvVarForPackage on a not-downloaded repo is an error"
     unpackedPath =
       distUnpackedSrcDirectory distDirLayout $ elabPkgSourceId pkg
+    rawDataDir = getSymbolicPath $ dataDir (elabPkgDescription pkg)
+    pkgDir = srcPath (elabPkgSourceLocation pkg)
+    dataDirPath
+      | null rawDataDir =
+          pkgDir
+      | otherwise =
+          pkgDir </> rawDataDir
+
+-- NB: rawDataDir may be absolute, in which case
+-- (</>) drops its first argument.
 
 instance Package ElaboratedConfiguredPackage where
   packageId = elabPkgSourceId
@@ -509,7 +529,7 @@ elabComponentName elab =
 -- | A user-friendly descriptor for an 'ElaboratedConfiguredPackage'.
 elabConfiguredName :: Verbosity -> ElaboratedConfiguredPackage -> String
 elabConfiguredName verbosity elab
-  | verbosity <= normal =
+  | verbosityLevel verbosity <= Normal =
       ( case elabPkgOrComp elab of
           ElabPackage _ -> ""
           ElabComponent comp ->
@@ -550,7 +570,7 @@ elabOrderDependencies elab =
   case elabPkgOrComp elab of
     -- Important not to have duplicates: otherwise InstallPlan gets
     -- confused.
-    ElabPackage pkg -> ordNub (CD.flatDeps (pkgOrderDependencies pkg))
+    ElabPackage pkg -> ordNub (fold (pkgOrderDependencies pkg))
     ElabComponent comp -> compOrderDependencies comp
 
 -- | Like 'elabOrderDependencies', but only returns dependencies on
@@ -561,7 +581,7 @@ elabOrderLibDependencies elab =
     ElabPackage pkg ->
       map (newSimpleUnitId . confInstId) $
         ordNub $
-          CD.flatDeps (map fst <$> pkgLibDependencies pkg)
+          fold (map fst <$> pkgLibDependencies pkg)
     ElabComponent comp -> compOrderLibDependencies comp
 
 -- | The library dependencies (i.e., the libraries we depend on, NOT
@@ -754,7 +774,7 @@ data NotPerComponentReason
 data NotPerComponentBuildType
   = CuzConfigureBuildType
   | CuzCustomBuildType
-  | CuzMakeBuildType
+  | CuzHooksBuildType
   deriving (Eq, Show, Generic)
 
 instance Binary NotPerComponentBuildType
@@ -771,7 +791,7 @@ whyNotPerComponent = \case
     "build-type is " ++ case bt of
       CuzConfigureBuildType -> "Configure"
       CuzCustomBuildType -> "Custom"
-      CuzMakeBuildType -> "Make"
+      CuzHooksBuildType -> "Hooks"
   CuzCabalSpecVersion -> "cabal-version is less than 1.8"
   CuzNoBuildableComponents -> "there are no buildable components"
   CuzDisablePerComponent -> "you passed --disable-per-component"
@@ -781,7 +801,7 @@ whyNotPerComponent = \case
 pkgOrderDependencies :: ElaboratedPackage -> ComponentDeps [UnitId]
 pkgOrderDependencies pkg =
   fmap (map (newSimpleUnitId . confInstId)) (map fst <$> pkgLibDependencies pkg)
-    `Mon.mappend` fmap (map (newSimpleUnitId . confInstId)) (pkgExeDependencies pkg)
+    <> fmap (map (newSimpleUnitId . confInstId)) (pkgExeDependencies pkg)
 
 -- | This is used in the install plan to indicate how the package will be
 -- built.
@@ -852,6 +872,10 @@ data ComponentTarget = ComponentTarget ComponentName SubComponentTarget
 instance Binary ComponentTarget
 instance Structured ComponentTarget
 
+-- | Extract the component name from a 'ComponentTarget'.
+componentTargetName :: ComponentTarget -> ComponentName
+componentTargetName (ComponentTarget cname _) = cname
+
 -- | Unambiguously render a 'ComponentTarget', e.g., to pass
 -- to a Cabal Setup script.
 showComponentTarget :: PackageId -> ComponentTarget -> String
@@ -904,26 +928,62 @@ componentOptionalStanza _ = Nothing
 
 -- | There are four major cases for Setup.hs handling:
 --
---  1. @build-type@ Custom with a @custom-setup@ section
+--  1. @build-type@ Custom or Hooks with a @custom-setup@ section
 --  2. @build-type@ Custom without a @custom-setup@ section
---  3. @build-type@ not Custom with @cabal-version >  $our-cabal-version@
---  4. @build-type@ not Custom with @cabal-version <= $our-cabal-version@
+--  3. @build-type@ neither Custom nor Hooks, with
+--     @cabal-version >  $our-cabal-version@
+--  4. @build-type@ neither Custom nor Hooks, with
+--     @cabal-version <= $our-cabal-version@
 --
 -- It's also worth noting that packages specifying @cabal-version: >= 1.23@
 -- or later that have @build-type@ Custom will always have a @custom-setup@
 -- section. Therefore in case 2, the specified @cabal-version@ will always be
 -- less than 1.23.
 --
--- In cases 1 and 2 we obviously have to build an external Setup.hs script,
--- while in case 4 we can use the internal library API. In case 3 we also have
--- to build an external Setup.hs script because the package needs a later
--- Cabal lib version than we can support internally.
+-- In cases 1 and 2 we obviously have to compile an external program: a
+-- Setup.hs script for build-type Custom, and the hooks executable for
+-- build-type Hooks (with a possible fallback to a Setup.hs).
+-- In case 3 we also have to build an external Setup.hs script, because the
+-- package needs a later Cabal lib version than we can support internally.
+-- Only in case 4 can we use the internal library API alone.
 data SetupScriptStyle
-  = SetupCustomExplicitDeps
-  | SetupCustomImplicitDeps
-  | SetupNonCustomExternalLib
-  | SetupNonCustomInternalLib
-  deriving (Eq, Show, Generic, Typeable)
+  = -- | @build-type: Custom@ (or @Hooks@) with explicit @setup-depends@
+    SetupCustomExplicitDeps
+  | -- | @build-type: Custom@ without an explicit @setup-depends@
+    SetupCustomImplicitDeps
+  | -- | Non-Custom/Hooks build-type, but we fall back to an external @Setup.hs@
+    -- in order to satisfy Cabal version constraints.
+    SetupNonCustomExternalLib
+  | -- | Non-Custom/Hooks build type: Cabal provides the Setup.hs CLI internally.
+    SetupNonCustomInternalLib
+  deriving (Eq, Show, Generic)
 
 instance Binary SetupScriptStyle
 instance Structured SetupScriptStyle
+
+-- | The version of the Cabal library used to provide the Setup CLI.
+--
+-- The version corresponds to the 'SetupScriptStyle' we use: for
+-- 'SetupNonCustomInternalLib' we use the Cabal library that @cabal-install@ was
+-- built against, and for every other 'SetupScripStyle' we pick the version
+-- chosen by the solver to compile the Setup script.
+data SetupCliVersion
+  = -- | Use the Cabal library version that @cabal-install@ was linked against
+    -- to provide the Setup CLI.
+    InternalCabalLib -- NB: this very carefully __does not__ store a version number.
+    --
+    -- This is because of #11416: the install plan is cached across @cabal-install@
+    -- invocations, so we should not pin a Cabal library version which would
+    -- go stale when doing a minor @cabal-install@ upgrade.
+  | -- | Use the Cabal library version picked by the solver to provide
+    -- the Setup CLI.
+    ExternalCabalLib !Version
+  deriving (Eq, Show, Generic)
+
+instance Binary SetupCliVersion
+instance Structured SetupCliVersion
+
+-- | The version of the Cabal library used to provide the Setup CLI.
+setupCliVersion :: SetupCliVersion -> Version
+setupCliVersion InternalCabalLib = cabalVersion
+setupCliVersion (ExternalCabalLib version) = version

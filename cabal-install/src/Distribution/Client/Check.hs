@@ -1,9 +1,3 @@
-{-# LANGUAGE CPP #-}
-
------------------------------------------------------------------------------
-
------------------------------------------------------------------------------
-
 -- |
 -- Module      :  Distribution.Client.Check
 -- Copyright   :  (c) Lennart Kolmodin 2008
@@ -21,41 +15,38 @@ module Distribution.Client.Check
 import Distribution.Client.Compat.Prelude
 import Prelude ()
 
-import Distribution.Client.Utils.Parsec (renderParseError)
+import Distribution.Client.Errors
+
+import Distribution.Client.Errors.Parser
+import Distribution.Fields.ParseResult
 import Distribution.PackageDescription (GenericPackageDescription)
 import Distribution.PackageDescription.Check
 import Distribution.PackageDescription.Parsec
-  ( parseGenericPackageDescription
-  , runParseResult
-  )
-import Distribution.Parsec (PWarning (..), showPError)
-import Distribution.Simple.Utils (defaultPackageDesc, dieWithException, notice, warn, warnError)
-import System.IO (hPutStr, stderr)
+import Distribution.Parsec
+import Distribution.Simple.Utils (defaultPackageDescCwd, dieWithException, notice, warn, warnError)
+import Distribution.Utils.Path (getSymbolicPath)
 
 import qualified Control.Monad as CM
 import qualified Data.ByteString as BS
 import qualified Data.Function as F
 import qualified Data.List as L
 import qualified Data.List.NonEmpty as NE
-import Distribution.Client.Errors
 import qualified System.Directory as Dir
 
-readGenericPackageDescriptionCheck :: Verbosity -> FilePath -> IO ([PWarning], GenericPackageDescription)
+readGenericPackageDescriptionCheck :: Verbosity -> FilePath -> IO ([PWarningWithSource CabalFileSource], GenericPackageDescription)
 readGenericPackageDescriptionCheck verbosity fpath = do
   exists <- Dir.doesFileExist fpath
   unless exists $
     dieWithException verbosity $
       FileDoesntExist fpath
   bs <- BS.readFile fpath
-  let (warnings, result) = runParseResult (parseGenericPackageDescription bs)
+  let (warnings, result) = runParseResult $ withSource (PCabalFile (fpath, bs)) (parseGenericPackageDescription bs)
   case result of
-    Left (_, errors) -> do
-      traverse_ (warn verbosity . showPError fpath) errors
-      hPutStr stderr $ renderParseError fpath bs errors warnings
-      dieWithException verbosity ParseError
+    Left (mspecVersion, errors) -> do
+      dieWithException verbosity (CabalCheckParseError (CabalFileParseError fpath bs errors mspecVersion warnings))
     Right x -> return (warnings, x)
 
--- | Checks a packge for common errors. Returns @True@ if the package
+-- | Checks a package for common errors. Returns @True@ if the package
 -- is fit to upload to Hackage, @False@ otherwise.
 -- Note: must be called with the CWD set to the directory containing
 -- the '.cabal' file.
@@ -66,10 +57,10 @@ check
   -- (e.g. @invalid-path-win@) to ignore.
   -> IO Bool
 check verbosity ignores = do
-  pdfile <- defaultPackageDesc verbosity
+  pdfile <- getSymbolicPath <$> defaultPackageDescCwd verbosity
   (ws, ppd) <- readGenericPackageDescriptionCheck verbosity pdfile
   -- convert parse warnings into PackageChecks
-  let ws' = map (wrapParseWarning pdfile) ws
+  let ws' = map (wrapParseWarning pdfile . pwarning) ws
   ioChecks <- checkPackageFilesGPD verbosity ppd "."
   let packageChecksPrim = ioChecks ++ checkPackage ppd ++ ws'
       (packageChecks, unrecs) = filterPackageChecksByIdString packageChecksPrim ignores

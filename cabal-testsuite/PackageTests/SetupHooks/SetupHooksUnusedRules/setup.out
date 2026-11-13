@@ -1,0 +1,14 @@
+# Setup configure
+Configuring setup-hooks-unused-rules-test-0.1.0.0...
+# Setup build
+Warning: The following rules are not demanded and will not be run:
+  - RuleId {ruleNameSpace = RulesNameSpace {rulesUnitId = UnitId "main", rulesModuleName = ModuleName "SetupHooks", rulesSrcLoc = (19,59)}, ruleName = "r1"},
+    generating [setup.dist/work/dist/build/autogen </> X.hs,setup.dist/work/dist/build/autogen </> Y.hs]
+  - RuleId {ruleNameSpace = RulesNameSpace {rulesUnitId = UnitId "main", rulesModuleName = ModuleName "SetupHooks", rulesSrcLoc = (19,59)}, ruleName = "r2"},
+    generating [setup.dist/work/dist/build/autogen </> Z.hs]
+Perhaps add the following to the 'autogen-modules' field of the library component.
+  - X (for rule "r1")
+  - Y (for rule "r1")
+  - Z (for rule "r2")
+Preprocessing library for setup-hooks-unused-rules-test-0.1.0.0...
+Building library for setup-hooks-unused-rules-test-0.1.0.0...

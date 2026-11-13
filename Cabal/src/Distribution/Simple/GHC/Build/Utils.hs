@@ -1,3 +1,5 @@
+{-# LANGUAGE DataKinds #-}
+
 module Distribution.Simple.GHC.Build.Utils where
 
 import Distribution.Compat.Prelude
@@ -5,47 +7,66 @@ import Prelude ()
 
 import Control.Monad (msum)
 import Data.Char (isLower)
+import qualified Data.Text as T
 import Distribution.ModuleName (ModuleName)
 import qualified Distribution.ModuleName as ModuleName
 import Distribution.PackageDescription as PD
 import Distribution.PackageDescription.Utils (cabalBug)
 import Distribution.Simple.BuildPaths
+import Distribution.Simple.BuildWay
 import Distribution.Simple.Compiler
+import Distribution.Simple.Errors (WhatToFind (..))
 import qualified Distribution.Simple.GHC.Internal as Internal
 import Distribution.Simple.Program.GHC
 import Distribution.Simple.Setup.Common
 import Distribution.Simple.Utils
 import Distribution.System
 import Distribution.Types.LocalBuildInfo
-import Distribution.Utils.Path (getSymbolicPath)
+  ( LocalBuildInfo (hostPlatform)
+  )
+import Distribution.Utils.Path
 import Distribution.Verbosity
 import System.FilePath
-  ( replaceExtension
-  , takeExtension
-  , (<.>)
-  , (</>)
+  ( takeExtension
   )
 
 -- | Find the path to the entry point of an executable (typically specified in
--- @main-is@, and found in @hs-source-dirs@).
+-- @main-is@, and found in @hs-source-dirs@ -- yes, even when @main-is@ is not a Haskell file).
 findExecutableMain
   :: Verbosity
-  -> FilePath
+  -> Maybe (SymbolicPath CWD (Dir Pkg))
+  -> SymbolicPath Pkg (Dir build)
   -- ^ Build directory
-  -> (BuildInfo, FilePath)
+  -> (BuildInfo, RelativePath Source File)
   -- ^ The build info and module path of an executable-like component (Exe, Test, Bench)
-  -> IO FilePath
+  -> IO (SymbolicPath Pkg File)
   -- ^ The path to the main source file.
-findExecutableMain verbosity bdir (bnfo, modPath) =
-  findFileEx verbosity (bdir : map getSymbolicPath (hsSourceDirs bnfo)) modPath
+findExecutableMain verbosity mbWorkDir buildDir (bnfo, modPath) =
+  findFileCwd
+    verbosity
+    FindHaskellSourceFile
+    mbWorkDir
+    (coerceSymbolicPath buildDir : hsSourceDirs bnfo)
+    modPath
 
 -- | Does this compiler support the @-dynamic-too@ option
 supportsDynamicToo :: Compiler -> Bool
 supportsDynamicToo = Internal.ghcLookupProperty "Support dynamic-too"
 
+compilerBuildWay :: Compiler -> BuildWay
+compilerBuildWay c =
+  case (isDynamic c, isProfiled c) of
+    (True, True) -> ProfDynWay
+    (True, False) -> DynWay
+    (False, True) -> ProfWay
+    (False, False) -> StaticWay
+
 -- | Is this compiler's RTS dynamically linked?
 isDynamic :: Compiler -> Bool
 isDynamic = Internal.ghcLookupProperty "GHC Dynamic"
+
+isProfiled :: Compiler -> Bool
+isProfiled = Internal.ghcLookupProperty "GHC Profiled"
 
 -- | Should we dynamically link the foreign library, based on its 'foreignLibType'?
 withDynFLib :: ForeignLib -> Bool
@@ -58,32 +79,76 @@ withDynFLib flib =
     ForeignLibTypeUnknown ->
       cabalBug "unknown foreign lib type"
 
+-- | Is the extension of the file in the list of extensions?
+extensionIn :: [String] -> FilePath -> Bool
+extensionIn exts fp = takeExtension fp `elem` exts
+
 -- | Is this file a C++ source file, i.e. ends with .cpp, .cxx, or .c++?
 isCxx :: FilePath -> Bool
-isCxx fp = elem (takeExtension fp) [".cpp", ".cxx", ".c++"]
+isCxx = extensionIn [".cpp", ".cxx", ".c++"]
 
 -- | Is this a C source file, i.e. ends with .c?
 isC :: FilePath -> Bool
-isC fp = elem (takeExtension fp) [".c"]
+isC = extensionIn [".c"]
 
 -- | FilePath has a Haskell extension: .hs or .lhs
 isHaskell :: FilePath -> Bool
-isHaskell fp = elem (takeExtension fp) [".hs", ".lhs"]
+isHaskell = extensionIn [".hs", ".lhs"]
 
 -- | Returns True if the modification date of the given source file is newer than
 -- the object file we last compiled for it, or if no object file exists yet.
-checkNeedsRecompilation :: FilePath -> GhcOptions -> IO Bool
-checkNeedsRecompilation filename opts = filename `moreRecentFile` oname
+checkNeedsRecompilation
+  :: Maybe (SymbolicPath CWD (Dir Pkg))
+  -> SymbolicPath Pkg File
+  -> GhcOptions
+  -> IO Bool
+checkNeedsRecompilation mbWorkDir filename opts =
+  i filename `moreRecentFile` oname
   where
-    oname = getObjectFileName filename opts
+    oname = getObjectFileName mbWorkDir filename opts
+    i = interpretSymbolicPath mbWorkDir -- See Note [Symbolic paths] in Distribution.Utils.Path
 
 -- | Finds the object file name of the given source file
-getObjectFileName :: FilePath -> GhcOptions -> FilePath
-getObjectFileName filename opts = oname
+getObjectFileName
+  :: Maybe (SymbolicPath CWD (Dir Pkg))
+  -- ^ Package directory
+  -> SymbolicPath Pkg File
+  -- ^ Symbolic path to the source file
+  -> GhcOptions
+  -- ^ GHC compilation options
+  -> FilePath
+  -- ^ Path to the object file
+getObjectFileName mbWorkDir filename opts = oname
   where
+    i = interpretSymbolicPath mbWorkDir -- See Note [Symbolic paths] in Distribution.Utils.Path
     odir = fromFlag (ghcOptObjDir opts)
     oext = fromFlagOrDefault "o" (ghcOptObjSuffix opts)
-    oname = odir </> replaceExtension filename oext
+    -- NB: the filepath might be absolute, e.g. if it is the path to
+    -- an autogenerated .hs file.
+    oname = i $ objectFilePath odir oext filename
+
+-- | Given the path to a source file (Haskell, C, JS...), return the corresponding
+-- object file path (input to the linker).
+objectFilePath
+  :: SymbolicPath Pkg (Dir Artifacts)
+  -- ^ Objects build directory (@-odir@)
+  -> String
+  -- ^ Object file extension
+  -> SymbolicPath Pkg File
+  -- ^ Source file path (relative or absolute)
+  -> SymbolicPath Pkg File
+  -- ^ Resulting object file path
+objectFilePath buildTargetDir objExt src =
+  case symbolicPathRelative_maybe objPath of
+    Just relObjPath ->
+      -- For a relative input file, the output object file is placed under the -odir.
+      coerceSymbolicPath buildTargetDir </> relObjPath
+    Nothing ->
+      -- For an absolute input file, the object file is placed next to the input file
+      -- and not within -odir.
+      objPath
+  where
+    objPath = src `replaceExtensionSymbolicPath` objExt
 
 -- | Target name for a foreign library (the actual file name)
 --
@@ -175,7 +240,7 @@ exeMainModuleName bnfo =
   -- Moreover, -main-is when parsed left-to-right can update either
   -- the "Main" module name, or the "main" function name, or both,
   -- see also 'decodeMainIsArg'.
-  fromMaybe ModuleName.main $ msum $ reverse $ map decodeMainIsArg $ findIsMainArgs ghcopts
+  fromMaybe ModuleName.main $ msum $ reverse $ map decodeMainIsArg $ findIsMainArgs $ map T.unpack ghcopts
   where
     ghcopts = hcOptions GHC bnfo
 

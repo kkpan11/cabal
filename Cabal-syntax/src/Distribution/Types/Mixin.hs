@@ -1,6 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-
 module Distribution.Types.Mixin
   ( Mixin (..)
   , mkMixin
@@ -31,12 +28,12 @@ data Mixin = Mixin
   , mixinLibraryName :: LibraryName
   , mixinIncludeRenaming :: IncludeRenaming
   }
-  deriving (Show, Read, Eq, Ord, Typeable, Data, Generic)
+  deriving (Show, Read, Eq, Ord, Data, Generic)
 
 instance Binary Mixin
 instance Structured Mixin
 
-instance NFData Mixin where rnf = genericRnf
+instance NFData Mixin
 
 instance Pretty Mixin where
   pretty (Mixin pn LMainLibName incl) = pretty pn <+> pretty incl
@@ -65,8 +62,7 @@ instance Parsec Mixin where
       versionGuardMultilibs
       LSubLibName <$> parsec
     P.spaces
-    incl <- parsec
-    return (mkMixin pn ln incl)
+    mkMixin pn ln <$> parsec
 
 versionGuardMultilibs :: CabalParsing m => m ()
 versionGuardMultilibs = do

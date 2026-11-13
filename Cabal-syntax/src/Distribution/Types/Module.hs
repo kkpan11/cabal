@@ -1,7 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-
 module Distribution.Types.Module
   ( Module (..)
   ) where
@@ -26,7 +22,7 @@ import qualified Text.PrettyPrint as Disp
 -- the 'InstalledPackageInfo'.
 data Module
   = Module DefUnitId ModuleName
-  deriving (Generic, Read, Show, Eq, Ord, Typeable, Data)
+  deriving (Generic, Read, Show, Eq, Ord, Data)
 
 instance Binary Module
 instance Structured Module
@@ -36,11 +32,7 @@ instance Pretty Module where
     pretty uid <<>> Disp.text ":" <<>> pretty mod_name
 
 instance Parsec Module where
-  parsec = do
-    uid <- parsec
-    _ <- P.char ':'
-    mod_name <- parsec
-    return (Module uid mod_name)
+  parsec = Module <$> parsec <* P.char ':' <*> parsec
 
 instance NFData Module where
   rnf (Module uid mod_name) = rnf uid `seq` rnf mod_name

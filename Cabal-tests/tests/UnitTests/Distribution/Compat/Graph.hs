@@ -1,6 +1,4 @@
-{-# LANGUAGE PatternGuards #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
 module UnitTests.Distribution.Compat.Graph
     ( tests
     , arbitraryGraph

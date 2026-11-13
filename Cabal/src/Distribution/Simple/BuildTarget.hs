@@ -1,12 +1,5 @@
-{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DuplicateRecordFields #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE NamedFieldPuns #-}
-{-# LANGUAGE RankNTypes #-}
-
------------------------------------------------------------------------------
-
------------------------------------------------------------------------------
 
 -- |
 -- Module      :  Distribution.Client.BuildTargets
@@ -40,6 +33,7 @@ module Distribution.Simple.BuildTarget
   , reportBuildTargetProblems
   ) where
 
+import Data.Bifunctor (bimap, second)
 import Distribution.Compat.Prelude
 import Prelude ()
 
@@ -129,6 +123,9 @@ data BuildTarget
   | -- | A specific file within a specific component.
     BuildTargetFile ComponentName FilePath
   deriving (Eq, Show, Generic)
+
+-- | @since 3.18
+deriving instance Ord BuildTarget
 
 instance Binary BuildTarget
 
@@ -228,12 +225,12 @@ readUserBuildTarget targetstr =
 
     tokens :: CabalParsing m => m (String, Maybe (String, Maybe String))
     tokens =
-      (\s -> (s, Nothing)) <$> parsecHaskellString
+      (,Nothing) <$> parsecHaskellString
         <|> (,) <$> token <*> P.optional (P.char ':' *> tokens2)
 
     tokens2 :: CabalParsing m => m (String, Maybe String)
     tokens2 =
-      (\s -> (s, Nothing)) <$> parsecHaskellString
+      (,Nothing) <$> parsecHaskellString
         <|> (,) <$> token <*> P.optional (P.char ':' *> (parsecHaskellString <|> token))
 
     token :: CabalParsing m => m String
@@ -326,7 +323,7 @@ resolveBuildTarget pkg userTarget fexists =
               (things, got :| _) = unzip' expected'
            in BuildTargetExpected userTarget (NE.toList things) got
       | not (null nosuch) = BuildTargetNoSuch userTarget nosuch
-      | otherwise = error $ "resolveBuildTarget: internal error in matching"
+      | otherwise = error "resolveBuildTarget: internal error in matching"
       where
         expected = [(thing, got) | MatchErrorExpected thing got <- errs]
         nosuch = [(thing, got) | MatchErrorNoSuch thing got <- errs]
@@ -353,9 +350,9 @@ disambiguateBuildTargets pkgid original =
       where
         (amb, unamb) = step ql ts
 
-    userTargetQualLevel (UserBuildTargetSingle _) = QL1
-    userTargetQualLevel (UserBuildTargetDouble _ _) = QL2
-    userTargetQualLevel (UserBuildTargetTriple _ _ _) = QL3
+    userTargetQualLevel UserBuildTargetSingle{} = QL1
+    userTargetQualLevel UserBuildTargetDouble{} = QL2
+    userTargetQualLevel UserBuildTargetTriple{} = QL3
 
     step
       :: QualLevel
@@ -407,7 +404,7 @@ reportBuildTargetProblems verbosity problems = do
     targets ->
       dieWithException verbosity $
         UnknownBuildTarget $
-          map (\(target, nosuch) -> (showUserBuildTarget target, nosuch)) targets
+          map (first showUserBuildTarget) targets
 
   case [(t, ts) | BuildTargetAmbiguous t ts <- problems] of
     [] -> return ()
@@ -415,10 +412,9 @@ reportBuildTargetProblems verbosity problems = do
       dieWithException verbosity $
         AmbiguousBuildTarget $
           map
-            ( \(target, amb) ->
-                ( showUserBuildTarget target
-                , (map (\(ut, bt) -> (showUserBuildTarget ut, showBuildTargetKind bt)) amb)
-                )
+            ( bimap
+                showUserBuildTarget
+                (map (bimap showUserBuildTarget showBuildTargetKind))
             )
             targets
   where
@@ -496,12 +492,12 @@ pkgComponentInfo pkg =
     , cinfoStrName = componentStringName pkg (componentName c)
     , cinfoSrcDirs = map getSymbolicPath $ hsSourceDirs bi
     , cinfoModules = componentModules c
-    , cinfoHsFiles = componentHsFiles c
-    , cinfoAsmFiles = asmSources bi
-    , cinfoCmmFiles = cmmSources bi
-    , cinfoCFiles = cSources bi
-    , cinfoCxxFiles = cxxSources bi
-    , cinfoJsFiles = jsSources bi
+    , cinfoHsFiles = map getSymbolicPath $ componentHsFiles c
+    , cinfoAsmFiles = map getSymbolicPath $ asmSources bi
+    , cinfoCmmFiles = map getSymbolicPath $ cmmSources bi
+    , cinfoCFiles = map getSymbolicPath $ cSources bi
+    , cinfoCxxFiles = map getSymbolicPath $ cxxSources bi
+    , cinfoJsFiles = map getSymbolicPath $ jsSources bi
     }
   | c <- pkgComponents pkg
   , let bi = componentBuildInfo c
@@ -529,7 +525,7 @@ componentModules (CExe exe) = exeModules exe
 componentModules (CTest test) = testModules test
 componentModules (CBench bench) = benchmarkModules bench
 
-componentHsFiles :: Component -> [FilePath]
+componentHsFiles :: Component -> [RelativePath Source File]
 componentHsFiles (CExe exe) = [modulePath exe]
 componentHsFiles
   ( CTest
@@ -606,13 +602,13 @@ showComponentKindShort BenchKind = "bench"
 --
 
 matchComponent1 :: [ComponentInfo] -> String -> Match BuildTarget
-matchComponent1 cs = \str1 -> do
+matchComponent1 cs str1 = do
   guardComponentName str1
   c <- matchComponentName cs str1
   return (BuildTargetComponent (cinfoName c))
 
 matchComponent2 :: [ComponentInfo] -> String -> String -> Match BuildTarget
-matchComponent2 cs = \str1 str2 -> do
+matchComponent2 cs str1 str2 = do
   ckind <- matchComponentKind str1
   guardComponentName str2
   c <- matchComponentKindAndName cs ckind str2
@@ -652,7 +648,7 @@ matchComponentKindAndName cs ckind str =
   orNoSuchThing (showComponentKind ckind ++ " component") str $
     increaseConfidenceFor $
       matchInexactly
-        (\(ck, cn) -> (ck, caseFold cn))
+        (second caseFold)
         [((cinfoKind c, cinfoStrName c), c) | c <- cs]
         (ckind, str)
 
@@ -661,7 +657,7 @@ matchComponentKindAndName cs ckind str =
 --
 
 matchModule1 :: [ComponentInfo] -> String -> Match BuildTarget
-matchModule1 cs = \str1 -> do
+matchModule1 cs str1 = do
   guardModuleName str1
   nubMatchErrors $ do
     c <- tryEach cs
@@ -670,7 +666,7 @@ matchModule1 cs = \str1 -> do
     return (BuildTargetModule (cinfoName c) m)
 
 matchModule2 :: [ComponentInfo] -> String -> String -> Match BuildTarget
-matchModule2 cs = \str1 str2 -> do
+matchModule2 cs str1 str2 = do
   guardComponentName str1
   guardModuleName str2
   c <- matchComponentName cs str1
@@ -853,6 +849,9 @@ data MatchError
   | MatchErrorNoSuch String String
   deriving (Show, Eq)
 
+-- | @since 3.18
+deriving instance Ord MatchError
+
 instance Alternative Match where
   empty = mzero
   (<|>) = mplus
@@ -900,15 +899,13 @@ instance Applicative Match where
   (<*>) = ap
 
 instance Monad Match where
-  return = pure
-
   NoMatch d ms >>= _ = NoMatch d ms
   ExactMatch d xs >>= f =
     addDepth d $
-      foldr matchPlus matchZero (map f xs)
+      foldr (matchPlus . f) matchZero xs
   InexactMatch d xs >>= f =
     addDepth d . forceInexact $
-      foldr matchPlus matchZero (map f xs)
+      foldr (matchPlus . f) matchZero xs
 
 addDepth :: Confidence -> Match a -> Match a
 addDepth d' (NoMatch d msgs) = NoMatch (d' + d) msgs
@@ -941,13 +938,13 @@ increaseConfidence = ExactMatch 1 [()]
 increaseConfidenceFor :: Match a -> Match a
 increaseConfidenceFor m = m >>= \r -> increaseConfidence >> return r
 
-nubMatches :: Eq a => Match a -> Match a
+nubMatches :: Ord a => Match a -> Match a
 nubMatches (NoMatch d msgs) = NoMatch d msgs
-nubMatches (ExactMatch d xs) = ExactMatch d (nub xs)
-nubMatches (InexactMatch d xs) = InexactMatch d (nub xs)
+nubMatches (ExactMatch d xs) = ExactMatch d (ordNub xs)
+nubMatches (InexactMatch d xs) = InexactMatch d (ordNub xs)
 
 nubMatchErrors :: Match a -> Match a
-nubMatchErrors (NoMatch d msgs) = NoMatch d (nub msgs)
+nubMatchErrors (NoMatch d msgs) = NoMatch d (ordNub msgs)
 nubMatchErrors (ExactMatch d xs) = ExactMatch d xs
 nubMatchErrors (InexactMatch d xs) = InexactMatch d xs
 
@@ -968,14 +965,14 @@ tryEach = exactMatches
 -- | Given a matcher and a key to look up, use the matcher to find all the
 -- possible matches. There may be 'None', a single 'Unambiguous' match or
 -- you may have an 'Ambiguous' match with several possibilities.
-findMatch :: Eq b => Match b -> MaybeAmbiguous b
+findMatch :: Ord b => Match b -> MaybeAmbiguous b
 findMatch match =
   case match of
-    NoMatch _ msgs -> None (nub msgs)
+    NoMatch _ msgs -> None (ordNub msgs)
     ExactMatch _ xs -> checkAmbiguous xs
     InexactMatch _ xs -> checkAmbiguous xs
   where
-    checkAmbiguous xs = case nub xs of
+    checkAmbiguous xs = case ordNub xs of
       [x] -> Unambiguous x
       xs' -> Ambiguous xs'
 
@@ -1016,9 +1013,7 @@ matchInexactly
 matchInexactly cannonicalise xs =
   \x -> case Map.lookup x m of
     Just ys -> exactMatches ys
-    Nothing -> case Map.lookup (cannonicalise x) m' of
-      Just ys -> inexactMatches ys
-      Nothing -> matchZero
+    Nothing -> maybe matchZero inexactMatches (Map.lookup (cannonicalise x) m')
   where
     m = Map.fromListWith (++) [(k, [x]) | (k, x) <- xs]
 

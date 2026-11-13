@@ -7,8 +7,6 @@ main = putStrLn "Old GHC, no nothunks"
 
 {-# LANGUAGE DerivingVia         #-}
 {-# LANGUAGE LambdaCase          #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE StandaloneDeriving  #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 module Main (main) where
 
@@ -21,11 +19,11 @@ import Distribution.Compat.NonEmptySet        (NonEmptySet)
 import Distribution.Compiler                  (CompilerFlavor, PerCompilerFlavor)
 import Distribution.Fields                    (runParseResult)
 import Distribution.ModuleName                (ModuleName)
-import Distribution.PackageDescription.Parsec (parseGenericPackageDescription)
+import Distribution.PackageDescription.Parsec (parseGenericPackageDescription, withSource)
+import Distribution.Parsec.Source
 import Distribution.SPDX                      (License, LicenseExceptionId, LicenseExpression, LicenseId, LicenseRef, SimpleLicenseExpression)
 import Distribution.System                    (Arch, OS)
-import Distribution.Utils.Path                (SymbolicPath)
-import Distribution.Utils.ShortText           (ShortText)
+import Distribution.Utils.Path                (SymbolicPathX)
 import Distribution.Version                   (Version, VersionRange)
 import Language.Haskell.Extension             (Extension, KnownExtension, Language)
 import NoThunks.Class                         (NoThunks (..), OnlyCheckWhnf (..), noThunksInValues)
@@ -45,7 +43,7 @@ main = defaultMain $ testGroup "nothunks"
 noThunksParse :: IO ()
 noThunksParse = do
     bs <- BS.readFile "Cabal/Cabal.cabal" <|> BS.readFile "../Cabal/Cabal.cabal"
-    let res = parseGenericPackageDescription bs
+    let res = withSource (PCabalFile ("Cabal.cabal", bs)) $ parseGenericPackageDescription bs
     gpd <- either (assertFailure . show) return $ snd $
         runParseResult res
 
@@ -117,18 +115,17 @@ instance NoThunks UnqualComponentName
 instance NoThunks Version
 instance NoThunks VersionRange
 
-instance NoThunks ShortText where
-
 instance NoThunks a => NoThunks (PerCompilerFlavor a)
 
-instance (Typeable a, Typeable b) => NoThunks (SymbolicPath a b)
+instance (Typeable allowAbs, Typeable from, Typeable to)
+       => NoThunks (SymbolicPathX allowAbs from to)
 
 deriving via (OnlyCheckWhnf LicenseId) instance NoThunks LicenseId
 deriving via (OnlyCheckWhnf LicenseExceptionId) instance NoThunks LicenseExceptionId
 deriving via (CheckFoldableNamed NonEmptySet a) instance NoThunks a => NoThunks (NonEmptySet a)
 
-instance (NoThunks v, NoThunks c, NoThunks a) => NoThunks (CondTree v c a)
-instance (NoThunks v, NoThunks c, NoThunks a) => NoThunks (CondBranch v c a)
+instance (NoThunks v, NoThunks a) => NoThunks (CondTree v a)
+instance (NoThunks v, NoThunks a) => NoThunks (CondBranch v a)
 instance (NoThunks c) => NoThunks (Condition c)
 
 -------------------------------------------------------------------------------

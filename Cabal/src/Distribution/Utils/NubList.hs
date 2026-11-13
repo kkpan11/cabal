@@ -1,7 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-
 module Distribution.Utils.NubList
   ( NubList -- opaque
   , toNubList -- smart constructor
@@ -22,7 +18,7 @@ import qualified Text.Read as R
 
 -- | NubList : A de-duplicated list that maintains the original order.
 newtype NubList a = NubList {fromNubList :: [a]}
-  deriving (Eq, Generic, Typeable)
+  deriving (Eq, Generic)
 
 -- NubList assumes that nub retains the list order while removing duplicate
 -- elements (keeping the first occurrence). Documentation for "Data.List.nub"
@@ -42,17 +38,16 @@ overNubList f (NubList list) = toNubList . f $ list
 -- identity, associativity and closure.
 --
 -- Identity : by inspection:
---      mempty `mappend` NubList xs == NubList xs `mappend` mempty
+--      mempty <> NubList xs == NubList xs <> mempty
 --
 -- Associativity : by inspection:
---      (NubList xs `mappend` NubList ys) `mappend` NubList zs
---      == NubList xs `mappend` (NubList ys `mappend` NubList zs)
+--      (NubList xs <> NubList ys) <> NubList zs
+--      == NubList xs <> (NubList ys <> NubList zs)
 --
 -- Closure : appending two lists of type a and removing duplicates obviously
 -- does not change the type.
 instance Ord a => Monoid (NubList a) where
   mempty = NubList []
-  mappend = (<>)
 
 instance Ord a => Semigroup (NubList a) where
   (NubList xs) <> (NubList ys) = NubList $ xs `listUnion` ys
@@ -76,6 +71,9 @@ instance (Ord a, Binary a) => Binary (NubList a) where
 
 instance Structured a => Structured (NubList a)
 
+instance NFData a => NFData (NubList a) where
+  rnf (NubList xs) = rnf xs
+
 -- | NubListR : A right-biased version of 'NubList'. That is @toNubListR
 -- ["-XNoFoo", "-XFoo", "-XNoFoo"]@ will result in @["-XFoo", "-XNoFoo"]@,
 -- unlike the normal 'NubList', which is left-biased. Built on top of
@@ -93,7 +91,6 @@ overNubListR f (NubListR list) = toNubListR . f $ list
 
 instance Ord a => Monoid (NubListR a) where
   mempty = NubListR []
-  mappend = (<>)
 
 instance Ord a => Semigroup (NubListR a) where
   (NubListR xs) <> (NubListR ys) = NubListR $ xs `listUnionRight` ys

@@ -1,5 +1,3 @@
-{-# LANGUAGE PatternGuards #-}
-
 -- | See <https://github.com/ezyang/ghc-proposals/blob/backpack/proposals/0000-backpack.rst>
 module Distribution.Backpack.ConfiguredComponent
   ( ConfiguredComponent (..)
@@ -30,11 +28,11 @@ import Distribution.Types.AnnotatedId
 import Distribution.Types.ComponentInclude
 import Distribution.Utils.Generic
 import Distribution.Utils.LogProgress
-import Distribution.Utils.MapAccum
 
 import Control.Monad
 import qualified Data.Map as Map
 import qualified Data.Set as Set
+import Data.Traversable (mapAccumM)
 import qualified Distribution.Compat.NonEmptySet as NonEmptySet
 import Distribution.Pretty
 import Text.PrettyPrint (Doc, hang, hsep, quotes, text, vcat, ($$))
@@ -85,7 +83,7 @@ dispConfiguredComponent cc =
     (text "component" <+> pretty (cc_cid cc))
     4
     ( vcat
-        [ hsep $
+        [ hsep
           [ text "include"
           , pretty (ci_id incl)
           , pretty (ci_renaming incl)

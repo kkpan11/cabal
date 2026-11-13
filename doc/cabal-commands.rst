@@ -19,7 +19,6 @@ Commands
      [global]
       user-config            Display and update the user's global cabal configuration.
       help                   Help about commands.
-      path                   Display paths used by cabal.
 
      [package database]
       update                 Updates list of known packages.
@@ -36,6 +35,8 @@ Commands
       freeze                 Freeze dependencies.
       gen-bounds             Generate dependency bounds.
       outdated               Check for outdated dependencies.
+      path                   Query for simple project information.
+      target                 Target a subset of all targets.
 
      [project building and installing]
       build                  Compile targets within the project.
@@ -212,10 +213,18 @@ Arguments and flags common to some or all commands are:
 
     Already generated `build-info.json` files will be removed since they would be stale otherwise.
 
+.. _target-forms:
+
 Target Forms
 ------------
 
-A cabal command target can take any of the following forms:
+A cabal command target can take any of the following forms.
+
+Project targets
+^^^^^^^^^^^^^^^
+
+These forms select packages and components of the project. They are accepted
+by every command that takes ``[TARGETS]``.
 
 -  A package target: ``[pkg:]package``, which specifies that all enabled
    components of a package to be built. By default, test suites and
@@ -244,9 +253,22 @@ A cabal command target can take any of the following forms:
 -  A filepath target: ``[package:][ctype:]filepath``, which specifies that the
    component of which the given filepath is a part of will be built.
 
+Targets outside the project
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+These forms name things that are not packages of the project. Each is
+accepted only by the commands listed.
+
 -  A script target: ``path/to/script``, which specifies the path to a script
-   file. This is supported by ``build``, ``repl``, ``run``, and ``clean``.
-   Script targets are not part of a package.
+   file. This is supported by ``build``, ``repl``, ``run``, ``list-bin``, and
+   ``clean``. Script targets are not part of a package.
+
+-  A repository package target: ``package``, ``package-version`` or
+   ``package:exename``, which names a package from the configured
+   repositories, optionally pinned to a version or narrowed to one of its
+   executables. This is supported by ``install`` only. The project target
+   forms above do not apply to repository packages. See
+   :ref:`cabal install<cabal-install>`.
 
 .. _command-group-global:
 
@@ -285,38 +307,6 @@ cabal preferences. It is very useful when you are e.g. first configuring
       Note how ``--augment`` syntax follows ``cabal user-config diff``
       output.
 
-cabal path
-^^^^^^^^^^
-
-``cabal path`` prints the file system paths used by ``cabal`` for
-cache, store, installed binaries, and so on. When run without any
-options, it will show all paths, labeled with how they are namen in
-the configuration file:
-
-::
-   $ cabal path
-   cache-dir: /home/haskell/.cache/cabal/packages
-   logs-dir: /home/haskell/.cache/cabal/logs
-   store-dir: /home/haskell/.local/state/cabal/store
-   config-file: /home/haskell/.config/cabal/config
-   installdir: /home/haskell/.local/bin
-   ...
-
-If ``cabal path`` is passed a single option naming a path, then that
-path will be printed *without* any label:
-
-::
-
-   $ cabal path --installdir
-   /home/haskell/.local/bin
-
-This is a stable interface and is intended to be used for scripting.
-For example:
-
-::
-   $ ls $(cabal path --installdir)
-   ...
-
 .. _command-group-database:
 
 Package database commands
@@ -329,12 +319,23 @@ cabal update
 project contains multiple remote package repositories it will update
 the index of all of them (e.g. when using overlays).
 
+Each repository argument has the form ``REPO`` or
+``REPO,INDEX-STATE``. ``REPO`` is a repository identifier, and
+``INDEX-STATE`` uses the same formats as :option:`--index-state`, such as
+an ``@``-prefixed Unix timestamp, an ISO 8601 UTC timestamp, or ``HEAD``.
+When an ``INDEX-STATE`` is supplied, it selects the revision of the global
+package index for that repository; it does not set a project-local
+``index-state``.
+
 Some examples:
 
 ::
 
-    $ cabal update                  # update all remote repos
-    $ cabal update head.hackage     # update only head.hackage
+    $ cabal update                                      # update all remote repos
+    $ cabal update head.hackage                         # update only head.hackage
+    $ cabal update hackage.haskell.org,@1474732068      # use a Unix timestamp
+    $ cabal update hackage.haskell.org,2016-09-24T17:47:48Z
+    $ cabal update hackage.haskell.org,HEAD
 
 cabal list
 ^^^^^^^^^^
@@ -365,7 +366,7 @@ cabal list
 cabal info
 ^^^^^^^^^^
 
-``cabal info [FLAGS] PACKAGES`` displays useful informations about remote
+``cabal info [FLAGS] PACKAGES`` displays useful information about remote
 packages.
 
 .. option:: --package-db=DB
@@ -383,12 +384,21 @@ Initialization and download
 cabal init
 ^^^^^^^^^^
 
-``cabal init [FLAGS]`` initialises a Cabal package, picking
-reasonable defaults. Run it in your project folder.
+``cabal init [FLAGS]`` initialises a Cabal package, by default prompting the user for inputs, or choosing
+  sensible defaults to create a minimal project if specified. Run it in your project folder.
 
 .. option:: -i, --interactive
 
-    Enable interactive mode.
+    Enable interactive mode. This will prompt the user for inputs to help create the a minimal project.
+
+.. option:: -n, --non-interactive
+
+    Enable non-interactive mode. This will attempt to infer project details from a user configuration
+    or from basic environment variables, such as $PATH.
+
+.. option:: --simple
+
+    Create a simple, minimal project of a user-defined project type with sensible defaults.
 
 .. option:: -m, --minimal
 
@@ -428,6 +438,8 @@ e.g. you plan to work on a project with unreliable or no internet access.
 
 Check ``cabal fetch --help`` for a complete list of options.
 
+.. _cabal-get:
+
 cabal get
 ^^^^^^^^^
 
@@ -436,7 +448,7 @@ the source code of ``PACKAGES`` locally. By default the content of the
 packages is unpacked in the current working directory, in named subfolders
 (e.g.  ``./filepath-1.2.0.8/``), use ``--destdir=PATH`` to specify another
 folder. By default the latest version of the package is downloaded, you can
-ask for a spefic one by adding version numbers
+ask for a specific one by adding version numbers
 (``cabal get random-1.0.0.1``).
 
 The ``cabal get`` command supports the following options:
@@ -470,6 +482,9 @@ The ``cabal get`` command supports the following options:
     Unpack the original pristine tarball, rather than updating the
     ``.cabal`` file with the latest revision from the package archive.
 
+
+.. option:: -R, --repository-name
+   Package repository from which the package is to be fetched.
 
 .. _command-group-config:
 
@@ -559,38 +574,74 @@ users see a consistent set of dependencies. For libraries, this is not
 recommended: users often need to build against different versions of
 libraries than what you developed against.
 
+.. _cabal-gen-bounds:
+
 cabal gen-bounds
-^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^
 
-``cabal gen-bounds [FLAGS]`` generates bounds for all dependencies that do not
-currently have them.  Generated bounds are printed to stdout. You can then
-paste them into your .cabal file.
-The generated bounds conform to the `Package Versioning Policy`_, which is
-a recommended versioning system for publicly released Cabal packages.
+::
 
-.. code-block:: console
+    cabal gen-bounds [TARGETS] [FLAGS]
+
+Generate PVP-compliant dependency bounds for packages in the project based
+on currently installed versions. This is helpful when creating or updating
+package dependencies to ensure compatibility with specific version ranges.
+
+To use it, run `cabal gen-bounds` in a directory containing a cabal.project file or
+within a subdirectory of a multi-package project. The command will analyze
+the project structure and suggest appropriate version bounds for dependencies based
+on the currently installed versions of those packages.
+
+The suggested bounds follow the Package Versioning Policy (PVP) convention,
+allowing changes in the last segment of the version number. These suggestions
+are formatted as Cabal constraint expressions that can be directly copied
+into your .cabal file in the appropriate `build-depends` section.
+
+You can also specify particular packages to analyze with `cabal gen-bounds package-name`.
+The command supports the same targets as `cabal build`.
+
+Examples:
+
+Basic usage:
+
+::
 
     $ cabal gen-bounds
 
-For example, given the following dependencies without bounds specified in
-:pkg-field:`build-depends`:
+In a multi-package project:
 
 ::
 
-    build-depends:
-      base,
-      mtl,
-      transformers,
+    $ cat cabal.project
+    packages: package-a/
+              package-b/
 
-``gen-bounds`` might suggest changing them to the following:
+    $ cabal gen-bounds all
+    Configuration is affected by the following files:
+    - cabal.project
+    Resolving dependencies...
+
+    Congratulations, all dependencies for package-a:lib:package-a are up-to-date.
+
+    The following packages need bounds and here is a suggested starting point...
+    For component package-b:lib:package-b:
+    package-a >= 0.1.0 && < 0.2,
+
+You can also specify particular target to analyze:
 
 ::
 
-    build-depends:
-      base          >= 4.15.0 && < 4.16,
-      mtl           >= 2.2.2 && < 2.3,
-      transformers  >= 0.5.6 && < 0.6,
+    $ cabal gen-bounds package-a
 
+The command output provides suggested version bounds for each component's
+dependencies that lack proper bounds. For each component, dependencies that
+need bounds are listed along with the suggested bounds, like:
+
+::
+
+    For component my-package:lib:my-package:
+    some-dependency >= 1.2.3 && < 1.3,
+    another-dependency >= 2.0.0 && < 2.1,
 
 cabal outdated
 ^^^^^^^^^^^^^^
@@ -702,7 +753,147 @@ Examples:
     be used without arguments, in that case major version bumps are ignored for
     all packages.
 
+cabal path
+^^^^^^^^^^
+
+``cabal path`` allows to query for paths used by ``cabal``.
+For example, it allows to query for the directories of the cache, store,
+installed binaries, and so on.
+
+::
+
+    $ whoami
+    alice
+
+    $ cabal path
+    compiler-flavour: ghc
+    compiler-id: ghc-9.8.2
+    compiler-path: /home/alice/.ghcup/bin/ghc
+    cache-home: /home/alice/.cabal
+    remote-repo-cache: /home/alice/.cabal/packages
+    logs-dir: /home/alice/.cabal/logs
+    store-dir: /home/alice/.cabal/store
+    config-file: /home/alice/.cabal/config
+    installdir: /home/alice/.cabal/bin
+
+Or using the json output:
+
+::
+
+    $ cabal path --output-format=json | jq
+
+.. code-block:: json
+
+    {
+      "cabal-version": "3.13.0.0",
+      "compiler": {
+        "flavour": "ghc",
+        "id": "ghc-9.8.2",
+        "path": "/home/alice/.ghcup/bin/ghc"
+      },
+      "cache-home": "/home/alice/.cabal",
+      "remote-repo-cache": "/home/alice/.cabal/packages",
+      "logs-dir": "/home/alice/.cabal/logs",
+      "store-dir": "/home/alice/.cabal/store",
+      "config-file": "/home/alice/.cabal/config",
+      "installdir": "/home/alice/.cabal/bin"
+    }
+
+If ``cabal path`` is passed a single option naming a path, then that
+path will be printed *without* any label:
+
+::
+
+   $ cabal path --installdir
+   /home/alice/.cabal/bin
+
+While this interface is intended to be used for scripting, it is an experimental command.
+Scripting example:
+
+::
+
+   $ ls $(cabal path --installdir)
+   ...
+
+cabal target
+^^^^^^^^^^^^
+
+This command is useful for discovering targets in a project for use with other
+commands taking ``[TARGETS]``.
+
+Any :ref:`target form<target-forms>` except for a script target can be used with
+``cabal target``.
+
+This command, like many others, takes ``[TARGETS]``. Taken together, these will
+select for a set of targets in the project. When none are supplied, the command
+acts as if ``all`` was supplied. Targets in the returned subset are shown sorted
+and fully-qualified.
+
+.. code-block:: console
+
+    $ cabal target all:tests
+    ...
+    Fully qualified target forms:
+     - Cabal-tests:test:check-tests
+     - Cabal-tests:test:custom-setup-tests
+     - Cabal-tests:test:hackage-tests
+     - Cabal-tests:test:no-thunks-test
+     - Cabal-tests:test:parser-tests
+     - Cabal-tests:test:rpmvercmp
+     - Cabal-tests:test:unit-tests
+     - cabal-benchmarks:test:cabal-benchmarks
+     - cabal-install-solver:test:unit-tests
+     - cabal-install:test:integration-tests2
+     - cabal-install:test:long-tests
+     - cabal-install:test:mem-use-tests
+     - cabal-install:test:unit-tests
+     - solver-benchmarks:test:unit-tests
+
+.. warning::
+
+    For a package, all, module or filepath target, ``cabal target [TARGETS]`` will
+    only show ``libs`` and ``exes`` of the ``[TARGETS]`` by default. To also show tests and
+    benchmarks, enable them with ``--enable-tests`` and ``--enable-benchmarks``.
+
+.. note::
+
+    For commands expecting a unique ``TARGET``, a fully-qualified target is the safe
+    way to go but it may be convenient to type out a shorter ``TARGET``. For
+    example, if the set of ``cabal target all:exes`` has one item then ``cabal
+    list-bin all:exes`` will work too.
+
 .. _command-group-build:
+
+Build action phase control
+--------------------------
+
+The following settings apply to commands that result in build actions
+(``build``, ``run``, ``repl``, ``test``...), and control which phases of the
+build are executed.
+
+.. option:: --dry-run
+
+    Do not download, build, or install anything, only print what would happen.
+
+.. option:: --only-configure
+
+    Instead of performing a full build just run the configure step.
+    Only accepted by the ``build`` command.
+
+.. option:: --only-download
+
+    Do not build anything, only fetch the packages.
+
+.. option:: --only-dependencies
+            --dependencies-only
+
+    Install only the dependencies necessary to build the given packages.
+    Not accepted by the ``repl`` command.
+
+.. tip::
+
+    ``--dependencies-only`` is a synonym for ``--only-dependencies`` but the
+    latter is preferred as it follows the pattern of other ``--only-*`` flags.
 
 Project building and installing
 -------------------------------
@@ -752,37 +943,62 @@ In addition ``cabal build`` accepts these flags:
     When given we will forego performing a full build and abort after running
     the configure phase of each target package.
 
+.. _cabal-install:
+
 cabal install
 ^^^^^^^^^^^^^
 
 ``cabal install [FLAGS] [TARGETS]`` builds the specified target packages and
 symlinks/copies their executables in ``installdir`` (usually ``~/.local/bin``).
+Targets may be packages of a local project, packages from a repository, or a
+mix of both. Several targets may be given at once:
 
-.. warning::
+::
 
-  If not every package has an executable to install, use ``all:exes`` rather
-  than ``all`` as the target. To overwrite an installation, use
-  ``--overwrite-policy=always`` as the default policy is ``never``.
+    $ cabal install hlint fourmolu
+    $ cabal install hlint-3.8 ./my-tool
 
-For example this command will build the latest ``cabal-install`` and symlink
-its ``cabal`` executable:
+Installing packages from a repository
+"""""""""""""""""""""""""""""""""""""
+
+Targets need not belong to a project. A bare package name, optionally with a
+version, names a package from the :ref:`configured package
+repositories<repository-specification>` (Hackage_ by default); it is fetched,
+built in the store and its executables installed. For example this command
+will build the latest ``cabal-install`` from Hackage and symlink its ``cabal``
+executable:
 
 ::
 
     $ cabal install cabal-install
 
-In addition, it's possible to use ``cabal install`` to install components
-of a local project. For example, with an up-to-date Git clone of the Cabal
-repository, this command will build cabal-install HEAD and symlink the
-``cabal`` executable:
+Outside of a project, ``package:exename`` installs only the named executable
+of a repository package, e.g. ``cabal install cabal-install:cabal``. This is
+the only component form accepted for repository packages.
+
+Installing packages from a project
+""""""""""""""""""""""""""""""""""
+
+Any :ref:`project target form<target-forms>` can be used to install packages
+and components of a local project. For example, with an up-to-date Git clone
+of the Cabal repository, this command will build cabal-install HEAD and
+symlink the ``cabal`` executable:
 
 ::
 
     $ cabal install exe:cabal
 
+.. warning::
+
+  If not every package has an executable to install, use ``all:exes`` rather
+  than ``all`` as the target.
+
+Install method and location
+"""""""""""""""""""""""""""
+
 Where symlinking is not possible (eg. on some Windows versions) the ``copy``
 method is used by default. You can specify the install method
-by using ``--install-method`` flag:
+by using ``--install-method`` flag and the location with ``--installdir``:
 
 ::
 
@@ -790,6 +1006,9 @@ by using ``--install-method`` flag:
 
 Note that copied executables are not self-contained, since they might use
 data-files from the store.
+
+To overwrite an existing installation, use ``--overwrite-policy=always`` as
+the default policy is ``never``.
 
 .. _adding-libraries:
 
@@ -863,7 +1082,7 @@ By default the documentation will be put in ``./haddocks`` folder, this can be
 modified with the ``--output`` flag.
 
 This command supports two primary modes: building a self contained directory
-(which is the default mode) or documentation that links to hackage (with
+(which is the default mode) or documentation that links to Hackage (with
 ``--hackage`` flag).
 
 In both cases the html index as well as quickjump index will include all terms
@@ -939,6 +1158,14 @@ We can also scope to test suite targets as they produce binaries.
     $ cabal list-bin cabal-install:unit-tests
     /.../dist-newstyle/.../unit-tests/unit-tests
 
+It can also be used to display the location of the cached executable for a
+cabal script.
+
+::
+
+    $ cabal list-bin path/to/script
+    $XDG_CACHE_HOME/cabal/script-builds/.../bin/script
+
 Note that ``cabal list-bin`` will print the executables' location, but
 will not make sure that these executables actually exist (i.e., have
 been successfully built).  In order to determine the correct location,
@@ -970,17 +1197,39 @@ Examples:
 Configuration flags can be specified on the command line and these extend the project
 configuration from the 'cabal.project', 'cabal.project.local' and other files.
 
-.. option:: --repl-options=FLAG
+.. option:: --repl-options=OPTS
 
     To avoid ``ghci``-specific flags from triggering unneeded global rebuilds, these
-    flags are stripped from the internal configuration. As a result,
-    ``--ghc-options`` will no longer (reliably) work to pass flags to ``ghci`` (or
-    other REPLs). Instead, you should use the ``--repl-options`` flag to
-    specify these options to the invoked REPL.
+    flags are stripped from the internal configuration when using
+    ``--ghc-option`` or ``--ghc-options``. As a result, ``--ghc-options`` will
+    not (reliably) work to pass flags to ``ghci`` (or other REPLs).
+    ``--repl-options`` bypasses this and allows you to specify options to the
+    invoked REPL without influencing the build configuration for other packages.
+
+    Note: ``--repl-options`` does not accept double quotes (``""``) to pass options
+    containing spaces to the REPL.
 
 .. option:: --repl-no-load
 
     Disables the loading of target modules at startup.
+
+.. option:: --with-repl=PATH
+
+    Specifies an alternative program to use when starting the REPL session,
+    instead of the default GHC. This is particularly useful for tools like
+    ``doctest`` and ``hie-bios`` that need to intercept the REPL session to
+    perform their own operations.
+
+    Unlike ``--with-ghc`` which affects all GHC invocations (including dependency
+    compilation), ``--with-repl`` only affects the final REPL invocation, making
+    it much simpler for wrapper tools to implement.
+
+    Examples:
+
+    ::
+
+        $ cabal repl --with-repl=doctest
+        $ cabal repl --with-repl=/path/to/custom/ghc
 
 .. option:: -b DEPENDENCIES or -bDEPENDENCIES, --build-depends=DEPENDENCIES
 
@@ -1061,8 +1310,9 @@ When ``TARGET`` is one of the following:
 - Empty target: Same as package target, implicitly using the package from the current
   working directory.
 
-Except in the case of the empty target, the strings after it will be
-passed to the executable as arguments.
+With a non-empty target, the strings after it are passed to the
+executable as arguments.  With an empty target you must use ``--`` to
+separate executable arguments from cabal flags.
 
 If one of the arguments starts with ``-`` it will be interpreted as
 a cabal flag, so if you need to pass flags to the executable you
@@ -1071,6 +1321,10 @@ have to separate them with ``--``.
 ::
 
     $ cabal run target -- -a -bcd --argument
+    $ cabal run -- +RTS -s -RTS
+
+The second form (empty target with ``--``) runs the single executable
+in the current package and passes the RTS options to it.
 
 ``run`` supports running script files that use a certain format.
 Scripts look like:
@@ -1109,6 +1363,9 @@ The executable is cached under the cabal directory, and can be pre-built with
 ``cabal build path/to/script`` and the cache can be removed with
 ``cabal clean path/to/script``.
 
+The location of the cached executable can be displayed with
+``cabal list-bin path/to/script``.
+
 A note on targets: Whenever a command takes a script target and it matches the
 name of another target, the other target is preferred. To load the script
 instead pass it as an explicit path: ./script
@@ -1138,12 +1395,62 @@ they are up to date.
 ``cabal bench`` inherits flags of the ``bench`` subcommand of ``Setup.hs``,
 :ref:`see the corresponding section <setup-bench>`.
 
+``cabal bench`` first builds everything that is needed (in parallel, e.g. with
+``-j``), and only then runs the benchmarks, one at a time, so that they do not
+compete for resources with each other or with the build, which would skew
+their results. Without ``--keep-going``, no benchmark is run if the build
+fails.
+
 cabal test
 ^^^^^^^^^^
 
-``cabal test [TARGETS] [FLAGS]`` runs the specified test suites
-(all the test suites in the current package by default), first ensuring
-they are up to date.
+``cabal test [TARGETS] [FLAGS]`` tests test suites specified as targets
+after ensuring they are up to date and building them, if necessary.
+
+.. Warning::
+
+    For a test suite, there's a difference between testing it with ``cabal
+    test`` and running it with ``cabal run`` to do with the working directory.
+    The former tests the test suite; that is to say that it "runs" the test suite
+    from the package directory (from the directory of the package that has the
+    test suite as a component), while the latter runs the test suite from
+    whatever directory is current when the ``cabal run`` command is issued.
+    This is important because the test suite may depend on files in the package
+    directory, and so may not work correctly if run from another directory.
+
+.. Note::
+
+    Even though ``[TARGETS]`` are optional, ``cabal test`` will only test test
+    suites without specifying a target if in the directory of a package,
+    alongside a ``.cabal`` file. Being in the directory of a package implicitly
+    selects that package for the test command.
+
+    Taking the cabal project as an example that has a ``Cabal-tests`` package
+    with multiple test suites, the following two commands are effectively the
+    same and will test the test suites of the ``Cabal-tests`` package:
+
+    ::
+
+        $ cabal test Cabal-tests
+        $ cd Cabal-tests && cabal test && cd ..
+
+    If you want to test all of the test suites in a project then from the
+    project directory ``cabal build`` with no target will fail:
+
+    .. code-block:: text
+
+        $ cabal test
+        Error: [Cabal-7134]
+        No targets given and there is no package in the current directory. Use
+        the target 'all' for all packages in the project or specify packages or
+        components by name or location. See 'cabal build --help' for more
+        details on target options.
+
+    Both ``cabal test all:tests`` and ``cabal test all`` use explicit targets
+    for testing all test suites of a project; the former's ``all:tests`` target
+    will select all test suites of the project, while the latter's ``all``
+    target will select all packages of the project and, from those, test all
+    their test suites.
 
 ``cabal test`` inherits flags of the ``test`` subcommand of ``Setup.hs``
 (:ref:`see the corresponding section <setup-test>`) with one caveat: every
@@ -1210,7 +1517,7 @@ A list of all warnings with their constructor:
 - ``unsupported-bench``: unsupported benchmark type.
 - ``bench-unknown-extension``: ``main-is`` for benchmark is neither ``.hs`` nor ``.lhs``.
 - ``invalid-name-win``: invalid package name on Windows.
-- ``reserved-z-prefix``: package with ``z-`` prexif (reseved for Cabal.
+- ``reserved-z-prefix``: package with ``z-`` prefix (reserved for Cabal).
 - ``no-build-type``: missing ``build-type``.
 - ``undeclared-custom-setup``: ``custom-setup`` section without ``build-type: Custom``
 - ``unknown-compiler-tested``: unknown compiler in ``tested-with``.
@@ -1240,6 +1547,9 @@ A list of all warnings with their constructor:
 - ``unrecognised-repo-type``: unrecognised kind of source-repository.
 - ``repo-no-type``: missing ``type`` in ``source-repository``.
 - ``repo-no-location``: missing ``location`` in ``source-repository``.
+- ``git-protocol``: using insecure ``git://`` protocol
+  (`explanation <https://git-scm.com/book/en/v2/Git-on-the-Server-The-Protocols#_the_cons_4>`__
+  in Git Book).
 - ``repo-no-module``: missing ``module`` in ``source-repository``.
 - ``repo-no-tag``: missing ``tag`` in ``source-repository``.
 - ``repo-relative-dir``: ``subdir`` in ``source-repository`` must be relative.
@@ -1261,6 +1571,7 @@ A list of all warnings with their constructor:
 - ``option-with-rtsopts``: unnecessary ``-with-rtsopts``.
 - ``option-opt-c``: unnecessary ``-O[n]`` in C code.
 - ``cpp-options``: unportable ``-cpp-options`` flag.
+- ``jspp-options``: unportable ``-jspp-options`` flag.
 - ``misplaced-c-opt``: C-like options in wrong cabal field.
 - ``relative-path-outside``: relative path outside of source tree.
 - ``absolute-path``: absolute path where not allowed.
@@ -1276,6 +1587,7 @@ A list of all warnings with their constructor:
 - ``test-cabal-ver``: ``test-suite`` used with ``cabal-version`` < 1.10.
 - ``default-language``: ``default-language`` used with ``cabal-version`` < 1.10.
 - ``no-default-language``: missing ``default-language``.
+- ``add-default-language``: suggested ``default-language``.
 - ``extra-doc-files``: ``extra-doc-files`` used with ``cabal-version`` < 1.18.
 - ``multilib``: multiple ``library`` sections with ``cabal-version`` < 2.0.
 - ``reexported-modules``: ``reexported-modules`` with ``cabal-version`` < 1.22.
@@ -1293,13 +1605,16 @@ A list of all warnings with their constructor:
 - ``no-autogen-paths``: missing autogen ``Paths_*`` modules in ``autogen-modules`` (``cabal-version`` ≥ 2.0).
 - ``no-autogen-pinfo``: missing autogen ``PackageInfo_*`` modules in ``autogen-modules`` *and* ``exposed-modules``/``other-modules`` (``cabal-version`` ≥ 2.0).
 - ``no-glob-match``: glob pattern not matching any file.
-- ``glob-no-extension``: glob pattern not matching any file becuase of lack of extension matching (`cabal-version` < 2.4).
+- ``glob-no-extension``: glob pattern not matching any file because of lack of extension matching (`cabal-version` < 2.4).
 - ``glob-missing-dir``: glob pattern trying to match a missing directory.
 - ``unknown-os``: unknown operating system name in condition.
 - ``unknown-arch``: unknown architecture in condition.
 - ``unknown-compiler``: unknown compiler in condition.
 - ``missing-bounds-important``: missing upper bounds for important dependencies (``base``, and for ``custom-setup`` ``Cabal`` too).
-- ``missing-upper-bounds``: missing upper bound in dependency (excluding test-suites and benchmarks).
+- ``missing-upper-bounds``: missing upper bound in dependency [#dep-excl]_.
+- ``le-upper-bounds``: less than or equals (<=) constraint on upper bound in dependency [#dep-excl]_.
+- ``tz-upper-bounds``: trailing zero (\*.0) upper bound in dependency [#dep-excl]_.
+- ``gt-lower-bounds``: greater than (>) constraint on lower bound in dependency [#dep-excl]_.
 - ``suspicious-flag``: troublesome flag name (e.g. starting with a dash).
 - ``unused-flag``: unused user flags.
 - ``non-ascii``: non-ASCII characters in custom field.
@@ -1318,13 +1633,47 @@ A list of all warnings with their constructor:
 - ``no-cabal-file``: no ``.cabal`` file found in folder.
 - ``multiple-cabal-file``: multiple ``.cabal`` files found in folder.
 - ``unknown-file``: path refers to a file which does not exist.
-- ``missing-setup``: missing ``Setup.hs`` or ``Setup.lsh``.
+- ``missing-setup``: missing ``Setup.hs`` or ``Setup.lhs`` or ``SetupHooks.hs``  or ``SetupHooks.lhs``.
 - ``missing-conf-script``: missing ``configure`` script with ``build-type: Configure``.
 - ``unknown-directory``: paths refer to a directory which does not exist.
 - ``no-repository``: missing ``source-repository`` section.
-- ``no-docs``: missing expected documentation files (changelog).
+- ``no-docs``: missing expected documentation files. Checks
+  whether there is anything similar to a changelog file in your working
+  directory (e.g. ``CHANGELOG``, ``NEWS``, ``changelog.md``, etc.). If this
+  file is not present in the :pkg-field:`extra-doc-files` field, warns about it.
 - ``doc-place``: documentation files listed in ``extra-source-files`` instead of ``extra-doc-files``.
 
+.. [#dep-excl] In dependencies excluding test-suites and benchmarks.
+
+.. note::
+
+    ``cabal check`` warns on subexpressions (individual version constraints) of
+    a version range that are of the form, ``> version``, ``<= version``, ``<=
+    version.0[...0]``. These are considered suspicious because they are likely
+    to be mistakes.  Guidelines for individual version constraints within
+    version ranges and examples of mistakes when not following these are:
+
+    "A lower bound should be inclusive."
+
+        Asking for ``base > 4.11`` when you actually want ``base >= 4.12`` is an
+        example of making this mistake.  Versions make a dense space, so there
+        are infinitely many versions that are ``> 4.11`` and ``< 4.12``.
+
+    "An upper bound should be exclusive."
+
+        Asking for ``base <= 4.19.1.0`` when the last published version is
+        ``base-4.19.1.0`` is an example of making this mistake.  This blocks
+        patch releases that should always be fine according to the PVP.  The
+        correct minor bound is ``base < 4.19.2``.
+
+    "An upper bound should not have trailing zeros."
+
+        Asking for ``base < 4.20.0.0`` when you meant allow any ``base-4.19.*``
+        version is an example of making this mistake. In fact, ``base-4.20`` and
+        ``base-4.20.0`` are not excluded by the bound.  The correct bound is ``<
+        4.20``.
+
+.. _cabal-sdist:
 
 cabal sdist
 ^^^^^^^^^^^
@@ -1385,6 +1734,22 @@ to Hackage.
     authentication tokens on Hackage's `account management page
     <https://hackage.haskell.org/users/account-management>`__.
 
+.. option:: -T COMMAND or -TCOMMAND, --token-command=COMMAND
+
+    Command to get your Hackage authentication token. This is useful if your
+    token is stored in a secrets manager, for example. Arguments with whitespace
+    must be quoted (double-quotes only). For example:
+
+    ::
+
+        --token-command='sh -c "op read op://hackage/upload-token"'
+
+    Or in the config file:
+
+    ::
+
+        token-command: sh -c "op read op://hackage/upload-token"
+
 .. option:: -u USERNAME or -uUSERNAME, --username=USERNAME
 
     Your Hackage username.
@@ -1408,6 +1773,8 @@ to Hackage.
 
         password-command: sh -c "grep hackage ~/secrets | cut -d : -f 2"
 
+.. option:: -R, --repository-name
+     Package repository to which the package is to be uploaded.
 
 cabal report
 ^^^^^^^^^^^^
@@ -1427,5 +1794,9 @@ cabal report
 .. option:: -p PASSWORD or -pPASSWORD, --password=PASSWORD
 
     Your Hackage password.
+
+
+.. option:: -R, --repository-name
+   Package repository to which the report is to be uploaded.
 
 .. include:: references.inc

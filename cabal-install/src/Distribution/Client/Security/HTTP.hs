@@ -1,11 +1,3 @@
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE StandaloneDeriving #-}
-
 -- | Implementation of 'HttpLib' using cabal-install's own 'HttpTransport'
 module Distribution.Client.Security.HTTP (HttpLib, transportAdapter) where
 
@@ -180,7 +172,6 @@ mkReqHeaders reqHeaders mRange' =
 -------------------------------------------------------------------------------}
 
 data UnexpectedResponse = UnexpectedResponse URI Int
-  deriving (Typeable)
 
 instance HC.Pretty UnexpectedResponse where
   pretty (UnexpectedResponse uri code) =
@@ -189,13 +180,8 @@ instance HC.Pretty UnexpectedResponse where
       ++ " for "
       ++ show uri
 
-#if MIN_VERSION_base(4,8,0)
 deriving instance Show UnexpectedResponse
 instance Exception UnexpectedResponse where displayException = HC.pretty
-#else
-instance Show UnexpectedResponse where show = HC.pretty
-instance Exception UnexpectedResponse
-#endif
 
 wrapCustomEx
   :: ( ( HC.Throws UnexpectedResponse
@@ -206,7 +192,6 @@ wrapCustomEx
   -> (HC.Throws HC.SomeRemoteError => IO a)
 wrapCustomEx act =
   HC.handleChecked (\(ex :: UnexpectedResponse) -> go ex) $
-    HC.handleChecked (\(ex :: IOException) -> go ex) $
-      act
+    HC.handleChecked (\(ex :: IOException) -> go ex) act
   where
     go ex = HC.throwChecked (HC.SomeRemoteError ex)

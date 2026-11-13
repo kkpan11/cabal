@@ -1,10 +1,7 @@
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE RankNTypes #-}
-
------------------------------------------------------------------------------
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DerivingVia #-}
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
 
 -- |
 -- Module      :  Distribution.Simple.Setup.Build
@@ -18,7 +15,15 @@
 -- Definition of the build command-line options.
 -- See: @Distribution.Simple.Setup@
 module Distribution.Simple.Setup.Build
-  ( BuildFlags (..)
+  ( BuildFlags
+      ( BuildCommonFlags
+      , buildVerbosity
+      , buildDistPref
+      , buildCabalFilePath
+      , buildWorkingDir
+      , buildTargets
+      , ..
+      )
   , emptyBuildFlags
   , defaultBuildFlags
   , buildCommand
@@ -32,11 +37,11 @@ import Prelude ()
 import Distribution.Simple.Command hiding (boolOpt, boolOpt')
 import Distribution.Simple.Flag
 import Distribution.Simple.Program
+import Distribution.Simple.Setup.Common
 import Distribution.Simple.Utils
 import Distribution.Types.DumpBuildInfo
+import Distribution.Utils.Path
 import Distribution.Verbosity
-
-import Distribution.Simple.Setup.Common
 
 -- ------------------------------------------------------------
 
@@ -45,18 +50,38 @@ import Distribution.Simple.Setup.Common
 -- ------------------------------------------------------------
 
 data BuildFlags = BuildFlags
-  { buildProgramPaths :: [(String, FilePath)]
+  { buildCommonFlags :: !CommonSetupFlags
+  , buildProgramPaths :: [(String, FilePath)]
   , buildProgramArgs :: [(String, [String])]
-  , buildDistPref :: Flag FilePath
-  , buildVerbosity :: Flag Verbosity
   , buildNumJobs :: Flag (Maybe Int)
   , buildUseSemaphore :: Flag String
-  , -- TODO: this one should not be here, it's just that the silly
-    -- UserHooks stop us from passing extra info in other ways
-    buildArgs :: [String]
-  , buildCabalFilePath :: Flag FilePath
   }
-  deriving (Read, Show, Generic, Typeable)
+  deriving (Read, Show, Generic)
+  deriving (Semigroup, Monoid) via Generically BuildFlags
+
+pattern BuildCommonFlags
+  :: Flag VerbosityFlags
+  -> Flag (SymbolicPath Pkg (Dir Dist))
+  -> Flag (SymbolicPath CWD (Dir Pkg))
+  -> Flag (SymbolicPath Pkg File)
+  -> [String]
+  -> BuildFlags
+pattern BuildCommonFlags
+  { buildVerbosity
+  , buildDistPref
+  , buildWorkingDir
+  , buildCabalFilePath
+  , buildTargets
+  } <-
+  ( buildCommonFlags ->
+      CommonSetupFlags
+        { setupVerbosity = buildVerbosity
+        , setupDistPref = buildDistPref
+        , setupWorkingDir = buildWorkingDir
+        , setupCabalFilePath = buildCabalFilePath
+        , setupTargets = buildTargets
+        }
+    )
 
 instance Binary BuildFlags
 instance Structured BuildFlags
@@ -64,14 +89,11 @@ instance Structured BuildFlags
 defaultBuildFlags :: BuildFlags
 defaultBuildFlags =
   BuildFlags
-    { buildProgramPaths = mempty
+    { buildCommonFlags = defaultCommonSetupFlags
+    , buildProgramPaths = mempty
     , buildProgramArgs = []
-    , buildDistPref = mempty
-    , buildVerbosity = Flag normal
     , buildNumJobs = mempty
     , buildUseSemaphore = NoFlag
-    , buildArgs = []
-    , buildCabalFilePath = mempty
     }
 
 buildCommand :: ProgramDb -> CommandUI BuildFlags
@@ -105,21 +127,13 @@ buildCommand progDb =
       --        ++ "  " ++ pname ++ " build foo:Foo.Bar\n"
       --        ++ "  " ++ pname ++ " build testsuite1:Foo/Bar.hs\n"
       commandUsage =
-        usageAlternatives "build" $
+        usageAlternatives
+          "build"
           [ "[FLAGS]"
           , "COMPONENTS [FLAGS]"
           ]
     , commandDefaultFlags = defaultBuildFlags
-    , commandOptions = \showOrParseArgs ->
-        [ optionVerbosity
-            buildVerbosity
-            (\v flags -> flags{buildVerbosity = v})
-        , optionDistPref
-            buildDistPref
-            (\d flags -> flags{buildDistPref = d})
-            showOrParseArgs
-        ]
-          ++ buildOptions progDb showOrParseArgs
+    , commandOptions = buildOptions progDb
     }
 
 buildOptions
@@ -127,17 +141,21 @@ buildOptions
   -> ShowOrParseArgs
   -> [OptionField BuildFlags]
 buildOptions progDb showOrParseArgs =
-  [ optionNumJobs
-      buildNumJobs
-      (\v flags -> flags{buildNumJobs = v})
-  , option
-      []
-      ["semaphore"]
-      "semaphore"
-      buildUseSemaphore
-      (\v flags -> flags{buildUseSemaphore = v})
-      (reqArg' "SEMAPHORE" Flag flagToList)
-  ]
+  withCommonSetupOptions
+    buildCommonFlags
+    (\c f -> f{buildCommonFlags = c})
+    showOrParseArgs
+    [ optionNumJobs
+        buildNumJobs
+        (\v flags -> flags{buildNumJobs = v})
+    , option
+        []
+        ["semaphore"]
+        "Use the specified semaphore identifier so GHC can compile components in parallel"
+        buildUseSemaphore
+        (\v flags -> flags{buildUseSemaphore = v})
+        (reqArg' "SEMAPHORE" Flag flagToList)
+    ]
     ++ programDbPaths
       progDb
       showOrParseArgs
@@ -156,10 +174,3 @@ buildOptions progDb showOrParseArgs =
 
 emptyBuildFlags :: BuildFlags
 emptyBuildFlags = mempty
-
-instance Monoid BuildFlags where
-  mempty = gmempty
-  mappend = (<>)
-
-instance Semigroup BuildFlags where
-  (<>) = gmappend

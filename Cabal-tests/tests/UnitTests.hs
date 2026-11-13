@@ -1,4 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable #-}
 module Main
     ( main
     ) where
@@ -7,25 +6,23 @@ import Test.Tasty
 import Test.Tasty.Options
 
 import Data.Proxy
-import Data.Typeable
-
-import Distribution.Simple.Utils
-import Distribution.Verbosity
-import Distribution.Compat.Time
 
 import qualified UnitTests.Distribution.Compat.Time
 import qualified UnitTests.Distribution.Compat.Graph
 import qualified UnitTests.Distribution.PackageDescription.Check
 import qualified UnitTests.Distribution.Simple.Command
+import qualified UnitTests.Distribution.Simple.Compiler
 import qualified UnitTests.Distribution.Simple.Glob
 import qualified UnitTests.Distribution.Simple.Program.GHC
 import qualified UnitTests.Distribution.Simple.Program.Internal
+import qualified UnitTests.Distribution.Simple.Setup.Config
 import qualified UnitTests.Distribution.Simple.Utils
 import qualified UnitTests.Distribution.System
 import qualified UnitTests.Distribution.Utils.CharSet
 import qualified UnitTests.Distribution.Utils.Generic
 import qualified UnitTests.Distribution.Utils.Json
 import qualified UnitTests.Distribution.Utils.NubList
+import qualified UnitTests.Distribution.Utils.Path
 import qualified UnitTests.Distribution.Utils.ShortText
 import qualified UnitTests.Distribution.Utils.Structured
 import qualified UnitTests.Distribution.Version (versionTests)
@@ -35,14 +32,10 @@ import qualified UnitTests.Distribution.Described
 import qualified UnitTests.Distribution.CabalSpecVersion
 import qualified UnitTests.Distribution.Types.GenericPackageDescription
 
-tests :: Int -> TestTree
-tests mtimeChangeCalibrated =
-  askOption $ \(OptionMtimeChangeDelay mtimeChangeProvided) ->
+tests :: TestTree
+tests =
+  askOption $ \(OptionMtimeChangeDelay mtimeChange) ->
   askOption $ \(GhcPath ghcPath) ->
-  let mtimeChange = if mtimeChangeProvided /= 0
-                    then mtimeChangeProvided
-                    else mtimeChangeCalibrated
-  in
   testGroup "Unit Tests"
     [ testGroup "Distribution.Compat.Time"
         (UnitTests.Distribution.Compat.Time.tests mtimeChange)
@@ -50,19 +43,23 @@ tests mtimeChangeCalibrated =
         UnitTests.Distribution.Compat.Graph.tests
     , testGroup "Distribution.Simple.Command"
         UnitTests.Distribution.Simple.Command.tests
+    , testGroup "Distribution.Simple.Compiler"
+        UnitTests.Distribution.Simple.Compiler.tests
     , testGroup "Distribution.Simple.Glob"
         UnitTests.Distribution.Simple.Glob.tests
     , UnitTests.Distribution.Simple.Program.GHC.tests
     , testGroup "Distribution.Simple.Program.Internal"
         UnitTests.Distribution.Simple.Program.Internal.tests
+    , UnitTests.Distribution.Simple.Setup.Config.tests
     , testGroup "Distribution.Simple.Utils" $
         UnitTests.Distribution.Simple.Utils.tests ghcPath
     , testGroup "Distribution.Utils.Generic"
         UnitTests.Distribution.Utils.Generic.tests
-    , testGroup "Distribution.Utils.Json" $
-        UnitTests.Distribution.Utils.Json.tests
+    , testGroup "Distribution.Utils.Json" UnitTests.Distribution.Utils.Json.tests
     , testGroup "Distribution.Utils.NubList"
         UnitTests.Distribution.Utils.NubList.tests
+    , testGroup "Distribution.Utils.Path"
+        UnitTests.Distribution.Utils.Path.tests
     , testGroup "Distribution.PackageDescription.Check"
         UnitTests.Distribution.PackageDescription.Check.tests
     , testGroup "Distribution.Utils.ShortText"
@@ -90,17 +87,16 @@ extraOptions =
   ]
 
 newtype OptionMtimeChangeDelay = OptionMtimeChangeDelay Int
-  deriving Typeable
 
 instance IsOption OptionMtimeChangeDelay where
-  defaultValue   = OptionMtimeChangeDelay 0
+  defaultValue = OptionMtimeChangeDelay 10000
+  showDefaultValue (OptionMtimeChangeDelay v) = Just (show v)
   parseValue     = fmap OptionMtimeChangeDelay . safeRead
   optionName     = return "mtime-change-delay"
   optionHelp     = return $ "How long to wait before attempting to detect"
                    ++ "file modification, in microseconds"
 
 newtype GhcPath = GhcPath FilePath
-  deriving Typeable
 
 instance IsOption GhcPath where
   defaultValue = GhcPath "ghc"
@@ -109,15 +105,7 @@ instance IsOption GhcPath where
   parseValue   = Just . GhcPath
 
 main :: IO ()
-main = do
-  (mtimeChange, mtimeChange') <- calibrateMtimeChangeDelay
-  let toMillis :: Int -> Double
-      toMillis x = fromIntegral x / 1000.0
-  notice normal $ "File modification time resolution calibration completed, "
-    ++ "maximum delay observed: "
-    ++ (show . toMillis $ mtimeChange ) ++ " ms. "
-    ++ "Will be using delay of " ++ (show . toMillis $ mtimeChange')
-    ++ " for test runs."
+main =
   defaultMainWithIngredients
-         (includingOptions extraOptions : defaultIngredients)
-         (tests mtimeChange')
+    (includingOptions extraOptions : defaultIngredients)
+    tests

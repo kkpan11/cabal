@@ -1,9 +1,5 @@
-{-# LANGUAGE CPP #-}
 {-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE NamedFieldPuns #-}
-{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 
 module Distribution.Client.VCS
   ( -- * VCS driver type
@@ -64,22 +60,25 @@ import Distribution.Simple.Program
 import Distribution.Simple.Program.Db
   ( prependProgramSearchPath
   )
+import Distribution.System
+  ( OS (Windows)
+  , buildOS
+  )
 import Distribution.Types.SourceRepo
   ( KnownRepoType (..)
   , RepoType (..)
   )
 import Distribution.Verbosity as Verbosity
-  ( normal
+  ( VerbosityLevel (..)
+  , verbosityLevel
   )
 import Distribution.Version
   ( mkVersion
   )
 
-#if !MIN_VERSION_base(4,18,0)
-import Control.Applicative
-         ( liftA2 )
-#endif
-
+import Control.Concurrent
+  ( threadDelay
+  )
 import Control.Exception
   ( throw
   , try
@@ -90,9 +89,11 @@ import Control.Monad.Trans
 import qualified Data.Char as Char
 import qualified Data.List as List
 import qualified Data.Map as Map
+import qualified Data.Text as Text
 import System.Directory
   ( doesDirectoryExist
-  , removeDirectoryRecursive
+  , doesFileExist
+  , removePathForcibly
   )
 import System.FilePath
   ( takeDirectory
@@ -100,7 +101,9 @@ import System.FilePath
   )
 import System.IO.Error
   ( isDoesNotExistError
+  , isPermissionError
   )
+import qualified System.Process as Process
 
 -- | A driver for a version control system, e.g. git, darcs etc.
 data VCS program = VCS
@@ -153,7 +156,7 @@ validateSourceRepo = \repo -> do
   let rtype = srpType repo
   vcs <- Map.lookup rtype knownVCSs ?! SourceRepoRepoTypeUnsupported (srpToProxy repo) rtype
   let uri = srpLocation repo
-  return (repo, uri, rtype, vcs)
+  return (repo, Text.unpack uri, rtype, vcs)
   where
     a ?! e = maybe (Left e) Right a
 
@@ -206,7 +209,7 @@ configureVCS
   -> VCS Program
   -> IO (VCS ConfiguredProgram)
 configureVCS verbosity progPaths vcs@VCS{vcsProgram = prog} = do
-  progPath <- prependProgramSearchPath verbosity progPaths emptyProgramDb
+  progPath <- prependProgramSearchPath verbosity progPaths [] emptyProgramDb
   asVcsConfigured <$> requireProgram verbosity prog progPath
   where
     asVcsConfigured (prog', _) = vcs{vcsProgram = prog'}
@@ -250,7 +253,7 @@ cloneSourceRepo
           verbosity
           (vcsProgram vcs)
           repo
-          srcuri
+          (Text.unpack srcuri)
           destdir
 
 -- | Synchronise a set of 'SourceRepo's referring to the same repository with
@@ -321,9 +324,9 @@ vcsBzr =
         tagArgs :: [String]
         tagArgs = case srpTag repo of
           Nothing -> []
-          Just tag -> ["-r", "tag:" ++ tag]
+          Just tag -> ["-r", "tag:" ++ Text.unpack tag]
         verboseArg :: [String]
-        verboseArg = ["--quiet" | verbosity < Verbosity.normal]
+        verboseArg = ["--quiet" | verbosityLevel verbosity < Verbosity.Normal]
 
     vcsSyncRepos
       :: Verbosity
@@ -374,9 +377,9 @@ vcsDarcs =
         tagArgs :: [String]
         tagArgs = case srpTag repo of
           Nothing -> []
-          Just tag -> ["-t", tag]
+          Just tag -> ["-t", Text.unpack tag]
         verboseArg :: [String]
-        verboseArg = ["--quiet" | verbosity < Verbosity.normal]
+        verboseArg = ["--quiet" | verbosityLevel verbosity < Verbosity.Normal]
 
     vcsSyncRepos
       :: Verbosity
@@ -400,11 +403,11 @@ vcsDarcs =
         Right (_ : _ : _ : x : _)
           | Just tag <- (List.stripPrefix "tagged " . List.dropWhile Char.isSpace) x
           , Just tag' <- srpTag
-          , tag == tag' ->
+          , tag == Text.unpack tag' ->
               pure ()
         Left e | not (isDoesNotExistError e) -> throw e
         _ -> do
-          removeDirectoryRecursive localDir `catch` liftA2 unless isDoesNotExistError throw
+          removePathForcibly localDir
           darcs (takeDirectory localDir) cloneArgs
       where
         darcs :: FilePath -> [String] -> IO ()
@@ -422,13 +425,13 @@ vcsDarcs =
               }
 
         cloneArgs :: [String]
-        cloneArgs = ["clone"] ++ tagArgs ++ [srpLocation, localDir] ++ verboseArg
+        cloneArgs = ["clone"] ++ tagArgs ++ [Text.unpack srpLocation, localDir] ++ verboseArg
         tagArgs :: [String]
         tagArgs = case srpTag of
           Nothing -> []
-          Just tag -> ["-t" ++ tag]
+          Just tag -> ["-t" ++ Text.unpack tag]
         verboseArg :: [String]
-        verboseArg = ["--quiet" | verbosity < Verbosity.normal]
+        verboseArg = ["--quiet" | verbosityLevel verbosity < Verbosity.Normal]
 
 darcsProgram :: Program
 darcsProgram =
@@ -460,21 +463,31 @@ vcsGit =
     vcsCloneRepo verbosity prog repo srcuri destdir =
       [programInvocation prog cloneArgs]
         -- And if there's a tag, we have to do that in a second step:
-        ++ [git (resetArgs tag) | tag <- maybeToList (srpTag repo)]
-        ++ [ git (["submodule", "sync", "--recursive"] ++ verboseArg)
-           , git (["submodule", "update", "--init", "--force", "--recursive"] ++ verboseArg)
+        ++ [git (resetArgs (Text.unpack tag)) | tag <- maybeToList (srpTag repo)]
+        ++ [ whenGitModulesExists $ git $ ["submodule", "sync", "--recursive"] ++ verboseArg
+           , whenGitModulesExists $ git $ ["submodule", "update", "--init", "--force", "--recursive"] ++ verboseArg
            ]
       where
         git args = (programInvocation prog args){progInvokeCwd = Just destdir}
+
+        gitModulesPath = destdir </> ".gitmodules"
+        whenGitModulesExists invocation =
+          invocation
+            { progInvokeWhen = doesFileExist gitModulesPath
+            }
+
         cloneArgs =
           ["clone", srcuri, destdir]
             ++ branchArgs
             ++ verboseArg
         branchArgs = case srpBranch repo of
-          Just b -> ["--branch", b]
+          Just b -> ["--branch", Text.unpack b]
           Nothing -> []
         resetArgs tag = "reset" : verboseArg ++ ["--hard", tag, "--"]
-        verboseArg = ["--quiet" | verbosity < Verbosity.normal]
+        verboseArg = ["--quiet" | verbosityLevel verbosity < Verbosity.Normal]
+
+    -- Note: No --depth=1 for vcsCloneRepo since that is used for `cabal get -s`,
+    -- whereas `vcsSyncRepo` is used for source-repository-package where we do want shallow clones.
 
     vcsSyncRepos
       :: Verbosity
@@ -487,15 +500,24 @@ vcsGit =
       gitProg
       ((primaryRepo, primaryLocalDir) : secondaryRepos) = do
         vcsSyncRepo verbosity gitProg primaryRepo primaryLocalDir Nothing
+        -- Each of the `secondaryRepos` clones the primary checkout as
+        -- `git clone --reference`, so that the group shares one object store.
+        -- But git refuses to reference a shallow clone, so only pass it on
+        -- when git's own marker `.git/shallow` is absent.
+        -- Fixes #12296.
+        primaryIsShallow <- doesFileExist (primaryLocalDir </> ".git" </> "shallow")
+        let peer = if primaryIsShallow then Nothing else Just primaryLocalDir
         sequence_
-          [ vcsSyncRepo verbosity gitProg repo localDir (Just primaryLocalDir)
+          [ vcsSyncRepo verbosity gitProg repo localDir peer
           | (repo, localDir) <- secondaryRepos
           ]
         return
           [ monitorDirectoryExistence dir
-          | dir <- (primaryLocalDir : map snd secondaryRepos)
+          | dir <- primaryLocalDir : map snd secondaryRepos
           ]
 
+    -- NOTE: Repositories are cloned once, but can be synchronized multiple times.
+    -- Therefore, this code has to work with both `git clone` and `git fetch`.
     vcsSyncRepo verbosity gitProg SourceRepositoryPackage{..} localDir peer = do
       exists <- doesDirectoryExist localDir
       if exists
@@ -506,15 +528,77 @@ vcsGit =
       -- is needed because sometimes `git submodule sync` does not actually
       -- update the submodule source URL. Detailed description here:
       -- https://git.coop/-/snippets/85
-      git localDir ["submodule", "deinit", "--force", "--all"]
-      let gitModulesDir = localDir </> ".git" </> "modules"
-      gitModulesExists <- doesDirectoryExist gitModulesDir
-      when gitModulesExists $ removeDirectoryRecursive gitModulesDir
-      git localDir resetArgs
-      git localDir $ ["submodule", "sync", "--recursive"] ++ verboseArg
-      git localDir $ ["submodule", "update", "--force", "--init", "--recursive"] ++ verboseArg
-      git localDir $ ["submodule", "foreach", "--recursive"] ++ verboseArg ++ ["git clean -ffxdq"]
-      git localDir $ ["clean", "-ffxdq"]
+      let dotGitModulesPath = localDir </> ".git" </> "modules"
+          gitModulesPath = localDir </> ".gitmodules"
+
+      -- Remove any `.git/modules` if they exist.
+      dotGitModulesExists <- doesDirectoryExist dotGitModulesPath
+      when dotGitModulesExists $ do
+        git localDir $ ["submodule", "deinit", "--force", "--all"] ++ verboseArg
+        -- Windows can't delete some git files #10182
+        when (buildOS == Windows) $
+          void $
+            Process.createProcess_ "attrib" $
+              Process.shell $
+                "attrib -s -h -r " <> dotGitModulesPath <> "\\*.* /s /d"
+        catch
+          (removePathForcibly dotGitModulesPath)
+          (\e -> if isPermissionError e then threadDelay 1000 >> removePathForcibly dotGitModulesPath else throw e)
+
+      -- If we want a particular branch or tag, fetch it.
+      ref <- case srpBranch `mplus` srpTag of
+        Nothing -> pure "HEAD"
+        Just ref -> do
+          -- /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\
+          -- /!\            MULTIPLE HOURS HAVE BEEN LOST HERE!!             /!\
+          -- /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\
+          --
+          -- If you run `git fetch origin MY_TAG`, then the tag _will_ be
+          -- fetched, but no local ref (e.g. `refs/tags/MY_TAG`) will be
+          -- created.
+          --
+          -- This means that doing `git fetch origin MY_TAG && git reset --hard
+          -- MY_TAG` will fail with a message like `unknown revision MY_TAG`.
+          --
+          -- There are two ways around this:
+          --
+          -- 1. Provide a refmap explicitly:
+          --
+          --        git fetch --refmap="+refs/tags/*:refs/tags/*" origin MYTAG
+          --
+          --    This tells Git to create local tags matching remote tags. It's
+          --    not in the default refmap so you need to set it explicitly.
+          --    (You can also set it with `git config set --local
+          --    remote.origin.fetch ...`.)
+          --
+          -- 2. Use `FETCH_HEAD` directly: Git writes a `FETCH_HEAD` ref
+          --    containing the commit that was just fetched. This feels a bit
+          --    nasty but seems to work reliably, even if nothing was fetched.
+          --    (That is, deleting `FETCH_HEAD` and re-running a `git fetch`
+          --    command will successfully recreate the `FETCH_HEAD` ref.)
+          --
+          -- Option 2 is what Cabal has done historically, and we're keeping it
+          -- for now. Option 1 is possible but seems to have little benefit.
+          git localDir ("fetch" : verboseArg ++ ["origin", Text.unpack ref])
+          pure "FETCH_HEAD"
+
+      -- Then, reset to the appropriate ref.
+      git localDir $
+        "reset"
+          : verboseArg
+          ++ [ "--hard"
+             , ref
+             , "--"
+             ]
+
+      -- We need to check if `.gitmodules` exists _after_ the `git reset` call.
+      gitModulesExists <- doesFileExist gitModulesPath
+      when gitModulesExists $ do
+        git localDir $ ["submodule", "sync", "--recursive"] ++ verboseArg
+        git localDir $ ["submodule", "update", "--force", "--init", "--recursive"] ++ verboseArg
+        git localDir $ ["submodule", "foreach", "--recursive"] ++ verboseArg ++ ["git clean -ffxdq"]
+
+      git localDir ["clean", "-ffxdq"]
       where
         git :: FilePath -> [String] -> IO ()
         git cwd args =
@@ -524,16 +608,15 @@ vcsGit =
               }
 
         cloneArgs =
-          ["clone", "--no-checkout", loc, localDir]
+          ["clone", "--depth=1", "--no-checkout", Text.unpack loc, localDir]
             ++ case peer of
               Nothing -> []
               Just peerLocalDir -> ["--reference", peerLocalDir]
             ++ verboseArg
           where
             loc = srpLocation
-        resetArgs = "reset" : verboseArg ++ ["--hard", resetTarget, "--"]
-        resetTarget = fromMaybe "HEAD" (srpBranch `mplus` srpTag)
-        verboseArg = ["--quiet" | verbosity < Verbosity.normal]
+
+        verboseArg = ["--quiet" | verbosityLevel verbosity < Verbosity.Normal]
 
 gitProgram :: Program
 gitProgram =
@@ -545,16 +628,15 @@ gitProgram =
           -- or annoyingly "git version 2.17.1.windows.2" yes, really
           (_ : _ : ver : _) ->
             intercalate "."
-              . takeWhile (all isNum)
+              . takeWhile (all isDigit)
               . split
               $ ver
           _ -> ""
     }
   where
-    isNum c = c >= '0' && c <= '9'
-    isTypical c = isNum c || c == '.'
+    isTypical c = isDigit c || c == '.'
     split cs = case break (== '.') cs of
-      (chunk, []) -> chunk : []
+      (chunk, []) -> [chunk]
       (chunk, _ : rest) -> chunk : split rest
 
 -- | VCS driver for Mercurial.
@@ -583,12 +665,12 @@ vcsHg =
             ++ tagArgs
             ++ verboseArg
         branchArgs = case srpBranch repo of
-          Just b -> ["--branch", b]
+          Just b -> ["--branch", Text.unpack b]
           Nothing -> []
         tagArgs = case srpTag repo of
-          Just t -> ["--rev", t]
+          Just t -> ["--rev", Text.unpack t]
           Nothing -> []
-        verboseArg = ["--quiet" | verbosity < Verbosity.normal]
+        verboseArg = ["--quiet" | verbosityLevel verbosity < Verbosity.Normal]
 
     vcsSyncRepos
       :: Verbosity
@@ -607,7 +689,7 @@ vcsHg =
           ]
         return
           [ monitorDirectoryExistence dir
-          | dir <- (primaryLocalDir : map snd secondaryRepos)
+          | dir <- primaryLocalDir : map snd secondaryRepos
           ]
     vcsSyncRepo verbosity hgProg repo localDir = do
       exists <- doesDirectoryExist localDir
@@ -623,14 +705,14 @@ vcsHg =
               { progInvokeCwd = Just cwd
               }
         cloneArgs =
-          ["clone", "--noupdate", (srpLocation repo), localDir]
+          ["clone", "--noupdate", Text.unpack (srpLocation repo), localDir]
             ++ verboseArg
-        verboseArg = ["--quiet" | verbosity < Verbosity.normal]
+        verboseArg = ["--quiet" | verbosityLevel verbosity < Verbosity.Normal]
         checkoutArgs =
           ["checkout", "--clean"]
             ++ tagArgs
         tagArgs = case srpTag repo of
-          Just t -> ["--rev", t]
+          Just t -> ["--rev", Text.unpack t]
           Nothing -> []
 
 hgProgram :: Program
@@ -664,7 +746,7 @@ vcsSvn =
       [programInvocation prog checkoutArgs]
       where
         checkoutArgs = ["checkout", srcuri, destdir] ++ verboseArg
-        verboseArg = ["--quiet" | verbosity < Verbosity.normal]
+        verboseArg = ["--quiet" | verbosityLevel verbosity < Verbosity.Normal]
     -- TODO: branch or tag?
 
     vcsSyncRepos
@@ -769,7 +851,7 @@ vcsPijul =
     vcsCloneRepo _verbosity prog repo srcuri destdir =
       [programInvocation prog cloneArgs]
         -- And if there's a tag, we have to do that in a second step:
-        ++ [ (programInvocation prog (checkoutArgs tag))
+        ++ [ (programInvocation prog (checkoutArgs (Text.unpack tag)))
             { progInvokeCwd = Just destdir
             }
            | tag <- maybeToList (srpTag repo)
@@ -781,7 +863,7 @@ vcsPijul =
             ++ branchArgs
         branchArgs :: [String]
         branchArgs = case srpBranch repo of
-          Just b -> ["--from-branch", b]
+          Just b -> ["--from-branch", Text.unpack b]
           Nothing -> []
         checkoutArgs tag = "checkout" : [tag] -- TODO: this probably doesn't work either
     vcsSyncRepos
@@ -801,7 +883,7 @@ vcsPijul =
           ]
         return
           [ monitorDirectoryExistence dir
-          | dir <- (primaryLocalDir : map snd secondaryRepos)
+          | dir <- primaryLocalDir : map snd secondaryRepos
           ]
 
     vcsSyncRepo verbosity pijulProg SourceRepositoryPackage{..} localDir peer = do
@@ -820,7 +902,7 @@ vcsPijul =
 
         cloneArgs :: [String]
         cloneArgs =
-          ["clone", loc, localDir]
+          ["clone", Text.unpack loc, localDir]
             ++ case peer of
               Nothing -> []
               Just peerLocalDir -> [peerLocalDir]
@@ -828,7 +910,7 @@ vcsPijul =
             loc = srpLocation
         checkoutArgs :: [String]
         checkoutArgs = "checkout" : ["--force", checkoutTarget, "--"]
-        checkoutTarget = fromMaybe "HEAD" (srpBranch `mplus` srpTag) -- TODO: this is definitely wrong.
+        checkoutTarget = maybe "HEAD" Text.unpack (srpBranch `mplus` srpTag) -- TODO: this is definitely wrong.
 
 pijulProgram :: Program
 pijulProgram =
@@ -840,5 +922,4 @@ pijulProgram =
           _ -> ""
     }
   where
-    isNum c = c >= '0' && c <= '9'
-    isTypical c = isNum c || c == '.'
+    isTypical c = isDigit c || c == '.'

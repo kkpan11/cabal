@@ -10,7 +10,7 @@ GenericPackageDescription {
     licenseRaw = Right BSD3,
     licenseFiles = [
       SymbolicPath "LICENSE"],
-    copyright = concat
+    copyright = T.concat
       [
         "(c) 2010 Grant Monroe\n",
         "(c) 2011 Leon P Smith"],
@@ -67,7 +67,7 @@ GenericPackageDescription {
     sourceRepos = [],
     synopsis =
     "low-level binding to libpq",
-    description = concat
+    description = T.concat
       [
         "This is a binding to libpq: the C application\n",
         "programmer's interface to PostgreSQL. libpq is a\n",
@@ -105,12 +105,14 @@ GenericPackageDescription {
     testSuites = [],
     benchmarks = [],
     dataFiles = [],
-    dataDir = ".",
+    dataDir = SymbolicPath ".",
     extraSrcFiles = [
-      "cbits/noticehandlers.h",
-      "CHANGELOG.md"],
+      SymbolicPath
+        "cbits/noticehandlers.h",
+      SymbolicPath "CHANGELOG.md"],
     extraTmpFiles = [],
-    extraDocFiles = []},
+    extraDocFiles = [],
+    extraFiles = []},
   gpdScannedVersion = Nothing,
   genPackageFlags = [
     MkPackageFlag {
@@ -146,6 +148,7 @@ GenericPackageDescription {
           cmmOptions = [],
           ccOptions = [],
           cxxOptions = [],
+          jsppOptions = [],
           ldOptions = [],
           hsc2hsOptions = [],
           pkgconfigDepends = [],
@@ -154,7 +157,8 @@ GenericPackageDescription {
           asmSources = [],
           cmmSources = [],
           cSources = [
-            "cbits/noticehandlers.c"],
+            SymbolicPath
+              "cbits/noticehandlers.c"],
           cxxSources = [],
           jsSources = [],
           hsSourceDirs = [
@@ -175,7 +179,8 @@ GenericPackageDescription {
           extraDynLibFlavours = [],
           extraLibDirs = [],
           extraLibDirsStatic = [],
-          includeDirs = ["cbits"],
+          includeDirs = [
+            SymbolicPath "cbits"],
           includes = [],
           autogenIncludes = [],
           installIncludes = [],
@@ -186,6 +191,8 @@ GenericPackageDescription {
             []
             [],
           sharedOptions =
+          PerCompilerFlavor [] [],
+          profSharedOptions =
           PerCompilerFlavor [] [],
           staticOptions =
           PerCompilerFlavor [] [],
@@ -208,23 +215,6 @@ GenericPackageDescription {
                   (mkVersion [0, 11])))
               mainLibSet],
           mixins = []}},
-      condTreeConstraints = [
-        Dependency
-          (PackageName "base")
-          (IntersectVersionRanges
-            (OrLaterVersion
-              (mkVersion [4, 3]))
-            (EarlierVersion
-              (mkVersion [4, 13])))
-          mainLibSet,
-        Dependency
-          (PackageName "bytestring")
-          (IntersectVersionRanges
-            (OrLaterVersion
-              (mkVersion [0, 9, 1, 0]))
-            (EarlierVersion
-              (mkVersion [0, 11])))
-          mainLibSet],
       condTreeComponents = [
         CondBranch {
           condBranchCondition =
@@ -247,6 +237,7 @@ GenericPackageDescription {
                 cmmOptions = [],
                 ccOptions = [],
                 cxxOptions = [],
+                jsppOptions = [],
                 ldOptions = [],
                 hsc2hsOptions = [],
                 pkgconfigDepends = [],
@@ -286,6 +277,8 @@ GenericPackageDescription {
                   [],
                 sharedOptions =
                 PerCompilerFlavor [] [],
+                profSharedOptions =
+                PerCompilerFlavor [] [],
                 staticOptions =
                 PerCompilerFlavor [] [],
                 customFieldsBI = [],
@@ -299,15 +292,6 @@ GenericPackageDescription {
                         (mkVersion [2, 8])))
                     mainLibSet],
                 mixins = []}},
-            condTreeConstraints = [
-              Dependency
-                (PackageName "unix")
-                (IntersectVersionRanges
-                  (OrLaterVersion
-                    (mkVersion [2, 4, 2, 0]))
-                  (EarlierVersion
-                    (mkVersion [2, 8])))
-                mainLibSet],
             condTreeComponents = []},
           condBranchIfFalse = Nothing},
         CondBranch {
@@ -331,6 +315,7 @@ GenericPackageDescription {
                 cmmOptions = [],
                 ccOptions = [],
                 cxxOptions = [],
+                jsppOptions = [],
                 ldOptions = [],
                 hsc2hsOptions = [],
                 pkgconfigDepends = [],
@@ -370,6 +355,8 @@ GenericPackageDescription {
                   [],
                 sharedOptions =
                 PerCompilerFlavor [] [],
+                profSharedOptions =
+                PerCompilerFlavor [] [],
                 staticOptions =
                 PerCompilerFlavor [] [],
                 customFieldsBI = [],
@@ -383,15 +370,6 @@ GenericPackageDescription {
                         (mkVersion [2, 7])))
                     mainLibSet],
                 mixins = []}},
-            condTreeConstraints = [
-              Dependency
-                (PackageName "Win32")
-                (IntersectVersionRanges
-                  (OrLaterVersion
-                    (mkVersion [2, 2, 0, 2]))
-                  (EarlierVersion
-                    (mkVersion [2, 7])))
-                mainLibSet],
             condTreeComponents = []},
           condBranchIfFalse = Nothing},
         CondBranch {
@@ -415,6 +393,7 @@ GenericPackageDescription {
                 cmmOptions = [],
                 ccOptions = [],
                 cxxOptions = [],
+                jsppOptions = [],
                 ldOptions = [],
                 hsc2hsOptions = [],
                 pkgconfigDepends = [
@@ -461,12 +440,13 @@ GenericPackageDescription {
                   [],
                 sharedOptions =
                 PerCompilerFlavor [] [],
+                profSharedOptions =
+                PerCompilerFlavor [] [],
                 staticOptions =
                 PerCompilerFlavor [] [],
                 customFieldsBI = [],
                 targetBuildDepends = [],
                 mixins = []}},
-            condTreeConstraints = [],
             condTreeComponents = []},
           condBranchIfFalse = Just
             CondNode {
@@ -487,6 +467,7 @@ GenericPackageDescription {
                   cmmOptions = [],
                   ccOptions = [],
                   cxxOptions = [],
+                  jsppOptions = [],
                   ldOptions = [],
                   hsc2hsOptions = [],
                   pkgconfigDepends = [],
@@ -526,12 +507,13 @@ GenericPackageDescription {
                     [],
                   sharedOptions =
                   PerCompilerFlavor [] [],
+                  profSharedOptions =
+                  PerCompilerFlavor [] [],
                   staticOptions =
                   PerCompilerFlavor [] [],
                   customFieldsBI = [],
                   targetBuildDepends = [],
                   mixins = []}},
-              condTreeConstraints = [],
               condTreeComponents = [
                 CondBranch {
                   condBranchCondition =
@@ -554,6 +536,7 @@ GenericPackageDescription {
                         cmmOptions = [],
                         ccOptions = [],
                         cxxOptions = [],
+                        jsppOptions = [],
                         ldOptions = [],
                         hsc2hsOptions = [],
                         pkgconfigDepends = [],
@@ -593,12 +576,13 @@ GenericPackageDescription {
                           [],
                         sharedOptions =
                         PerCompilerFlavor [] [],
+                        profSharedOptions =
+                        PerCompilerFlavor [] [],
                         staticOptions =
                         PerCompilerFlavor [] [],
                         customFieldsBI = [],
                         targetBuildDepends = [],
                         mixins = []}},
-                    condTreeConstraints = [],
                     condTreeComponents = []},
                   condBranchIfFalse = Just
                     CondNode {
@@ -619,6 +603,7 @@ GenericPackageDescription {
                           cmmOptions = [],
                           ccOptions = [],
                           cxxOptions = [],
+                          jsppOptions = [],
                           ldOptions = [],
                           hsc2hsOptions = [],
                           pkgconfigDepends = [],
@@ -658,12 +643,13 @@ GenericPackageDescription {
                             [],
                           sharedOptions =
                           PerCompilerFlavor [] [],
+                          profSharedOptions =
+                          PerCompilerFlavor [] [],
                           staticOptions =
                           PerCompilerFlavor [] [],
                           customFieldsBI = [],
                           targetBuildDepends = [],
                           mixins = []}},
-                      condTreeConstraints = [],
                       condTreeComponents = [
                         CondBranch {
                           condBranchCondition =
@@ -686,6 +672,7 @@ GenericPackageDescription {
                                 cmmOptions = [],
                                 ccOptions = [],
                                 cxxOptions = [],
+                                jsppOptions = [],
                                 ldOptions = [],
                                 hsc2hsOptions = [],
                                 pkgconfigDepends = [],
@@ -725,12 +712,13 @@ GenericPackageDescription {
                                   [],
                                 sharedOptions =
                                 PerCompilerFlavor [] [],
+                                profSharedOptions =
+                                PerCompilerFlavor [] [],
                                 staticOptions =
                                 PerCompilerFlavor [] [],
                                 customFieldsBI = [],
                                 targetBuildDepends = [],
                                 mixins = []}},
-                            condTreeConstraints = [],
                             condTreeComponents = []},
                           condBranchIfFalse =
                           Nothing}]}}]}}]},

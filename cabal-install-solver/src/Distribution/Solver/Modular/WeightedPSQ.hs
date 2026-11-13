@@ -1,6 +1,3 @@
-{-# LANGUAGE DeriveFunctor, DeriveFoldable, DeriveTraversable #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TupleSections #-}
 module Distribution.Solver.Modular.WeightedPSQ (
     WeightedPSQ
   , fromList

@@ -1,6 +1,3 @@
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE LambdaCase #-}
 {-# OPTIONS_GHC -Wno-deferred-out-of-scope-variables #-}
 
 module Main (main) where
@@ -64,11 +61,7 @@ main1 planPath = do
     plan <- P.decodePlanJson planPath
     main2 meta plan
   where
-#if MIN_VERSION_cabal_install_parsers(0,4,0)
     getMap = snd
-#else
-    getMap = id
-#endif
 
 main2 :: Map.Map C.PackageName I.PackageInfo -> P.PlanJson -> IO ()
 main2 meta plan = do
@@ -133,11 +126,7 @@ main2 meta plan = do
         , resDependencies = deps
         }
   where
-#if MIN_VERSION_cabal_install_parsers(0,6,0)
     getHash = I.riCabalHash
-#else
-    getHash = I.riCabal
-#endif
 
 lookupUnit :: Map.Map P.UnitId P.Unit -> P.UnitId -> IO P.Unit
 lookupUnit units uid

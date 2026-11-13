@@ -1,10 +1,9 @@
 {-# LANGUAGE CPP #-}
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE RankNTypes #-}
-
------------------------------------------------------------------------------
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DerivingVia #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
 
 -- |
 -- Module      :  Distribution.Simple.Setup.Config
@@ -18,12 +17,19 @@
 -- Definition of the configure command-line options.
 -- See: @Distribution.Simple.Setup@
 module Distribution.Simple.Setup.Config
-  ( ConfigFlags (..)
+  ( ConfigFlags
+      ( ConfigCommonFlags
+      , configVerbosity
+      , configDistPref
+      , configCabalFilePath
+      , configWorkingDir
+      , configTargets
+      , ..
+      )
   , emptyConfigFlags
   , defaultConfigFlags
   , configureCommand
   , configPrograms
-  , configAbsolutePaths
   , readPackageDb
   , readPackageDbList
   , showPackageDb
@@ -36,7 +42,9 @@ module Distribution.Simple.Setup.Config
 import Distribution.Compat.Prelude hiding (get)
 import Prelude ()
 
+import Data.Semigroup (Last (..))
 import qualified Distribution.Compat.CharParsing as P
+import Distribution.Compat.Stack
 import Distribution.Compiler
 import Distribution.ModuleName
 import Distribution.PackageDescription
@@ -48,6 +56,7 @@ import Distribution.Simple.Compiler
 import Distribution.Simple.Flag
 import Distribution.Simple.InstallDirs
 import Distribution.Simple.Program
+import Distribution.Simple.Setup.Common
 import Distribution.Simple.Utils
 import Distribution.Types.ComponentId
 import Distribution.Types.DumpBuildInfo
@@ -56,13 +65,10 @@ import Distribution.Types.Module
 import Distribution.Types.PackageVersionConstraint
 import Distribution.Types.UnitId
 import Distribution.Utils.NubList
+import Distribution.Utils.Path
 import Distribution.Verbosity
+
 import qualified Text.PrettyPrint as Disp
-
-import Distribution.Compat.Semigroup (Last' (..), Option' (..))
-import Distribution.Compat.Stack
-
-import Distribution.Simple.Setup.Common
 
 -- ------------------------------------------------------------
 
@@ -76,14 +82,12 @@ import Distribution.Simple.Setup.Common
 -- should be updated.
 -- IMPORTANT: every time a new flag is added, it should be added to the Eq instance
 data ConfigFlags = ConfigFlags
-  { -- This is the same hack as in 'buildArgs' and 'copyArgs'.
-    -- TODO: Stop using this eventually when 'UserHooks' gets changed
-    configArgs :: [String]
+  { configCommonFlags :: !CommonSetupFlags
   , -- FIXME: the configPrograms is only here to pass info through to configure
     -- because the type of configure is constrained by the UserHooks.
     -- when we change UserHooks next we should pass the initial
     -- ProgramDb directly and not via ConfigFlags
-    configPrograms_ :: Option' (Last' ProgramDb)
+    configPrograms_ :: Maybe (Last ProgramDb)
   -- ^ All programs that
   --  @cabal@ may run
   , configProgramPaths :: [(String, FilePath)]
@@ -107,6 +111,8 @@ data ConfigFlags = ConfigFlags
   -- ^ Build shared library
   , configStaticLib :: Flag Bool
   -- ^ Build static library
+  , configBytecodeLib :: Flag Bool
+  -- ^ Build bytecode library
   , configDynExe :: Flag Bool
   -- ^ Enable dynamic linking of the
   --  executables.
@@ -119,6 +125,8 @@ data ConfigFlags = ConfigFlags
   , configProf :: Flag Bool
   -- ^ Enable profiling in the library
   --  and executables.
+  , configProfShared :: Flag Bool
+  -- ^ Enable shared profiling objects
   , configProfDetail :: Flag ProfDetailLevel
   -- ^ Profiling detail level
   --   in the library and executables.
@@ -137,16 +145,16 @@ data ConfigFlags = ConfigFlags
   -- ^ Installation
   --  paths
   , configScratchDir :: Flag FilePath
-  , configExtraLibDirs :: [FilePath]
+  , configExtraLibDirs :: [SymbolicPath Pkg (Dir Lib)]
   -- ^ path to search for extra libraries
-  , configExtraLibDirsStatic :: [FilePath]
+  , configExtraLibDirsStatic :: [SymbolicPath Pkg (Dir Lib)]
   -- ^ path to search for extra
   --   libraries when linking
   --   fully static executables
-  , configExtraFrameworkDirs :: [FilePath]
+  , configExtraFrameworkDirs :: [SymbolicPath Pkg (Dir Framework)]
   -- ^ path to search for extra
   -- frameworks (OS X only)
-  , configExtraIncludeDirs :: [FilePath]
+  , configExtraIncludeDirs :: [SymbolicPath Pkg (Dir Include)]
   -- ^ path to search for header files
   , configIPID :: Flag String
   -- ^ explicit IPID to be used
@@ -156,12 +164,6 @@ data ConfigFlags = ConfigFlags
   -- ^ be as deterministic as possible
   -- (e.g., invariant over GHC, database,
   -- etc).  Used by the test suite
-  , configDistPref :: Flag FilePath
-  -- ^ "dist" prefix
-  , configCabalFilePath :: Flag FilePath
-  -- ^ Cabal file to use
-  , configVerbosity :: Flag Verbosity
-  -- ^ verbosity level
   , configUserInstall :: Flag Bool
   -- ^ The --user\/--global flag
   , configPackageDBs :: [Maybe PackageDB]
@@ -181,7 +183,7 @@ data ConfigFlags = ConfigFlags
   --  dependencies.
   , configDependencies :: [GivenComponent]
   -- ^ The packages depended on which already exist
-  , configPromisedDependencies :: [GivenComponent]
+  , configPromisedDependencies :: [PromisedComponent]
   -- ^ The packages depended on which doesn't yet exist (i.e. promised).
   --  Promising dependencies enables us to configure components in parallel,
   --  and avoids expensive builds if they are not necessary.
@@ -226,8 +228,37 @@ data ConfigFlags = ConfigFlags
   -- testsuites run with @--enable-coverage@. Notably, this list must exclude
   -- indefinite libraries and instantiations because HPC does not support
   -- backpack (Nov. 2023).
+  , configIgnoreBuildTools :: Flag Bool
+  -- ^ When this flag is set, all tools declared in `build-tool`s and
+  -- `build-tool-depends` will be ignored. This allows a Cabal package with
+  -- build-tool-dependencies to be built even if the tool is not found.
   }
-  deriving (Generic, Read, Show, Typeable)
+  deriving (Generic, Read, Show)
+  deriving (Semigroup, Monoid) via Generically ConfigFlags
+
+pattern ConfigCommonFlags
+  :: Flag VerbosityFlags
+  -> Flag (SymbolicPath Pkg (Dir Dist))
+  -> Flag (SymbolicPath CWD (Dir Pkg))
+  -> Flag (SymbolicPath Pkg File)
+  -> [String]
+  -> ConfigFlags
+pattern ConfigCommonFlags
+  { configVerbosity
+  , configDistPref
+  , configWorkingDir
+  , configCabalFilePath
+  , configTargets
+  } <-
+  ( configCommonFlags ->
+      CommonSetupFlags
+        { setupVerbosity = configVerbosity
+        , setupDistPref = configDistPref
+        , setupWorkingDir = configWorkingDir
+        , setupCabalFilePath = configCabalFilePath
+        , setupTargets = configTargets
+        }
+    )
 
 instance Binary ConfigFlags
 instance Structured ConfigFlags
@@ -236,15 +267,13 @@ instance Structured ConfigFlags
 -- 'error' if internal invariant is violated.
 configPrograms :: WithCallStack (ConfigFlags -> ProgramDb)
 configPrograms =
-  fromMaybe (error "FIXME: remove configPrograms")
-    . fmap getLast'
-    . getOption'
-    . configPrograms_
+  maybe (error "FIXME: remove configPrograms") getLast . configPrograms_
 
 instance Eq ConfigFlags where
   (==) a b =
     -- configPrograms skipped: not user specified, has no Eq instance
-    equal configProgramPaths
+    equal configCommonFlags
+      && equal configProgramPaths
       && equal configProgramArgs
       && equal configProgramPathExtra
       && equal configHcFlavor
@@ -254,11 +283,13 @@ instance Eq ConfigFlags where
       && equal configProfLib
       && equal configSharedLib
       && equal configStaticLib
+      && equal configBytecodeLib
       && equal configDynExe
       && equal configFullyStaticExe
       && equal configProfExe
       && equal configProf
       && equal configProfDetail
+      && equal configProfShared
       && equal configProfLibDetail
       && equal configConfigureArgs
       && equal configOptimization
@@ -271,8 +302,6 @@ instance Eq ConfigFlags where
       && equal configExtraIncludeDirs
       && equal configIPID
       && equal configDeterministic
-      && equal configDistPref
-      && equal configVerbosity
       && equal configUserInstall
       && equal configPackageDBs
       && equal configGHCiLib
@@ -294,28 +323,24 @@ instance Eq ConfigFlags where
       && equal configDebugInfo
       && equal configDumpBuildInfo
       && equal configUseResponseFiles
+      && equal configAllowDependingOnPrivateLibs
       && equal configCoverageFor
+      && equal configIgnoreBuildTools
     where
       equal f = on (==) f a b
-
-configAbsolutePaths :: ConfigFlags -> IO ConfigFlags
-configAbsolutePaths f =
-  (\v -> f{configPackageDBs = v})
-    `liftM` traverse
-      (maybe (return Nothing) (liftM Just . absolutePackageDBPath))
-      (configPackageDBs f)
 
 {- FOURMOLU_DISABLE -}
 defaultConfigFlags :: ProgramDb -> ConfigFlags
 defaultConfigFlags progDb =
   emptyConfigFlags
-    { configArgs = []
-    , configPrograms_ = Option' (Just (Last' progDb))
+    { configCommonFlags = defaultCommonSetupFlags
+    , configPrograms_ = Just (Last progDb)
     , configHcFlavor = maybe NoFlag Flag defaultCompilerFlavor
     , configVanillaLib = Flag True
     , configProfLib = NoFlag
     , configSharedLib = NoFlag
     , configStaticLib = NoFlag
+    , configBytecodeLib = NoFlag
     , configDynExe = Flag False
     , configFullyStaticExe = Flag False
     , configProfExe = NoFlag
@@ -325,9 +350,6 @@ defaultConfigFlags progDb =
     , configOptimization = Flag NormalOptimisation
     , configProgPrefix = Flag (toPathTemplate "")
     , configProgSuffix = Flag (toPathTemplate "")
-    , configDistPref = NoFlag
-    , configCabalFilePath = NoFlag
-    , configVerbosity = Flag normal
     , configUserInstall = Flag False -- TODO: reverse this
 #if defined(mingw32_HOST_OS)
         -- See #8062 and GHC #21019.
@@ -401,66 +423,48 @@ dispModSubstEntry (k, v) = pretty k <<>> Disp.char '=' <<>> pretty v
 
 configureOptions :: ShowOrParseArgs -> [OptionField ConfigFlags]
 configureOptions showOrParseArgs =
-  [ optionVerbosity
-      configVerbosity
-      (\v flags -> flags{configVerbosity = v})
-  , optionDistPref
-      configDistPref
-      (\d flags -> flags{configDistPref = d})
-      showOrParseArgs
-  , option
-      []
-      ["compiler"]
-      "compiler"
-      configHcFlavor
-      (\v flags -> flags{configHcFlavor = v})
-      ( choiceOpt
-          [ (Flag GHC, ("g", ["ghc"]), "compile with GHC")
-          , (Flag GHCJS, ([], ["ghcjs"]), "compile with GHCJS")
-          , (Flag UHC, ([], ["uhc"]), "compile with UHC")
-          , -- "haskell-suite" compiler id string will be replaced
-            -- by a more specific one during the configure stage
-
-            ( Flag (HaskellSuite "haskell-suite")
-            , ([], ["haskell-suite"])
-            , "compile with a haskell-suite compiler"
-            )
-          ]
-      )
-  , option
-      ""
-      ["cabal-file"]
-      "use this Cabal file"
-      configCabalFilePath
-      (\v flags -> flags{configCabalFilePath = v})
-      (reqArgFlag "PATH")
-  , option
-      "w"
-      ["with-compiler"]
-      "give the path to a particular compiler"
-      configHcPath
-      (\v flags -> flags{configHcPath = v})
-      (reqArgFlag "PATH")
-  , option
-      ""
-      ["with-hc-pkg"]
-      "give the path to the package tool"
-      configHcPkg
-      (\v flags -> flags{configHcPkg = v})
-      (reqArgFlag "PATH")
-  ]
+  withCommonSetupOptions
+    configCommonFlags
+    (\c f -> f{configCommonFlags = c})
+    showOrParseArgs
+    [ option
+        []
+        ["compiler"]
+        "compiler"
+        configHcFlavor
+        (\v flags -> flags{configHcFlavor = v})
+        ( choiceOpt
+            [ (Flag GHC, ([], ["ghc"]), "Compile with GHC")
+            , (Flag UHC, ([], ["uhc"]), "Compile with UHC")
+            ]
+        )
+    , option
+        "w"
+        ["with-compiler"]
+        "Give the path to a particular compiler"
+        configHcPath
+        (\v flags -> flags{configHcPath = v})
+        (reqArgFlag "PATH")
+    , option
+        ""
+        ["with-hc-pkg"]
+        "Give the path to the package tool"
+        configHcPkg
+        (\v flags -> flags{configHcPkg = v})
+        (reqArgFlag "PATH")
+    ]
     ++ map liftInstallDirs installDirsOptions
     ++ [ option
           ""
           ["program-prefix"]
-          "prefix to be applied to installed executables"
+          "Prefix to be applied to installed executables"
           configProgPrefix
           (\v flags -> flags{configProgPrefix = v})
           (reqPathTemplateArgFlag "PREFIX")
        , option
           ""
           ["program-suffix"]
-          "suffix to be applied to installed executables"
+          "Suffix to be applied to installed executables"
           configProgSuffix
           (\v flags -> flags{configProgSuffix = v})
           (reqPathTemplateArgFlag "SUFFIX")
@@ -494,6 +498,13 @@ configureOptions showOrParseArgs =
           (boolOpt [] [])
        , option
           ""
+          ["library-bytecode"]
+          "Bytecode library"
+          configBytecodeLib
+          (\v flags -> flags{configBytecodeLib = v})
+          (boolOpt [] [])
+       , option
+          ""
           ["executable-dynamic"]
           "Executable dynamic linking"
           configDynExe
@@ -512,6 +523,13 @@ configureOptions showOrParseArgs =
           "Executable and library profiling"
           configProf
           (\v flags -> flags{configProf = v})
+          (boolOpt [] [])
+       , option
+          ""
+          ["profiling-shared"]
+          "Build profiling shared libraries"
+          configProfShared
+          (\v flags -> flags{configProfShared = v})
           (boolOpt [] [])
        , option
           ""
@@ -548,10 +566,10 @@ configureOptions showOrParseArgs =
           "optimization"
           configOptimization
           (\v flags -> flags{configOptimization = v})
-          [ optArgDef'
+          [ optArg'
               "n"
-              (show NoOptimisation, Flag . flagToOptimisationLevel)
-              ( \f -> case f of
+              (Flag . flagToOptimisationLevel)
+              ( \case
                   Flag NoOptimisation -> []
                   Flag NormalOptimisation -> [Nothing]
                   Flag MaximumOptimisation -> [Just "2"]
@@ -573,16 +591,16 @@ configureOptions showOrParseArgs =
           [ optArg'
               "n"
               (Flag . flagToDebugInfoLevel)
-              ( \f -> case f of
+              ( \case
                   Flag NoDebugInfo -> []
                   Flag MinimalDebugInfo -> [Just "1"]
                   Flag NormalDebugInfo -> [Nothing]
                   Flag MaximalDebugInfo -> [Just "3"]
                   _ -> []
               )
-              ""
+              "g"
               ["enable-debug-info"]
-              "Emit debug info (n is 0--3, default is 0)"
+              "Emit debug info (n is 0--3, default is 2)"
           , noArg
               (Flag NoDebugInfo)
               []
@@ -683,7 +701,7 @@ configureOptions showOrParseArgs =
           "A list of directories to search for header files"
           configExtraIncludeDirs
           (\v flags -> flags{configExtraIncludeDirs = v})
-          (reqArg' "PATH" (\x -> [x]) id)
+          (reqArg' "PATH" (\x -> [makeSymbolicPath x]) (fmap getSymbolicPath))
        , option
           ""
           ["deterministic"]
@@ -711,21 +729,21 @@ configureOptions showOrParseArgs =
           "A list of directories to search for external libraries"
           configExtraLibDirs
           (\v flags -> flags{configExtraLibDirs = v})
-          (reqArg' "PATH" (\x -> [x]) id)
+          (reqArg' "PATH" (\x -> [makeSymbolicPath x]) (fmap getSymbolicPath))
        , option
           ""
           ["extra-lib-dirs-static"]
           "A list of directories to search for external libraries when linking fully static executables"
           configExtraLibDirsStatic
           (\v flags -> flags{configExtraLibDirsStatic = v})
-          (reqArg' "PATH" (\x -> [x]) id)
+          (reqArg' "PATH" (\x -> [makeSymbolicPath x]) (fmap getSymbolicPath))
        , option
           ""
           ["extra-framework-dirs"]
           "A list of directories to search for external frameworks (OS X only)"
           configExtraFrameworkDirs
           (\v flags -> flags{configExtraFrameworkDirs = v})
-          (reqArg' "PATH" (\x -> [x]) id)
+          (reqArg' "PATH" (\x -> [makeSymbolicPath x]) (fmap getSymbolicPath))
        , option
           ""
           ["extra-prog-path"]
@@ -758,13 +776,13 @@ configureOptions showOrParseArgs =
        , option
           ""
           ["promised-dependency"]
-          "A list of promised dependencies. E.g., --promised-dependency=\"void=void-0.5.8-177d5cdf20962d0581fe2e4932a6c309\""
+          "A list of promised dependencies. E.g., --promised-dependency=\"void-0.5.8=void-0.5.8-177d5cdf20962d0581fe2e4932a6c309\""
           configPromisedDependencies
           (\v flags -> flags{configPromisedDependencies = v})
           ( reqArg
-              "NAME[:COMPONENT_NAME]=CID"
-              (parsecToReadE (const "dependency expected") ((\x -> [x]) `fmap` parsecGivenComponent))
-              (map prettyGivenComponent)
+              "NAME-VER[:COMPONENT_NAME]=CID"
+              (parsecToReadE (const "dependency expected") ((\x -> [x]) `fmap` parsecPromisedComponent))
+              (map prettyPromisedComponent)
           )
        , option
           ""
@@ -822,7 +840,7 @@ configureOptions showOrParseArgs =
        , option
           ""
           ["response-files"]
-          "enable workaround for old versions of programs like \"ar\" that do not support @file arguments"
+          "Enable workaround for old versions of programs like \"ar\" that do not support @file arguments"
           configUseResponseFiles
           (\v flags -> flags{configUseResponseFiles = v})
           (boolOpt' ([], ["disable-response-files"]) ([], []))
@@ -851,6 +869,15 @@ configureOptions showOrParseArgs =
               (Flag . (: []) . fromString)
               (fmap prettyShow . fromFlagOrDefault [])
           )
+       , option
+          ""
+          ["ignore-build-tools"]
+          ( "Ignore build tool dependencies. "
+              ++ "If set, declared build tools needn't be found for compilation to proceed."
+          )
+          configIgnoreBuildTools
+          (\v flags -> flags{configIgnoreBuildTools = v})
+          trueArg
        ]
   where
     liftInstallDirs =
@@ -868,15 +895,6 @@ configureOptions showOrParseArgs =
 readPackageDbList :: String -> [Maybe PackageDB]
 readPackageDbList str = [readPackageDb str]
 
--- | Parse a PackageDB stack entry
---
--- @since 3.7.0.0
-readPackageDb :: String -> Maybe PackageDB
-readPackageDb "clear" = Nothing
-readPackageDb "global" = Just GlobalPackageDB
-readPackageDb "user" = Just UserPackageDB
-readPackageDb other = Just (SpecificPackageDB other)
-
 showPackageDbList :: [Maybe PackageDB] -> [String]
 showPackageDbList = map showPackageDb
 
@@ -887,11 +905,33 @@ showPackageDb :: Maybe PackageDB -> String
 showPackageDb Nothing = "clear"
 showPackageDb (Just GlobalPackageDB) = "global"
 showPackageDb (Just UserPackageDB) = "user"
-showPackageDb (Just (SpecificPackageDB db)) = db
+showPackageDb (Just (SpecificPackageDB db)) = getSymbolicPath db
 
 showProfDetailLevelFlag :: Flag ProfDetailLevel -> [String]
 showProfDetailLevelFlag NoFlag = []
 showProfDetailLevelFlag (Flag dl) = [showProfDetailLevel dl]
+
+parsecPromisedComponent :: ParsecParser PromisedComponent
+parsecPromisedComponent = do
+  pn <- parsec
+  ln <- P.option LMainLibName $ do
+    _ <- P.char ':'
+    ucn <- parsec
+    return $
+      if unUnqualComponentName ucn == unPackageName (pkgName pn)
+        then LMainLibName
+        else LSubLibName ucn
+  _ <- P.char '='
+  PromisedComponent pn ln <$> parsec
+
+prettyPromisedComponent :: PromisedComponent -> String
+prettyPromisedComponent (PromisedComponent pn cn cid) =
+  prettyShow pn
+    ++ case cn of
+      LMainLibName -> ""
+      LSubLibName n -> ":" ++ prettyShow n
+    ++ "="
+    ++ prettyShow cid
 
 parsecGivenComponent :: ParsecParser GivenComponent
 parsecGivenComponent = do
@@ -904,8 +944,7 @@ parsecGivenComponent = do
         then LMainLibName
         else LSubLibName ucn
   _ <- P.char '='
-  cid <- parsec
-  return $ GivenComponent pn ln cid
+  GivenComponent pn ln <$> parsec
 
 prettyGivenComponent :: GivenComponent -> String
 prettyGivenComponent (GivenComponent pn cn cid) =
@@ -921,91 +960,98 @@ installDirsOptions =
   [ option
       ""
       ["prefix"]
-      "bake this prefix in preparation of installation"
+      "Bake this prefix in preparation of installation"
       prefix
       (\v flags -> flags{prefix = v})
       installDirArg
   , option
       ""
       ["bindir"]
-      "installation directory for executables"
+      "Installation directory for executables"
       bindir
       (\v flags -> flags{bindir = v})
       installDirArg
   , option
       ""
       ["libdir"]
-      "installation directory for libraries"
+      "Installation directory for libraries"
       libdir
       (\v flags -> flags{libdir = v})
       installDirArg
   , option
       ""
       ["libsubdir"]
-      "subdirectory of libdir in which libs are installed"
+      "Subdirectory of libdir in which libs are installed"
       libsubdir
       (\v flags -> flags{libsubdir = v})
       installDirArg
   , option
       ""
       ["dynlibdir"]
-      "installation directory for dynamic libraries"
+      "Installation directory for dynamic libraries"
       dynlibdir
       (\v flags -> flags{dynlibdir = v})
       installDirArg
   , option
       ""
+      ["bytecodelibdir"]
+      "Installation directory for bytecode libraries"
+      bytecodelibdir
+      (\v flags -> flags{bytecodelibdir = v})
+      installDirArg
+  , option
+      ""
       ["libexecdir"]
-      "installation directory for program executables"
+      "Installation directory for program executables"
       libexecdir
       (\v flags -> flags{libexecdir = v})
       installDirArg
   , option
       ""
       ["libexecsubdir"]
-      "subdirectory of libexecdir in which private executables are installed"
+      "Subdirectory of libexecdir in which private executables are installed"
       libexecsubdir
       (\v flags -> flags{libexecsubdir = v})
       installDirArg
   , option
       ""
       ["datadir"]
-      "installation directory for read-only data"
+      "Installation directory for read-only data"
       datadir
       (\v flags -> flags{datadir = v})
       installDirArg
   , option
       ""
       ["datasubdir"]
-      "subdirectory of datadir in which data files are installed"
+      "Subdirectory of datadir in which data files are installed"
       datasubdir
       (\v flags -> flags{datasubdir = v})
       installDirArg
   , option
       ""
       ["docdir"]
-      "installation directory for documentation"
+      "Installation directory for documentation"
       docdir
       (\v flags -> flags{docdir = v})
       installDirArg
   , option
       ""
       ["htmldir"]
-      "installation directory for HTML documentation"
+      "Installation directory for HTML documentation"
       htmldir
       (\v flags -> flags{htmldir = v})
       installDirArg
   , option
       ""
       ["haddockdir"]
-      "installation directory for haddock interfaces"
+      "Installation directory for haddock interfaces"
       haddockdir
       (\v flags -> flags{haddockdir = v})
       installDirArg
   , option
       ""
       ["sysconfdir"]
-      "installation directory for configuration files"
+      "Installation directory for configuration files"
       sysconfdir
       (\v flags -> flags{sysconfdir = v})
       installDirArg
@@ -1022,13 +1068,6 @@ installDirsOptions =
 
 emptyConfigFlags :: ConfigFlags
 emptyConfigFlags = mempty
-
-instance Monoid ConfigFlags where
-  mempty = gmempty
-  mappend = (<>)
-
-instance Semigroup ConfigFlags where
-  (<>) = gmappend
 
 -- | Arguments to pass to a @configure@ script, e.g. generated by
 -- @autoconf@.
@@ -1049,7 +1088,7 @@ configureArgs bcHack flags =
       (Flag hc, NoFlag) -> [hc_flag_name ++ prettyShow hc]
       (NoFlag, NoFlag) -> []
     hc_flag_name
-      -- TODO kill off thic bc hack when defaultUserHooks is removed.
+      -- TODO kill off this bc hack when defaultUserHooks is removed.
       | bcHack = "--with-hc="
       | otherwise = "--with-compiler="
     optFlag name config_field = case config_field flags of

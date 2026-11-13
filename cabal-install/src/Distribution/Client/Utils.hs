@@ -1,5 +1,5 @@
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE PatternSynonyms #-}
 
 module Distribution.Client.Utils
   ( MergeResult (..)
@@ -7,18 +7,17 @@ module Distribution.Client.Utils
   , duplicates
   , duplicatesBy
   , readMaybe
-  , inDir
   , withEnv
   , withEnvOverrides
   , logDirChange
   , withExtraPathEnv
   , determineNumJobs
   , numberOfProcessors
-  , removeExistingFile
   , withTempFileName
   , makeAbsoluteToCwd
   , makeRelativeToCwd
   , makeRelativeToDir
+  , makeRelativeToDirS
   , makeRelativeCanonical
   , filePathToByteString
   , byteStringToFilePath
@@ -26,8 +25,8 @@ module Distribution.Client.Utils
   , canonicalizePathNoThrow
   , moreRecentFile
   , existsAndIsMoreRecentThan
-  , tryFindAddSourcePackageDesc
-  , tryFindPackageDesc
+  , tryReadAddSourcePackageDesc
+  , tryReadGenericPackageDesc
   , relaxEncodingErrors
   , ProgressPhase (..)
   , progressMessage
@@ -38,6 +37,7 @@ module Distribution.Client.Utils
   , listFilesInside
   , safeRead
   , hasElem
+  , concatMapM
   , occursOnlyOrBefore
   , giveRTSWarning
   ) where
@@ -64,20 +64,32 @@ import Data.List
   ( elemIndex
   , groupBy
   )
+import Distribution.Client.Errors
 import Distribution.Compat.Environment
 import Distribution.Compat.Time (getModTime)
-import Distribution.Simple.Setup (Flag (..))
-import Distribution.Simple.Utils (dieWithException, findPackageDesc, noticeNoWrap)
+import Distribution.Simple.Setup (Flag, pattern Flag, pattern NoFlag)
+import Distribution.Simple.Utils (dieWithException, findPackageDesc, noticeNoWrap, removeFileForcibly)
+import Distribution.Utils.Path
+  ( CWD
+  , FileOrDir (..)
+  , Pkg
+  , RelativePath
+  , SymbolicPath
+  , getSymbolicPath
+  , makeSymbolicPath
+  , relativeSymbolicPath
+  , sameDirectory
+  , symbolicPathRelative_maybe
+  )
 import Distribution.Version
+
 import System.Directory
   ( canonicalizePath
   , doesDirectoryExist
   , doesFileExist
-  , getCurrentDirectory
-  , getDirectoryContents
-  , removeFile
-  , setCurrentDirectory
+  , listDirectory
   )
+import qualified System.Directory as Directory
 import System.FilePath
 import System.IO
   ( Handle
@@ -88,10 +100,13 @@ import System.IO
   )
 import System.IO.Unsafe (unsafePerformIO)
 
+import qualified Data.Set as Set
 import Data.Time (utcToLocalTime)
 import Data.Time.Calendar (toGregorian)
 import Data.Time.Clock.POSIX (getCurrentTime)
 import Data.Time.LocalTime (getCurrentTimeZone, localDay)
+import Distribution.Simple.PackageDescription (readGenericPackageDescription)
+import Distribution.Types.GenericPackageDescription (GenericPackageDescription)
 import GHC.Conc.Sync (getNumProcessors)
 import GHC.IO.Encoding
   ( TextEncoding (TextEncoding)
@@ -101,12 +116,8 @@ import GHC.IO.Encoding.Failure
   ( CodingFailureMode (TransliterateCodingFailure)
   , recoverEncode
   )
-#if defined(mingw32_HOST_OS) || MIN_VERSION_directory(1,2,3)
 import qualified System.Directory as Dir
 import qualified System.IO.Error as IOError
-#endif
-import qualified Data.Set as Set
-import Distribution.Client.Errors
 
 -- | Generic merging utility. For sorted input lists this is a full outer join.
 mergeBy :: forall a b. (a -> b -> Ordering) -> [a] -> [b] -> [MergeResult a b]
@@ -123,26 +134,18 @@ mergeBy cmp = merge
 
 data MergeResult a b = OnlyInLeft a | InBoth a b | OnlyInRight b
 
-duplicates :: Ord a => [a] -> [[a]]
+duplicates :: Ord a => [a] -> [NonEmpty a]
 duplicates = duplicatesBy compare
 
-duplicatesBy :: forall a. (a -> a -> Ordering) -> [a] -> [[a]]
-duplicatesBy cmp = filter moreThanOne . groupBy eq . sortBy cmp
+duplicatesBy :: forall a. (a -> a -> Ordering) -> [a] -> [NonEmpty a]
+duplicatesBy cmp = mapMaybe moreThanOne . groupBy eq . sortBy cmp
   where
     eq :: a -> a -> Bool
     eq a b = case cmp a b of
       EQ -> True
       _ -> False
-    moreThanOne (_ : _ : _) = True
-    moreThanOne _ = False
-
--- | Like 'removeFile', but does not throw an exception when the file does not
--- exist.
-removeExistingFile :: FilePath -> IO ()
-removeExistingFile path = do
-  exists <- doesFileExist path
-  when exists $
-    removeFile path
+    moreThanOne (x : xs@(_ : _)) = Just (x :| xs)
+    moreThanOne _ = Nothing
 
 -- | A variant of 'withTempFile' that only gives us the file name, and while
 -- it will clean up the file afterwards, it's lenient if the file is
@@ -155,19 +158,8 @@ withTempFileName
 withTempFileName tmpDir template action =
   Safe.bracket
     (openTempFile tmpDir template)
-    (\(name, _) -> removeExistingFile name)
+    (\(name, _) -> removeFileForcibly name)
     (\(name, h) -> hClose h >> action name)
-
--- | Executes the action in the specified directory.
---
--- Warning: This operation is NOT thread-safe, because current
--- working directory is a process-global concept.
-inDir :: Maybe FilePath -> IO a -> IO a
-inDir Nothing m = m
-inDir (Just d) m = do
-  old <- getCurrentDirectory
-  setCurrentDirectory d
-  m `Exception.finally` setCurrentDirectory old
 
 -- | Executes the action with an environment variable set to some
 -- value.
@@ -233,6 +225,7 @@ logDirChange l (Just d) m = do
 -- program, so unsafePerformIO is safe here.
 numberOfProcessors :: Int
 numberOfProcessors = unsafePerformIO getNumProcessors
+{-# NOINLINE numberOfProcessors #-}
 
 -- | Determine the number of jobs to use given the value of the '-j' flag.
 determineNumJobs :: Flag (Maybe Int) -> Int
@@ -248,20 +241,30 @@ makeAbsoluteToCwd :: FilePath -> IO FilePath
 makeAbsoluteToCwd path
   | isAbsolute path = return path
   | otherwise = do
-      cwd <- getCurrentDirectory
+      cwd <- Directory.getCurrentDirectory
       return $! cwd </> path
 
 -- | Given a path (relative or absolute), make it relative to the current
 -- directory, including using @../..@ if necessary.
 makeRelativeToCwd :: FilePath -> IO FilePath
 makeRelativeToCwd path =
-  makeRelativeCanonical <$> canonicalizePath path <*> getCurrentDirectory
+  makeRelativeCanonical <$> canonicalizePath path <*> Directory.getCurrentDirectory
 
 -- | Given a path (relative or absolute), make it relative to the given
 -- directory, including using @../..@ if necessary.
 makeRelativeToDir :: FilePath -> FilePath -> IO FilePath
 makeRelativeToDir path dir =
   makeRelativeCanonical <$> canonicalizePath path <*> canonicalizePath dir
+
+-- | makeRelativeToDir for SymbolicPath
+makeRelativeToDirS :: Maybe (SymbolicPath CWD (Dir dir)) -> SymbolicPath CWD to -> IO (SymbolicPath dir to)
+makeRelativeToDirS Nothing s = makeRelativeToDirS (Just sameDirectory) s
+makeRelativeToDirS (Just root) p =
+  case symbolicPathRelative_maybe p of
+    -- TODO: Use AbsolutePath
+    Nothing -> return $ makeSymbolicPath (getSymbolicPath p)
+    Just rel_path ->
+      makeSymbolicPath <$> makeRelativeToDir (getSymbolicPath root) (getSymbolicPath rel_path)
 
 -- | Given a canonical absolute path and canonical absolute dir, make the path
 -- relative to the directory, including using @../..@ if necessary. Returns
@@ -289,7 +292,7 @@ filePathToByteString p =
     conv :: Word32 -> [Word8] -> [Word8]
     conv w32 rest = b0 : b1 : b2 : b3 : rest
       where
-        b0 = fromIntegral $ w32
+        b0 = fromIntegral w32
         b1 = fromIntegral $ w32 `shiftR` 8
         b2 = fromIntegral $ w32 `shiftR` 16
         b3 = fromIntegral $ w32 `shiftR` 24
@@ -316,18 +319,18 @@ byteStringToFilePath bs
 
 -- | Workaround for the inconsistent behaviour of 'canonicalizePath'. Always
 -- throws an error if the path refers to a non-existent file.
-{- FOURMOLU_DISABLE -}
 tryCanonicalizePath :: FilePath -> IO FilePath
 tryCanonicalizePath path = do
   ret <- canonicalizePath path
-#if defined(mingw32_HOST_OS) || MIN_VERSION_directory(1,2,3)
   exists <- liftM2 (||) (doesFileExist ret) (Dir.doesDirectoryExist ret)
   unless exists $
-    IOError.ioError $ IOError.mkIOError IOError.doesNotExistErrorType "canonicalizePath"
-                        Nothing (Just ret)
-#endif
+    IOError.ioError $
+      IOError.mkIOError
+        IOError.doesNotExistErrorType
+        "canonicalizePath"
+        Nothing
+        (Just ret)
   return ret
-{- FOURMOLU_ENABLE -}
 
 -- | A non-throwing wrapper for 'canonicalizePath'. If 'canonicalizePath' throws
 -- an exception, returns the path argument unmodified.
@@ -376,20 +379,41 @@ relaxEncodingErrors handle = do
       return ()
 
 -- | Like 'tryFindPackageDesc', but with error specific to add-source deps.
-tryFindAddSourcePackageDesc :: Verbosity -> FilePath -> String -> IO FilePath
-tryFindAddSourcePackageDesc verbosity depPath err =
-  tryFindPackageDesc verbosity depPath $
-    err
-      ++ "\n"
-      ++ "Failed to read cabal file of add-source dependency: "
-      ++ depPath
+tryReadAddSourcePackageDesc
+  :: Verbosity
+  -> FilePath
+  -> String
+  -> IO GenericPackageDescription
+tryReadAddSourcePackageDesc verbosity depPath err = do
+  let pkgDir = makeSymbolicPath depPath
+  pkgDescPath <-
+    try_find_package_desc verbosity pkgDir $
+      err
+        ++ "\n"
+        ++ "Failed to read cabal file of add-source dependency: "
+        ++ depPath
+  readGenericPackageDescription verbosity (Just pkgDir) (relativeSymbolicPath pkgDescPath)
 
--- | Try to find a @.cabal@ file, in directory @depPath@. Fails if one cannot be
+-- | Try to read a @.cabal@ file, in directory @depPath@. Fails if one cannot be
 --  found, with @err@ prefixing the error message. This function simply allows
 --  us to give a more descriptive error than that provided by @findPackageDesc@.
-tryFindPackageDesc :: Verbosity -> FilePath -> String -> IO FilePath
-tryFindPackageDesc verbosity depPath err = do
-  errOrCabalFile <- findPackageDesc depPath
+tryReadGenericPackageDesc
+  :: Verbosity
+  -> SymbolicPath CWD (Dir Pkg)
+  -> String
+  -> IO GenericPackageDescription
+tryReadGenericPackageDesc verbosity pkgDir err = do
+  pkgDescPath <- try_find_package_desc verbosity pkgDir err
+  readGenericPackageDescription verbosity (Just pkgDir) (relativeSymbolicPath pkgDescPath)
+
+-- | Internal helper function for 'tryReadAddSourcePackageDesc' and 'tryReadGenericPackageDesc'.
+try_find_package_desc
+  :: Verbosity
+  -> SymbolicPath CWD (Dir Pkg)
+  -> String
+  -> IO (RelativePath Pkg File)
+try_find_package_desc verbosity pkgDir err = do
+  errOrCabalFile <- findPackageDesc (Just pkgDir)
   case errOrCabalFile of
     Right file -> return file
     Left _ -> dieWithException verbosity $ TryFindPackageDescErr err
@@ -410,13 +434,20 @@ progressMessage verbosity phase subject = do
   noticeNoWrap verbosity $ phaseStr ++ subject ++ "\n"
   where
     phaseStr = case phase of
-      ProgressDownloading -> "Downloading  "
-      ProgressDownloaded -> "Downloaded   "
-      ProgressStarting -> "Starting     "
-      ProgressBuilding -> "Building     "
-      ProgressHaddock -> "Haddock      "
-      ProgressInstalling -> "Installing   "
-      ProgressCompleted -> "Completed    "
+      ProgressDownloading ->
+        "Downloading  "
+      ProgressDownloaded ->
+        "Downloaded   "
+      ProgressStarting ->
+        "Starting     "
+      ProgressBuilding ->
+        "Building     "
+      ProgressHaddock ->
+        "Haddock      "
+      ProgressInstalling ->
+        "Installing   "
+      ProgressCompleted ->
+        "Completed    "
 
 -- | Given a version, return an API-compatible (according to PVP) version range.
 --
@@ -465,12 +496,9 @@ listFilesInside test dir = ifNotM (test $ dropTrailingPathSeparator dir) (pure [
 listFilesRecursive :: FilePath -> IO [FilePath]
 listFilesRecursive = listFilesInside (const $ pure True)
 
--- | From System.Directory.Extra
---   https://hackage.haskell.org/package/extra-1.7.9
 listContents :: FilePath -> IO [FilePath]
-listContents dir = do
-  xs <- getDirectoryContents dir
-  pure $ sort [dir </> x | x <- xs, not $ all (== '.') x]
+listContents dir =
+  map (dir </>) . sort <$> listDirectory dir
 
 -- | From Control.Monad.Extra
 --   https://hackage.haskell.org/package/extra-1.7.9

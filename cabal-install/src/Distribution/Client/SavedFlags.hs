@@ -1,5 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-
 module Distribution.Client.SavedFlags
   ( readCommandFlags
   , writeCommandFlags
@@ -24,7 +22,7 @@ import System.FilePath (takeDirectory)
 writeSavedArgs :: Verbosity -> FilePath -> [String] -> IO ()
 writeSavedArgs verbosity path args = do
   createDirectoryIfMissingVerbose
-    (lessVerbose verbosity)
+    (modifyVerbosityFlags lessVerbose verbosity)
     True
     (takeDirectory path)
   writeFile path (intercalate "\0" args)
@@ -50,7 +48,7 @@ readSavedArgs path = do
 readCommandFlags :: FilePath -> CommandUI flags -> IO flags
 readCommandFlags path command = do
   savedArgs <- fmap (fromMaybe []) (readSavedArgs path)
-  case (commandParseArgs command True savedArgs) of
+  case commandParseArgs command True savedArgs of
     CommandHelp _ -> throwIO (SavedArgsErrorHelp savedArgs)
     CommandList _ -> throwIO (SavedArgsErrorList savedArgs)
     CommandErrors errs -> throwIO (SavedArgsErrorOther savedArgs errs)
@@ -67,18 +65,17 @@ data SavedArgsError
   = SavedArgsErrorHelp Args
   | SavedArgsErrorList Args
   | SavedArgsErrorOther Args [String]
-  deriving (Typeable)
 
 instance Show SavedArgsError where
   show (SavedArgsErrorHelp args) =
     "unexpected flag '--help', saved command line was:\n"
-      ++ intercalate " " args
+      ++ unwords args
   show (SavedArgsErrorList args) =
     "unexpected flag '--list-options', saved command line was:\n"
-      ++ intercalate " " args
+      ++ unwords args
   show (SavedArgsErrorOther args errs) =
     "saved command line was:\n"
-      ++ intercalate " " args
+      ++ unwords args
       ++ "\n"
       ++ "encountered errors:\n"
       ++ intercalate "\n" errs

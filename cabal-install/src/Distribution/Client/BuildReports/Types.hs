@@ -1,9 +1,3 @@
-{-# LANGUAGE DeriveGeneric #-}
-
------------------------------------------------------------------------------
-
------------------------------------------------------------------------------
-
 -- |
 -- Module      :  Distribution.Client.BuildReports.Types
 -- Copyright   :  (c) Duncan Coutts 2009
@@ -39,6 +33,7 @@ data ReportLevel = NoReports | AnonymousReports | DetailedReports
   deriving (Eq, Ord, Enum, Bounded, Show, Generic)
 
 instance Binary ReportLevel
+instance NFData ReportLevel
 instance Structured ReportLevel
 
 instance Pretty ReportLevel where

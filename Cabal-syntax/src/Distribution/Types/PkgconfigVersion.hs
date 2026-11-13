@@ -1,6 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-
 -- @since 3.0
 module Distribution.Types.PkgconfigVersion
   ( PkgconfigVersion (..)
@@ -26,7 +23,7 @@ import qualified Text.PrettyPrint as PP
 --
 -- @since 3.0
 newtype PkgconfigVersion = PkgconfigVersion BS.ByteString
-  deriving (Generic, Read, Show, Typeable, Data)
+  deriving (Generic, Read, Show, Data)
 
 instance Eq PkgconfigVersion where
   PkgconfigVersion a == PkgconfigVersion b = rpmvercmp a b == EQ
@@ -36,7 +33,7 @@ instance Ord PkgconfigVersion where
 
 instance Binary PkgconfigVersion
 instance Structured PkgconfigVersion
-instance NFData PkgconfigVersion where rnf = genericRnf
+instance NFData PkgconfigVersion
 
 instance Pretty PkgconfigVersion where
   pretty (PkgconfigVersion bs) = PP.text (BS8.unpack bs)

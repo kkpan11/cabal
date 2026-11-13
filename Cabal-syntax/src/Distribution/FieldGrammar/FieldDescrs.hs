@@ -1,7 +1,3 @@
-{-# LANGUAGE DeriveFunctor #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 module Distribution.FieldGrammar.FieldDescrs
@@ -14,13 +10,14 @@ module Distribution.FieldGrammar.FieldDescrs
 import Distribution.Compat.Prelude
 import Prelude ()
 
-import Distribution.Compat.Lens (aview, cloneLens)
-import Distribution.Compat.Newtype
+import Distribution.Compat.Lens (ALens', aview, cloneLens)
 import Distribution.FieldGrammar
 import Distribution.Pretty (Pretty (..), showFreeText)
 import Distribution.Utils.String (trim)
 
+import Data.Coerce
 import qualified Data.Map as Map
+import qualified Data.Text as T
 import qualified Distribution.Compat.CharParsing as C
 import qualified Distribution.Fields as P
 import qualified Distribution.Parsec as P
@@ -38,7 +35,7 @@ newtype FieldDescrs s a = F {runF :: Map P.FieldName (SP s)}
 
 instance Applicative (FieldDescrs s) where
   pure _ = F mempty
-  f <*> x = F (mappend (runF f) (runF x))
+  f <*> x = F (runF f <> runF x)
 
 singletonF :: P.FieldName -> (s -> Disp.Doc) -> (forall m. P.CabalParsing m => s -> m s) -> FieldDescrs s a
 singletonF fn f g = F $ Map.singleton fn (SP f g)
@@ -72,37 +69,64 @@ instance FieldGrammar ParsecPretty FieldDescrs where
 
   -- Note: eta expansion is needed for RankNTypes type-checking to work.
 
+  uniqueFieldAla
+    :: forall s proxy a b
+     . (Coercible a b, Pretty b, P.Parsec b)
+    => P.FieldName
+    -> proxy a b
+    -> ALens' s a
+    -> FieldDescrs s a
   uniqueFieldAla fn _pack l = singletonF fn f g
     where
-      f s = pretty (pack' _pack (aview l s))
-      g s = cloneLens l (const (unpack' _pack <$> P.parsec)) s
+      f s = pretty (coerce @a @b (aview l s))
+      g s = cloneLens l (const (coerce @b @a <$> P.parsec)) s
 
+  optionalFieldAla
+    :: forall s proxy a b
+     . (Coercible a b, Pretty b, P.Parsec b)
+    => P.FieldName
+    -> proxy a b
+    -> ALens' s (Maybe a)
+    -> FieldDescrs s (Maybe a)
   optionalFieldAla fn _pack l = singletonF fn f g
     where
-      f s = maybe mempty (pretty . pack' _pack) (aview l s)
-      g s = cloneLens l (const (Just . unpack' _pack <$> P.parsec)) s
+      f s = maybe mempty (pretty . coerce @a @b) (aview l s)
+      g s = cloneLens l (const (Just . coerce @b @a <$> P.parsec)) s
 
+  optionalFieldDefAla
+    :: forall s proxy a b
+     . (Coercible a b, Pretty b, P.Parsec b)
+    => P.FieldName
+    -> proxy a b
+    -> ALens' s a
+    -> a
+    -> FieldDescrs s a
   optionalFieldDefAla fn _pack l _def = singletonF fn f g
     where
-      f s = pretty (pack' _pack (aview l s))
-      g s = cloneLens l (const (unpack' _pack <$> P.parsec)) s
+      f s = pretty (coerce @a @b (aview l s))
+      g s = cloneLens l (const (coerce @b @a <$> P.parsec)) s
 
   freeTextField fn l = singletonF fn f g
     where
-      f s = maybe mempty showFreeText (aview l s)
-      g s = cloneLens l (const (Just <$> parsecFreeText)) s
+      f s = maybe mempty (showFreeText . T.unpack) (aview l s)
+      g s = cloneLens l (const (Just . T.pack <$> parsecFreeText)) s
 
   freeTextFieldDef fn l = singletonF fn f g
     where
-      f s = showFreeText (aview l s)
-      g s = cloneLens l (const parsecFreeText) s
+      f s = showFreeText (T.unpack (aview l s))
+      g s = cloneLens l (const (T.pack <$> parsecFreeText)) s
 
-  freeTextFieldDefST = defaultFreeTextFieldDefST
-
+  monoidalFieldAla
+    :: forall s proxy a b
+     . (Monoid a, Coercible a b, Pretty b, P.Parsec b)
+    => P.FieldName
+    -> proxy a b
+    -> ALens' s a
+    -> FieldDescrs s a
   monoidalFieldAla fn _pack l = singletonF fn f g
     where
-      f s = pretty (pack' _pack (aview l s))
-      g s = cloneLens l (\x -> mappend x . unpack' _pack <$> P.parsec) s
+      f s = pretty (coerce @a @b (aview l s))
+      g s = cloneLens l (\x -> (x <>) . coerce @b @a <$> P.parsec) s
 
   prefixedFields _fnPfx _l = F mempty
   knownField _ = pure ()

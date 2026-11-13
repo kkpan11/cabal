@@ -1,6 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-
 module Distribution.Types.SourceRepo
   ( SourceRepo (..)
   , RepoKind (..)
@@ -21,6 +18,7 @@ import Distribution.Parsec
 import Distribution.Pretty
 
 import qualified Data.Map.Strict as M
+import Data.Text (Text)
 import qualified Distribution.Compat.CharParsing as P
 import qualified Text.PrettyPrint as Disp
 
@@ -51,23 +49,23 @@ data SourceRepo = SourceRepo
   , repoType :: Maybe RepoType
   -- ^ The type of the source repository system for this repo, eg 'Darcs' or
   -- 'Git'. This field is required.
-  , repoLocation :: Maybe String
+  , repoLocation :: Maybe Text
   -- ^ The location of the repository. For most 'RepoType's this is a URL.
   -- This field is required.
-  , repoModule :: Maybe String
+  , repoModule :: Maybe Text
   -- ^ 'CVS' can put multiple \"modules\" on one server and requires a
   -- module name in addition to the location to identify a particular repo.
   -- Logically this is part of the location but unfortunately has to be
   -- specified separately. This field is required for the 'CVS' 'RepoType' and
   -- should not be given otherwise.
-  , repoBranch :: Maybe String
+  , repoBranch :: Maybe Text
   -- ^ The name or identifier of the branch, if any. Many source control
   -- systems have the notion of multiple branches in a repo that exist in the
   -- same location. For example 'Git' and 'CVS' use this while systems like
   -- 'Darcs' use different locations for different branches. This field is
   -- optional but should be used if necessary to identify the sources,
   -- especially for the 'RepoThis' repo kind.
-  , repoTag :: Maybe String
+  , repoTag :: Maybe Text
   -- ^ The tag identify a particular state of the repository. This should be
   -- given for the 'RepoThis' repo kind and not for 'RepoHead' kind.
   , repoSubdir :: Maybe FilePath
@@ -77,7 +75,7 @@ data SourceRepo = SourceRepo
   -- relative to the root of the repository. This field is optional. If not
   -- given the default is \".\" ie no subdirectory.
   }
-  deriving (Eq, Ord, Generic, Read, Show, Typeable, Data)
+  deriving (Eq, Ord, Generic, Read, Show, Data)
 
 emptySourceRepo :: RepoKind -> SourceRepo
 emptySourceRepo kind =
@@ -93,7 +91,7 @@ emptySourceRepo kind =
 
 instance Binary SourceRepo
 instance Structured SourceRepo
-instance NFData SourceRepo where rnf = genericRnf
+instance NFData SourceRepo
 
 -- | What this repo info is for, what it represents.
 data RepoKind
@@ -106,11 +104,11 @@ data RepoKind
     -- information to re-create the exact sources.
     RepoThis
   | RepoKindUnknown String
-  deriving (Eq, Generic, Ord, Read, Show, Typeable, Data)
+  deriving (Eq, Generic, Ord, Read, Show, Data)
 
 instance Binary RepoKind
 instance Structured RepoKind
-instance NFData RepoKind where rnf = genericRnf
+instance NFData RepoKind
 
 -- | An enumeration of common source control systems. The fields used in the
 -- 'SourceRepo' depend on the type of repo. The tools and methods used to
@@ -126,11 +124,11 @@ data KnownRepoType
   | Monotone
   | -- | @since 3.4.0.0
     Pijul
-  deriving (Eq, Generic, Ord, Read, Show, Typeable, Data, Enum, Bounded)
+  deriving (Eq, Generic, Ord, Read, Show, Data, Enum, Bounded)
 
 instance Binary KnownRepoType
 instance Structured KnownRepoType
-instance NFData KnownRepoType where rnf = genericRnf
+instance NFData KnownRepoType
 
 instance Parsec KnownRepoType where
   parsec = do
@@ -146,11 +144,11 @@ instance Pretty KnownRepoType where
 data RepoType
   = KnownRepoType KnownRepoType
   | OtherRepoType String
-  deriving (Eq, Generic, Ord, Read, Show, Typeable, Data)
+  deriving (Eq, Generic, Ord, Read, Show, Data)
 
 instance Binary RepoType
 instance Structured RepoType
-instance NFData RepoType where rnf = genericRnf
+instance NFData RepoType
 
 knownRepoTypes :: [KnownRepoType]
 knownRepoTypes = [minBound .. maxBound]

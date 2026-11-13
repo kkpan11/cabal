@@ -1,9 +1,12 @@
+{-# LANGUAGE DataKinds #-}
+
 module Distribution.Types.BuildInfo.Lens
   ( BuildInfo
   , HasBuildInfo (..)
   , HasBuildInfos (..)
   ) where
 
+import Data.Text (Text)
 import Distribution.Compat.Lens
 import Distribution.Compat.Prelude
 import Prelude ()
@@ -37,31 +40,35 @@ class HasBuildInfo a where
   buildToolDepends = buildInfo . buildToolDepends
   {-# INLINE buildToolDepends #-}
 
-  cppOptions :: Lens' a [String]
+  cppOptions :: Lens' a [Text]
   cppOptions = buildInfo . cppOptions
   {-# INLINE cppOptions #-}
 
-  asmOptions :: Lens' a [String]
+  asmOptions :: Lens' a [Text]
   asmOptions = buildInfo . asmOptions
   {-# INLINE asmOptions #-}
 
-  cmmOptions :: Lens' a [String]
+  cmmOptions :: Lens' a [Text]
   cmmOptions = buildInfo . cmmOptions
   {-# INLINE cmmOptions #-}
 
-  ccOptions :: Lens' a [String]
+  ccOptions :: Lens' a [Text]
   ccOptions = buildInfo . ccOptions
   {-# INLINE ccOptions #-}
 
-  cxxOptions :: Lens' a [String]
+  cxxOptions :: Lens' a [Text]
   cxxOptions = buildInfo . cxxOptions
   {-# INLINE cxxOptions #-}
 
-  ldOptions :: Lens' a [String]
+  jsppOptions :: Lens' a [Text]
+  jsppOptions = buildInfo . jsppOptions
+  {-# INLINE jsppOptions #-}
+
+  ldOptions :: Lens' a [Text]
   ldOptions = buildInfo . ldOptions
   {-# INLINE ldOptions #-}
 
-  hsc2hsOptions :: Lens' a [String]
+  hsc2hsOptions :: Lens' a [Text]
   hsc2hsOptions = buildInfo . hsc2hsOptions
   {-# INLINE hsc2hsOptions #-}
 
@@ -69,35 +76,35 @@ class HasBuildInfo a where
   pkgconfigDepends = buildInfo . pkgconfigDepends
   {-# INLINE pkgconfigDepends #-}
 
-  frameworks :: Lens' a [String]
+  frameworks :: Lens' a [RelativePath Framework File]
   frameworks = buildInfo . frameworks
   {-# INLINE frameworks #-}
 
-  extraFrameworkDirs :: Lens' a [String]
+  extraFrameworkDirs :: Lens' a [SymbolicPath Pkg (Dir Framework)]
   extraFrameworkDirs = buildInfo . extraFrameworkDirs
   {-# INLINE extraFrameworkDirs #-}
 
-  asmSources :: Lens' a [FilePath]
+  asmSources :: Lens' a [SymbolicPath Pkg File]
   asmSources = buildInfo . asmSources
   {-# INLINE asmSources #-}
 
-  cmmSources :: Lens' a [FilePath]
+  cmmSources :: Lens' a [SymbolicPath Pkg File]
   cmmSources = buildInfo . cmmSources
   {-# INLINE cmmSources #-}
 
-  cSources :: Lens' a [FilePath]
+  cSources :: Lens' a [SymbolicPath Pkg File]
   cSources = buildInfo . cSources
   {-# INLINE cSources #-}
 
-  cxxSources :: Lens' a [FilePath]
+  cxxSources :: Lens' a [SymbolicPath Pkg File]
   cxxSources = buildInfo . cxxSources
   {-# INLINE cxxSources #-}
 
-  jsSources :: Lens' a [FilePath]
+  jsSources :: Lens' a [SymbolicPath Pkg File]
   jsSources = buildInfo . jsSources
   {-# INLINE jsSources #-}
 
-  hsSourceDirs :: Lens' a [SymbolicPath PackageDir SourceDir]
+  hsSourceDirs :: Lens' a [SymbolicPath Pkg (Dir Source)]
   hsSourceDirs = buildInfo . hsSourceDirs
   {-# INLINE hsSourceDirs #-}
 
@@ -133,71 +140,75 @@ class HasBuildInfo a where
   oldExtensions = buildInfo . oldExtensions
   {-# INLINE oldExtensions #-}
 
-  extraLibs :: Lens' a [String]
+  extraLibs :: Lens' a [Text]
   extraLibs = buildInfo . extraLibs
   {-# INLINE extraLibs #-}
 
-  extraLibsStatic :: Lens' a [String]
+  extraLibsStatic :: Lens' a [Text]
   extraLibsStatic = buildInfo . extraLibsStatic
   {-# INLINE extraLibsStatic #-}
 
-  extraGHCiLibs :: Lens' a [String]
+  extraGHCiLibs :: Lens' a [Text]
   extraGHCiLibs = buildInfo . extraGHCiLibs
   {-# INLINE extraGHCiLibs #-}
 
-  extraBundledLibs :: Lens' a [String]
+  extraBundledLibs :: Lens' a [Text]
   extraBundledLibs = buildInfo . extraBundledLibs
   {-# INLINE extraBundledLibs #-}
 
-  extraLibFlavours :: Lens' a [String]
+  extraLibFlavours :: Lens' a [Text]
   extraLibFlavours = buildInfo . extraLibFlavours
   {-# INLINE extraLibFlavours #-}
 
-  extraDynLibFlavours :: Lens' a [String]
+  extraDynLibFlavours :: Lens' a [Text]
   extraDynLibFlavours = buildInfo . extraDynLibFlavours
   {-# INLINE extraDynLibFlavours #-}
 
-  extraLibDirs :: Lens' a [String]
+  extraLibDirs :: Lens' a [SymbolicPath Pkg (Dir Lib)]
   extraLibDirs = buildInfo . extraLibDirs
   {-# INLINE extraLibDirs #-}
 
-  extraLibDirsStatic :: Lens' a [String]
+  extraLibDirsStatic :: Lens' a [SymbolicPath Pkg (Dir Lib)]
   extraLibDirsStatic = buildInfo . extraLibDirsStatic
   {-# INLINE extraLibDirsStatic #-}
 
-  includeDirs :: Lens' a [FilePath]
+  includeDirs :: Lens' a [SymbolicPath Pkg (Dir Include)]
   includeDirs = buildInfo . includeDirs
   {-# INLINE includeDirs #-}
 
-  includes :: Lens' a [FilePath]
+  includes :: Lens' a [SymbolicPath Include File]
   includes = buildInfo . includes
   {-# INLINE includes #-}
 
-  autogenIncludes :: Lens' a [FilePath]
+  autogenIncludes :: Lens' a [RelativePath Include File]
   autogenIncludes = buildInfo . autogenIncludes
   {-# INLINE autogenIncludes #-}
 
-  installIncludes :: Lens' a [FilePath]
+  installIncludes :: Lens' a [RelativePath Include File]
   installIncludes = buildInfo . installIncludes
   {-# INLINE installIncludes #-}
 
-  options :: Lens' a (PerCompilerFlavor [String])
+  options :: Lens' a (PerCompilerFlavor [Text])
   options = buildInfo . options
   {-# INLINE options #-}
 
-  profOptions :: Lens' a (PerCompilerFlavor [String])
+  profOptions :: Lens' a (PerCompilerFlavor [Text])
   profOptions = buildInfo . profOptions
   {-# INLINE profOptions #-}
 
-  sharedOptions :: Lens' a (PerCompilerFlavor [String])
+  sharedOptions :: Lens' a (PerCompilerFlavor [Text])
   sharedOptions = buildInfo . sharedOptions
   {-# INLINE sharedOptions #-}
 
-  staticOptions :: Lens' a (PerCompilerFlavor [String])
+  profSharedOptions :: Lens' a (PerCompilerFlavor [Text])
+  profSharedOptions = buildInfo . profSharedOptions
+  {-# INLINE profSharedOptions #-}
+
+  staticOptions :: Lens' a (PerCompilerFlavor [Text])
   staticOptions = buildInfo . staticOptions
   {-# INLINE staticOptions #-}
 
-  customFieldsBI :: Lens' a [(String, String)]
+  customFieldsBI :: Lens' a [(Text, Text)]
   customFieldsBI = buildInfo . customFieldsBI
   {-# INLINE customFieldsBI #-}
 
@@ -237,6 +248,9 @@ instance HasBuildInfo BuildInfo where
   cxxOptions f s = fmap (\x -> s{T.cxxOptions = x}) (f (T.cxxOptions s))
   {-# INLINE cxxOptions #-}
 
+  jsppOptions f s = fmap (\x -> s{T.jsppOptions = x}) (f (T.jsppOptions s))
+  {-# INLINE jsppOptions #-}
+
   ldOptions f s = fmap (\x -> s{T.ldOptions = x}) (f (T.ldOptions s))
   {-# INLINE ldOptions #-}
 
@@ -261,7 +275,7 @@ instance HasBuildInfo BuildInfo where
   cSources f s = fmap (\x -> s{T.cSources = x}) (f (T.cSources s))
   {-# INLINE cSources #-}
 
-  cxxSources f s = fmap (\x -> s{T.cSources = x}) (f (T.cxxSources s))
+  cxxSources f s = fmap (\x -> s{T.cxxSources = x}) (f (T.cxxSources s))
   {-# INLINE cxxSources #-}
 
   jsSources f s = fmap (\x -> s{T.jsSources = x}) (f (T.jsSources s))
@@ -338,6 +352,9 @@ instance HasBuildInfo BuildInfo where
 
   sharedOptions f s = fmap (\x -> s{T.sharedOptions = x}) (f (T.sharedOptions s))
   {-# INLINE sharedOptions #-}
+
+  profSharedOptions f s = fmap (\x -> s{T.profSharedOptions = x}) (f (T.profSharedOptions s))
+  {-# INLINE profSharedOptions #-}
 
   staticOptions f s = fmap (\x -> s{T.staticOptions = x}) (f (T.staticOptions s))
   {-# INLINE staticOptions #-}

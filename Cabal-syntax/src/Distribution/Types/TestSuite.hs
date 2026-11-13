@@ -1,6 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-
 module Distribution.Types.TestSuite
   ( TestSuite (..)
   , emptyTestSuite
@@ -17,8 +14,8 @@ import Distribution.Types.TestSuiteInterface
 import Distribution.Types.TestType
 import Distribution.Types.UnqualComponentName
 
+import Data.Text (Text)
 import Distribution.ModuleName
-
 import qualified Distribution.Types.BuildInfo.Lens as L
 
 -- | A \"test-suite\" stanza in a cabal file.
@@ -26,9 +23,9 @@ data TestSuite = TestSuite
   { testName :: UnqualComponentName
   , testInterface :: TestSuiteInterface
   , testBuildInfo :: BuildInfo
-  , testCodeGenerators :: [String]
+  , testCodeGenerators :: [Text]
   }
-  deriving (Generic, Show, Read, Eq, Ord, Typeable, Data)
+  deriving (Generic, Show, Read, Eq, Ord, Data)
 
 instance L.HasBuildInfo TestSuite where
   buildInfo f l = (\x -> l{testBuildInfo = x}) <$> f (testBuildInfo l)
@@ -36,7 +33,7 @@ instance L.HasBuildInfo TestSuite where
 instance Binary TestSuite
 instance Structured TestSuite
 
-instance NFData TestSuite where rnf = genericRnf
+instance NFData TestSuite
 
 instance Monoid TestSuite where
   mempty =
@@ -46,7 +43,6 @@ instance Monoid TestSuite where
       , testBuildInfo = mempty
       , testCodeGenerators = mempty
       }
-  mappend = (<>)
 
 instance Semigroup TestSuite where
   a <> b =
@@ -57,7 +53,7 @@ instance Semigroup TestSuite where
       , testCodeGenerators = combine testCodeGenerators
       }
     where
-      combine field = field a `mappend` field b
+      combine field = field a <> field b
 
 emptyTestSuite :: TestSuite
 emptyTestSuite = mempty

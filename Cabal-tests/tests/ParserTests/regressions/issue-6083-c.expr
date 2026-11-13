@@ -29,10 +29,11 @@ GenericPackageDescription {
     testSuites = [],
     benchmarks = [],
     dataFiles = [],
-    dataDir = ".",
+    dataDir = SymbolicPath ".",
     extraSrcFiles = [],
     extraTmpFiles = [],
-    extraDocFiles = []},
+    extraDocFiles = [],
+    extraFiles = []},
   gpdScannedVersion = Nothing,
   genPackageFlags = [],
   condLibrary = Just
@@ -54,6 +55,7 @@ GenericPackageDescription {
           cmmOptions = [],
           ccOptions = [],
           cxxOptions = [],
+          jsppOptions = [],
           ldOptions = [],
           hsc2hsOptions = [],
           pkgconfigDepends = [],
@@ -94,6 +96,8 @@ GenericPackageDescription {
             [],
           sharedOptions =
           PerCompilerFlavor [] [],
+          profSharedOptions =
+          PerCompilerFlavor [] [],
           staticOptions =
           PerCompilerFlavor [] [],
           customFieldsBI = [],
@@ -112,20 +116,6 @@ GenericPackageDescription {
                       (UnqualComponentName
                         "sublib")]))],
           mixins = []}},
-      condTreeConstraints = [
-        Dependency
-          (PackageName "base")
-          (OrLaterVersion (mkVersion [0]))
-          mainLibSet,
-        Dependency
-          (PackageName "issue")
-          (OrLaterVersion (mkVersion [0]))
-          (NonEmptySet.fromNonEmpty
-            (NE.fromList
-              [
-                LSubLibName
-                  (UnqualComponentName
-                    "sublib")]))],
       condTreeComponents = []},
   condSubLibraries = [
     _×_
@@ -149,6 +139,7 @@ GenericPackageDescription {
             cmmOptions = [],
             ccOptions = [],
             cxxOptions = [],
+            jsppOptions = [],
             ldOptions = [],
             hsc2hsOptions = [],
             pkgconfigDepends = [],
@@ -189,12 +180,13 @@ GenericPackageDescription {
               [],
             sharedOptions =
             PerCompilerFlavor [] [],
+            profSharedOptions =
+            PerCompilerFlavor [] [],
             staticOptions =
             PerCompilerFlavor [] [],
             customFieldsBI = [],
             targetBuildDepends = [],
             mixins = []}},
-        condTreeConstraints = [],
         condTreeComponents = []}],
   condForeignLibs = [],
   condExecutables = [],

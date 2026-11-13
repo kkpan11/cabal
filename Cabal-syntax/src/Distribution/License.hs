@@ -1,8 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-
------------------------------------------------------------------------------
-
 -- |
 -- Module      :  Distribution.License
 -- Description :  The License data type.
@@ -111,11 +106,11 @@ data License
     OtherLicense
   | -- | Indicates an erroneous license name.
     UnknownLicense String
-  deriving (Generic, Read, Show, Eq, Ord, Typeable, Data)
+  deriving (Generic, Read, Show, Eq, Ord, Data)
 
 instance Binary License
 instance Structured License
-instance NFData License where rnf = genericRnf
+instance NFData License
 
 -- | The list of all currently recognised licenses.
 knownLicenses :: [License]

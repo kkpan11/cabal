@@ -1,8 +1,6 @@
-{-# LANGUAGE DeriveGeneric #-}
-
------------------------------------------------------------------------------
-
------------------------------------------------------------------------------
+{-# LANGUAGE DerivingVia #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE PatternSynonyms #-}
 
 -- |
 -- Module      :  Distribution.Client.Config
@@ -24,6 +22,7 @@ module Distribution.Client.Config
   , parseConfig
   , defaultConfigFile
   , defaultCacheDir
+  , defaultCacheHome
   , defaultScriptBuildsDir
   , defaultStoreDir
   , defaultCompiler
@@ -47,7 +46,10 @@ module Distribution.Client.Config
   ) where
 
 import Distribution.Client.Compat.Prelude
-import Distribution.Compat.Environment (lookupEnv)
+import Distribution.Compat.Environment
+  ( getEnvironment
+  , lookupEnv
+  )
 import Prelude ()
 
 import Language.Haskell.Extension (Language (Haskell2010))
@@ -108,7 +110,9 @@ import Distribution.Utils.NubList
   )
 
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Map as M
+import qualified Data.Text as T
 import Distribution.Client.Errors
 import Distribution.Client.HttpUtils
   ( isOldHackageURI
@@ -124,9 +128,6 @@ import Distribution.Client.Version
   ( cabalInstallVersion
   )
 import qualified Distribution.Compat.CharParsing as P
-import Distribution.Compat.Environment
-  ( getEnvironment
-  )
 import Distribution.Compiler
   ( CompilerFlavor (..)
   , defaultCompilerFlavor
@@ -134,7 +135,6 @@ import Distribution.Compiler
 import Distribution.Deprecated.ParseUtils
   ( FieldDescr (..)
   , PError (..)
-  , PWarning (..)
   , ParseResult (..)
   , liftField
   , lineNo
@@ -158,6 +158,7 @@ import qualified Distribution.Deprecated.ParseUtils as ParseUtils
 import Distribution.Parsec (ParsecParser, parsecFilePath, parsecOptCommaList, parsecToken)
 import Distribution.Simple.Command
   ( CommandUI (commandOptions)
+  , OptionField
   , ShowOrParseArgs (..)
   , commandDefaultFlags
   )
@@ -176,8 +177,9 @@ import Distribution.Simple.Program
   )
 import Distribution.Simple.Setup
   ( BenchmarkFlags (..)
+  , CommonSetupFlags (..)
   , ConfigFlags (..)
-  , Flag (..)
+  , Flag
   , HaddockFlags (..)
   , TestFlags (..)
   , configureOptions
@@ -193,6 +195,8 @@ import Distribution.Simple.Setup
   , programDbOptions
   , programDbPaths'
   , toFlag
+  , pattern Flag
+  , pattern NoFlag
   )
 import Distribution.Simple.Utils
   ( cabalVersion
@@ -201,10 +205,13 @@ import Distribution.Simple.Utils
   , notice
   , toUTF8BS
   , warn
+  , writeFileAtomic
   )
 import Distribution.Solver.Types.ConstraintSource
+import Distribution.Utils.Path (getSymbolicPath, unsafeMakeSymbolicPath)
 import Distribution.Verbosity
   ( normal
+  , verbosityFlags
   )
 import Network.URI
   ( URI (..)
@@ -222,8 +229,8 @@ import System.Directory
   , renameFile
   )
 import System.FilePath
-  ( takeDirectory
-  , (<.>)
+  ( normalise
+  , takeDirectory
   , (</>)
   )
 import System.IO.Error
@@ -266,10 +273,7 @@ data SavedConfig = SavedConfig
   , savedReplMulti :: Flag Bool
   }
   deriving (Generic)
-
-instance Monoid SavedConfig where
-  mempty = gmempty
-  mappend = (<>)
+  deriving (Monoid) via Generically SavedConfig
 
 instance Semigroup SavedConfig where
   a <> b =
@@ -291,7 +295,7 @@ instance Semigroup SavedConfig where
       , savedReplMulti = combinedSavedReplMulti
       }
     where
-      -- This is ugly, but necessary. If we're mappending two config files, we
+      -- This is ugly, but necessary. If we're combining two config files, we
       -- want the values of the *non-empty* list fields from the second one to
       -- \*override* the corresponding values from the first one. Default
       -- behaviour (concatenation) is confusing and makes some use cases (see
@@ -310,7 +314,7 @@ instance Semigroup SavedConfig where
       -- NB: the signature prevents us from using 'combine' on lists.
       combine' :: (SavedConfig -> flags) -> (flags -> Flag a) -> Flag a
       combine' field subfield =
-        (subfield . field $ a) `mappend` (subfield . field $ b)
+        subfield (field a) <> subfield (field b)
 
       combineMonoid
         :: Monoid mon
@@ -318,7 +322,7 @@ instance Semigroup SavedConfig where
         -> (flags -> mon)
         -> mon
       combineMonoid field subfield =
-        (subfield . field $ a) `mappend` (subfield . field $ b)
+        subfield (field a) <> subfield (field b)
 
       lastNonEmpty' :: (SavedConfig -> flags) -> (flags -> [a]) -> [a]
       lastNonEmpty' field subfield =
@@ -349,6 +353,7 @@ instance Semigroup SavedConfig where
       combinedSavedGlobalFlags =
         GlobalFlags
           { globalVersion = combine globalVersion
+          , globalFullVersion = combine globalFullVersion
           , globalNumericVersion = combine globalNumericVersion
           , globalConfigFile = combine globalConfigFile
           , globalConstraintsFile = combine globalConstraintsFile
@@ -359,7 +364,6 @@ instance Semigroup SavedConfig where
           , globalLogsDir = combine globalLogsDir
           , globalIgnoreExpiry = combine globalIgnoreExpiry
           , globalHttpTransport = combine globalHttpTransport
-          , globalNix = combine globalNix
           , globalStoreDir = combine globalStoreDir
           , globalProgPathExtra = lastNonEmptyNL globalProgPathExtra
           }
@@ -418,7 +422,7 @@ instance Semigroup SavedConfig where
           , installFineGrainedConflicts = combine installFineGrainedConflicts
           , installMinimizeConflictSet = combine installMinimizeConflictSet
           , installIndependentGoals = combine installIndependentGoals
-          , installPreferOldest = combine installPreferOldest
+          , installPreferVersion = combine installPreferVersion
           , installShadowPkgs = combine installShadowPkgs
           , installStrongFlags = combine installStrongFlags
           , installAllowBootLibInstalls = combine installAllowBootLibInstalls
@@ -442,6 +446,7 @@ instance Semigroup SavedConfig where
           , installKeepGoing = combine installKeepGoing
           , installRunTests = combine installRunTests
           , installOfflineMode = combine installOfflineMode
+          , installBuildTimings = combine installBuildTimings
           }
         where
           combine = combine' savedInstallFlags
@@ -458,9 +463,22 @@ instance Semigroup SavedConfig where
         where
           combine = combine' savedClientInstallFlags
 
+      combinedSavedCommonFlags which =
+        CommonSetupFlags
+          { setupDistPref = combine setupDistPref
+          , setupWorkingDir = combine setupWorkingDir
+          , setupCabalFilePath = combine setupCabalFilePath
+          , setupVerbosity = combine setupVerbosity
+          , setupTargets = lastNonEmpty setupTargets
+          , setupKeepTempFiles = combine setupKeepTempFiles
+          }
+        where
+          lastNonEmpty = lastNonEmpty' which
+          combine = combine' which
+
       combinedSavedConfigureFlags =
         ConfigFlags
-          { configArgs = lastNonEmpty configArgs
+          { configCommonFlags = combinedSavedCommonFlags (configCommonFlags . savedConfigureFlags)
           , configPrograms_ = configPrograms_ . savedConfigureFlags $ b
           , -- TODO: NubListify
             configProgramPaths = lastNonEmpty configProgramPaths
@@ -474,6 +492,7 @@ instance Semigroup SavedConfig where
           , configVanillaLib = combine configVanillaLib
           , configProfLib = combine configProfLib
           , configProf = combine configProf
+          , configProfShared = combine configProfShared
           , configSharedLib = combine configSharedLib
           , configStaticLib = combine configStaticLib
           , configDynExe = combine configDynExe
@@ -487,10 +506,9 @@ instance Semigroup SavedConfig where
           , configDebugInfo = combine configDebugInfo
           , configProgPrefix = combine configProgPrefix
           , configProgSuffix = combine configProgSuffix
-          , -- Parametrised by (Flag PathTemplate), so safe to use 'mappend'.
+          , -- Parametrised by (Flag PathTemplate), so safe to use '(<>)'.
             configInstallDirs =
-              (configInstallDirs . savedConfigureFlags $ a)
-                `mappend` (configInstallDirs . savedConfigureFlags $ b)
+              configInstallDirs (savedConfigureFlags a) <> configInstallDirs (savedConfigureFlags b)
           , configScratchDir = combine configScratchDir
           , -- TODO: NubListify
             configExtraLibDirs = lastNonEmpty configExtraLibDirs
@@ -502,9 +520,6 @@ instance Semigroup SavedConfig where
           , configDeterministic = combine configDeterministic
           , configIPID = combine configIPID
           , configCID = combine configCID
-          , configDistPref = combine configDistPref
-          , configCabalFilePath = combine configCabalFilePath
-          , configVerbosity = combine configVerbosity
           , configUserInstall = combine configUserInstall
           , -- TODO: NubListify
             configPackageDBs = lastNonEmpty configPackageDBs
@@ -532,6 +547,8 @@ instance Semigroup SavedConfig where
           , configAllowDependingOnPrivateLibs =
               combine configAllowDependingOnPrivateLibs
           , configCoverageFor = combine configCoverageFor
+          , configIgnoreBuildTools = combine configIgnoreBuildTools
+          , configBytecodeLib = combine configBytecodeLib
           }
         where
           combine = combine' savedConfigureFlags
@@ -560,25 +577,25 @@ instance Semigroup SavedConfig where
           combine = combine' savedConfigureExFlags
           lastNonEmpty = lastNonEmpty' savedConfigureExFlags
 
-      -- Parametrised by (Flag PathTemplate), so safe to use 'mappend'.
+      -- Parametrised by (Flag PathTemplate), so safe to use '(<>)'.
       combinedSavedUserInstallDirs =
-        savedUserInstallDirs a
-          `mappend` savedUserInstallDirs b
+        savedUserInstallDirs a <> savedUserInstallDirs b
 
-      -- Parametrised by (Flag PathTemplate), so safe to use 'mappend'.
+      -- Parametrised by (Flag PathTemplate), so safe to use '(<>)'.
       combinedSavedGlobalInstallDirs =
-        savedGlobalInstallDirs a
-          `mappend` savedGlobalInstallDirs b
+        savedGlobalInstallDirs a <> savedGlobalInstallDirs b
 
       combinedSavedUploadFlags =
         UploadFlags
           { uploadCandidate = combine uploadCandidate
           , uploadDoc = combine uploadDoc
           , uploadToken = combine uploadToken
+          , uploadTokenCmd = combine uploadTokenCmd
           , uploadUsername = combine uploadUsername
           , uploadPassword = combine uploadPassword
           , uploadPasswordCmd = combine uploadPasswordCmd
           , uploadVerbosity = combine uploadVerbosity
+          , uploadRepoName = combine uploadRepoName
           }
         where
           combine = combine' savedUploadFlags
@@ -589,13 +606,15 @@ instance Semigroup SavedConfig where
           , reportUsername = combine reportUsername
           , reportPassword = combine reportPassword
           , reportVerbosity = combine reportVerbosity
+          , reportRepoName = combine reportRepoName
           }
         where
           combine = combine' savedReportFlags
 
       combinedSavedHaddockFlags =
         HaddockFlags
-          { -- TODO: NubListify
+          { haddockCommonFlags = combinedSavedCommonFlags (haddockCommonFlags . savedHaddockFlags)
+          , -- TODO: NubListify
             haddockProgramPaths = lastNonEmpty haddockProgramPaths
           , -- TODO: NubListify
             haddockProgramArgs = lastNonEmpty haddockProgramArgs
@@ -613,15 +632,11 @@ instance Semigroup SavedConfig where
           , haddockQuickJump = combine haddockQuickJump
           , haddockHscolourCss = combine haddockHscolourCss
           , haddockContents = combine haddockContents
-          , haddockDistPref = combine haddockDistPref
-          , haddockKeepTempFiles = combine haddockKeepTempFiles
-          , haddockVerbosity = combine haddockVerbosity
-          , haddockCabalFilePath = combine haddockCabalFilePath
           , haddockIndex = combine haddockIndex
           , haddockBaseUrl = combine haddockBaseUrl
-          , haddockLib = combine haddockLib
+          , haddockResourcesDir = combine haddockResourcesDir
           , haddockOutputDir = combine haddockOutputDir
-          , haddockArgs = lastNonEmpty haddockArgs
+          , haddockUseUnicode = combine haddockUseUnicode
           }
         where
           combine = combine' savedHaddockFlags
@@ -629,8 +644,7 @@ instance Semigroup SavedConfig where
 
       combinedSavedTestFlags =
         TestFlags
-          { testDistPref = combine testDistPref
-          , testVerbosity = combine testVerbosity
+          { testCommonFlags = combinedSavedCommonFlags (testCommonFlags . savedTestFlags)
           , testHumanLog = combine testHumanLog
           , testMachineLog = combine testMachineLog
           , testShowDetails = combine testShowDetails
@@ -645,12 +659,10 @@ instance Semigroup SavedConfig where
 
       combinedSavedBenchmarkFlags =
         BenchmarkFlags
-          { benchmarkDistPref = combine benchmarkDistPref
-          , benchmarkVerbosity = combine benchmarkVerbosity
+          { benchmarkCommonFlags = combinedSavedCommonFlags (benchmarkCommonFlags . savedBenchmarkFlags)
           , benchmarkOptions = lastNonEmpty benchmarkOptions
           }
         where
-          combine = combine' savedBenchmarkFlags
           lastNonEmpty = lastNonEmpty' savedBenchmarkFlags
 
       combinedSavedReplMulti = combine' savedReplMulti id
@@ -660,6 +672,7 @@ instance Semigroup SavedConfig where
           { flagProjectDir = combine flagProjectDir
           , flagProjectFile = combine flagProjectFile
           , flagIgnoreProject = combine flagIgnoreProject
+          , flagProjectFileParser = combine flagProjectFileParser
           }
         where
           combine = combine' savedProjectFlags
@@ -685,7 +698,10 @@ baseSavedConfig = do
           mempty
             { configHcFlavor = toFlag defaultCompiler
             , configUserInstall = toFlag defaultUserInstall
-            , configVerbosity = toFlag normal
+            , configCommonFlags =
+                mempty
+                  { setupVerbosity = toFlag normal
+                  }
             }
       , savedUserInstallDirs =
           mempty
@@ -795,6 +811,10 @@ defaultConfigFile :: IO FilePath
 defaultConfigFile =
   getDefaultDir XdgConfig "config"
 
+defaultCacheHome :: IO FilePath
+defaultCacheHome =
+  getDefaultDir XdgCache ""
+
 defaultCacheDir :: IO FilePath
 defaultCacheDir =
   getDefaultDir XdgCache "packages"
@@ -876,7 +896,7 @@ addInfoForKnownRepos repo
               { -- Use hackage-security by default unless you opt-out with
                 -- secure: False
                 remoteRepoSecure = Just True
-              , remoteRepoRootKeys = defaultHackageRemoteRepoKeys
+              , remoteRepoRootKeys = map T.pack defaultHackageRemoteRepoKeys
               , remoteRepoKeyThreshold = defaultHackageRemoteRepoKeyThreshold
               }
     useSecure r = r
@@ -909,10 +929,10 @@ defaultHackageRemoteRepoKeys =
     "0a5c7ea47cd1b15f01f5f51a33adda7e655bc0f0b0615baa8e271f4c3351e21d"
   , -- Norman Ramsey (ZI8di3a9Un0s2RBrt5GwVRvfOXVuywADfXGPZfkiDb0=)
     "51f0161b906011b52c6613376b1ae937670da69322113a246a09f807c62f6921"
-  , -- Mathieu Boespflug (ydN1nGGQ79K1Q0nN+ul+Ln8MxikTB95w0YdGd3v3kmg=)
-    "be75553f3c7ba1dbe298da81f1d1b05c9d39dd8ed2616c9bddf1525ca8c03e48"
   , -- Joachim Breitner (5iUgwqZCWrCJktqMx0bBMIuoIyT4A1RYGozzchRN9rA=)
     "d26e46f3b631aae1433b89379a6c68bd417eb5d1c408f0643dcc07757fece522"
+  , -- Tikhon Jelvis (06nM6r1kOYt49YE5e1+j8VKiiYUFjFQ6HrOpPZu+fDE=)
+    "c7de58fc6a224b92b5b513f26fbb8b370f2d97c7cfe0075a951314a55734be93"
   ]
 
 -- | The required threshold of root key signatures for hackage.haskell.org
@@ -930,14 +950,13 @@ defaultHackageRemoteRepoKeyThreshold = 3
 -- use 'loadRawConfig'.
 loadConfig :: Verbosity -> Flag FilePath -> IO SavedConfig
 loadConfig verbosity configFileFlag = do
-  warnOnTwoConfigs verbosity
   config <- loadRawConfig verbosity configFileFlag
   extendToEffectiveConfig config
 
 extendToEffectiveConfig :: SavedConfig -> IO SavedConfig
 extendToEffectiveConfig config = do
   base <- baseSavedConfig
-  let effective0 = base `mappend` config
+  let effective0 = base <> config
       globalFlags0 = savedGlobalFlags effective0
       effective =
         effective0
@@ -957,7 +976,7 @@ extendToEffectiveConfig config = do
 -- effective configuration.
 loadRawConfig :: Verbosity -> Flag FilePath -> IO SavedConfig
 loadRawConfig verbosity configFileFlag = do
-  (source, configFile) <- getConfigFilePathAndSource configFileFlag
+  (source, configFile) <- getConfigFilePathAndSource verbosity configFileFlag
   minp <- readConfigFile mempty configFile
   case minp of
     Nothing -> do
@@ -1000,17 +1019,28 @@ data ConfigFileSource
 
 -- | Returns the config file path, without checking that the file exists.
 -- The order of precedence is: input flag, CABAL_CONFIG, default location.
-getConfigFilePath :: Flag FilePath -> IO FilePath
-getConfigFilePath = fmap snd . getConfigFilePathAndSource
+getConfigFilePath :: Verbosity -> Flag FilePath -> IO FilePath
+getConfigFilePath verbosity configFilePath = snd <$> getConfigFilePathAndSource verbosity configFilePath
 
-getConfigFilePathAndSource :: Flag FilePath -> IO (ConfigFileSource, FilePath)
-getConfigFilePathAndSource configFileFlag =
+getConfigFilePathAndSource :: Verbosity -> Flag FilePath -> IO (ConfigFileSource, FilePath)
+getConfigFilePathAndSource verbosity configFileFlag =
   getSource sources
   where
+    defaultSource = do
+      cfg <- defaultConfigFile
+      -- We only warn on two configs when the user has not explicitly indicated
+      -- a preference (using any of CABAL_CONFIG, CABAL_DIR, or the --config
+      -- option).
+      dir <- lookupEnv "CABAL_DIR"
+      case dir of
+        Nothing -> warnOnTwoConfigs verbosity
+        Just _ -> return ()
+      return $ Just cfg
+
     sources =
       [ (CommandlineOption, return . flagToMaybe $ configFileFlag)
-      , (EnvironmentVariable, lookup "CABAL_CONFIG" `liftM` getEnvironment)
-      , (Default, Just `liftM` defaultConfigFile)
+      , (EnvironmentVariable, lookup "CABAL_CONFIG" <$> getEnvironment)
+      , (Default, defaultSource)
       ]
 
     getSource [] = error "no config file path candidate found."
@@ -1036,16 +1066,15 @@ createDefaultConfigFile verbosity extraLines filePath = do
   initialConf <- initialSavedConfig
   extraConf <- parseExtraLines verbosity extraLines
   notice verbosity $ "Writing default configuration to " ++ filePath
-  writeConfigFile filePath commentConf (initialConf `mappend` extraConf)
+  writeConfigFile filePath commentConf (initialConf <> extraConf)
   return initialConf
 
 writeConfigFile :: FilePath -> SavedConfig -> SavedConfig -> IO ()
 writeConfigFile file comments vals = do
-  let tmpFile = file <.> "tmp"
   createDirectoryIfMissing True (takeDirectory file)
-  writeFile tmpFile $
-    explanation ++ showConfigWithComments comments vals ++ "\n"
-  renameFile tmpFile file
+  writeFileAtomic file $
+    LBS.fromStrict . toUTF8BS $
+      explanation ++ showConfigWithComments comments vals ++ "\n"
   where
     explanation =
       unlines
@@ -1079,7 +1108,6 @@ commentSavedConfig = do
           { savedGlobalFlags =
               defaultGlobalFlags
                 { globalRemoteRepos = toNubList [defaultRemoteRepo]
-                , globalNix = mempty
                 }
           , savedInitFlags =
               mempty
@@ -1167,7 +1195,7 @@ configFieldDescriptions src =
           $ let name = "optimization"
              in FieldDescr
                   name
-                  ( \f -> case f of
+                  ( \case
                       Flag NoOptimisation -> Disp.text "False"
                       Flag NormalOptimisation -> Disp.text "True"
                       Flag MaximumOptimisation -> Disp.text "2"
@@ -1175,30 +1203,20 @@ configFieldDescriptions src =
                   )
                   ( \line str _ -> case () of
                       _
-                        | str == "False" -> ParseOk [] (Flag NoOptimisation)
-                        | str == "True" -> ParseOk [] (Flag NormalOptimisation)
                         | str == "0" -> ParseOk [] (Flag NoOptimisation)
                         | str == "1" -> ParseOk [] (Flag NormalOptimisation)
                         | str == "2" -> ParseOk [] (Flag MaximumOptimisation)
-                        | lstr == "false" -> ParseOk [caseWarning] (Flag NoOptimisation)
-                        | lstr == "true" ->
-                            ParseOk
-                              [caseWarning]
-                              (Flag NormalOptimisation)
+                        | lstr == "false" -> ParseOk [] (Flag NoOptimisation)
+                        | lstr == "true" -> ParseOk [] (Flag NormalOptimisation)
                         | otherwise -> ParseFailed (NoParse name line)
                         where
                           lstr = lowercase str
-                          caseWarning =
-                            PWarning $
-                              "The '"
-                                ++ name
-                                ++ "' field is case sensitive, use 'True' or 'False'."
                   )
       , liftField configDebugInfo (\v flags -> flags{configDebugInfo = v}) $
           let name = "debug-info"
            in FieldDescr
                 name
-                ( \f -> case f of
+                ( \case
                     Flag NoDebugInfo -> Disp.text "False"
                     Flag MinimalDebugInfo -> Disp.text "1"
                     Flag NormalDebugInfo -> Disp.text "True"
@@ -1207,22 +1225,15 @@ configFieldDescriptions src =
                 )
                 ( \line str _ -> case () of
                     _
-                      | str == "False" -> ParseOk [] (Flag NoDebugInfo)
-                      | str == "True" -> ParseOk [] (Flag NormalDebugInfo)
                       | str == "0" -> ParseOk [] (Flag NoDebugInfo)
                       | str == "1" -> ParseOk [] (Flag MinimalDebugInfo)
                       | str == "2" -> ParseOk [] (Flag NormalDebugInfo)
                       | str == "3" -> ParseOk [] (Flag MaximalDebugInfo)
-                      | lstr == "false" -> ParseOk [caseWarning] (Flag NoDebugInfo)
-                      | lstr == "true" -> ParseOk [caseWarning] (Flag NormalDebugInfo)
+                      | lstr == "false" -> ParseOk [] (Flag NoDebugInfo)
+                      | lstr == "true" -> ParseOk [] (Flag NormalDebugInfo)
                       | otherwise -> ParseFailed (NoParse name line)
                       where
                         lstr = lowercase str
-                        caseWarning =
-                          PWarning $
-                            "The '"
-                              ++ name
-                              ++ "' field is case sensitive, use 'True' or 'False'."
                 )
       ]
     ++ toSavedConfig
@@ -1290,22 +1301,26 @@ configFieldDescriptions src =
       []
     ++ [ viewAsFieldDescr $
           optionDistPref
-            (configDistPref . savedConfigureFlags)
-            ( \distPref config ->
-                config
-                  { savedConfigureFlags =
-                      (savedConfigureFlags config)
-                        { configDistPref = distPref
-                        }
-                  , savedHaddockFlags =
-                      (savedHaddockFlags config)
-                        { haddockDistPref = distPref
-                        }
-                  }
+            (setupDistPref . configCommonFlags . savedConfigureFlags)
+            ( \distPref ->
+                updSavedCommonSetupFlags (\common -> common{setupDistPref = distPref})
             )
             ParseArgs
        ]
   where
+    toSavedConfig
+      :: (FieldDescr a -> FieldDescr SavedConfig)
+      -- Lifting function.
+      -> [OptionField a]
+      -- Option fields.
+      -> [String]
+      -- Fields to exclude, by name.
+      -> [FieldDescr a]
+      -- Field replacements.
+      --
+      -- If an option is found with the same name as one of these replacement
+      -- fields, the replacement field is used instead of the option.
+      -> [FieldDescr SavedConfig]
     toSavedConfig lift options exclusions replacements =
       [ lift (fromMaybe field replacement)
       | opt <- options
@@ -1322,6 +1337,30 @@ configFieldDescriptions src =
 
     toRelaxDeps True = RelaxDepsAll
     toRelaxDeps False = mempty
+
+updSavedCommonSetupFlags
+  :: (CommonSetupFlags -> CommonSetupFlags)
+  -> SavedConfig
+  -> SavedConfig
+updSavedCommonSetupFlags setFlag config =
+  config
+    { savedConfigureFlags =
+        let flags = savedConfigureFlags config
+            common = configCommonFlags flags
+         in flags{configCommonFlags = setFlag common}
+    , savedHaddockFlags =
+        let flags = savedHaddockFlags config
+            common = haddockCommonFlags flags
+         in flags{haddockCommonFlags = setFlag common}
+    , savedTestFlags =
+        let flags = savedTestFlags config
+            common = testCommonFlags flags
+         in flags{testCommonFlags = setFlag common}
+    , savedBenchmarkFlags =
+        let flags = savedBenchmarkFlags config
+            common = benchmarkCommonFlags flags
+         in flags{benchmarkCommonFlags = setFlag common}
+    }
 
 -- TODO: next step, make the deprecated fields elicit a warning.
 --
@@ -1512,6 +1551,9 @@ parseConfig src initial = \str -> do
       _ -> [s]
     splitMultiPath xs = xs
 
+    splitMultiSymPath =
+      map unsafeMakeSymbolicPath . splitMultiPath . map getSymbolicPath
+
     -- This is a fixup, pending a full config parser rewrite, to
     -- ensure that config fields which can be comma-separated lists
     -- actually parse as comma-separated lists.
@@ -1525,16 +1567,16 @@ parseConfig src initial = \str -> do
                         splitMultiPath
                           (fromNubList $ configProgramPathExtra scf)
                   , configExtraLibDirs =
-                      splitMultiPath
+                      splitMultiSymPath
                         (configExtraLibDirs scf)
                   , configExtraLibDirsStatic =
-                      splitMultiPath
+                      splitMultiSymPath
                         (configExtraLibDirsStatic scf)
                   , configExtraFrameworkDirs =
-                      splitMultiPath
+                      splitMultiSymPath
                         (configExtraFrameworkDirs scf)
                   , configExtraIncludeDirs =
-                      splitMultiPath
+                      splitMultiSymPath
                         (configExtraIncludeDirs scf)
                   , configConfigureArgs =
                       splitMultiPath
@@ -1644,7 +1686,12 @@ postProcessRepo lineno reponameStr repo0 = do
     -- Note: the trailing colon is important
     "file+noindex:" -> do
       let uri = remoteRepoURI repo0
-      return $ Left $ LocalRepo reponame (uriPath uri) (uriFragment uri == "#shared-cache")
+      return $
+        Left $
+          LocalRepo
+            reponame
+            (normalise (uriPath uri))
+            (uriFragment uri == "#shared-cache")
     _ -> do
       let repo = repo0{remoteRepoName = reponame}
 
@@ -1724,9 +1771,16 @@ showConfigWithComments comment vals =
         (fmap (field . savedConfigureFlags) mcomment)
         ((field . savedConfigureFlags) vals)
 
-    -- skip fields based on field name.  currently only skips "remote-repo",
-    -- because that is rendered as a section.  (see 'ppRemoteRepoSection'.)
-    skipSomeFields = filter ((/= "remote-repo") . fieldName)
+    -- Skip fields based on field name.
+    skipSomeFields =
+      filter
+        ( ( `notElem`
+              [ "remote-repo" -- rendered as a section (see 'ppRemoteRepoSection')
+              , "builddir" -- no effect in config file (see Note [reading project configuration])
+              ]
+          )
+            . fieldName
+        )
 
 -- | Fields for the 'install-dirs' sections.
 installDirsFields :: [FieldDescr (InstallDirs (Flag PathTemplate))]
@@ -1759,8 +1813,8 @@ remoteRepoFields =
       "root-keys"
       text
       parseTokenQ
-      remoteRepoRootKeys
-      (\x repo -> repo{remoteRepoRootKeys = x})
+      (map T.unpack . remoteRepoRootKeys)
+      (\x repo -> repo{remoteRepoRootKeys = map T.pack x})
   , simpleFieldParsec
       "key-threshold"
       showThreshold
@@ -1795,7 +1849,7 @@ haddockFlagsFields =
   , name `notElem` exclusions
   ]
   where
-    exclusions = ["verbose", "builddir", "for-hackage"]
+    exclusions = ["verbose", "builddir", "cabal-file", "for-hackage"]
 
 -- | Fields for the 'init' section.
 initFlagsFields :: [FieldDescr IT.InitFlags]
@@ -1867,7 +1921,7 @@ parseExtraLines verbosity extraLines =
 -- config file and the one that cabal would generate if it didn't exist.
 userConfigDiff :: Verbosity -> GlobalFlags -> [String] -> IO [String]
 userConfigDiff verbosity globalFlags extraLines = do
-  userConfig <- loadRawConfig normal (globalConfigFile globalFlags)
+  userConfig <- loadRawConfig (verbosity{verbosityFlags = normal}) (globalConfigFile globalFlags)
   extraConfig <- parseExtraLines verbosity extraLines
   testConfig <- initialSavedConfig
   return $
@@ -1875,7 +1929,7 @@ userConfigDiff verbosity globalFlags extraLines = do
       M.unionWith
         combine
         (M.fromList . map justFst $ filterShow testConfig)
-        (M.fromList . map justSnd $ filterShow (userConfig `mappend` extraConfig))
+        (M.fromList . map justSnd $ filterShow (userConfig <> extraConfig))
   where
     justFst (a, b) = (a, (Just b, Nothing))
     justSnd (a, b) = (a, (Nothing, Just b))
@@ -1921,11 +1975,11 @@ userConfigDiff verbosity globalFlags extraLines = do
 -- | Update the user's config file keeping the user's customizations.
 userConfigUpdate :: Verbosity -> GlobalFlags -> [String] -> IO ()
 userConfigUpdate verbosity globalFlags extraLines = do
-  userConfig <- loadRawConfig normal (globalConfigFile globalFlags)
+  userConfig <- loadRawConfig (verbosity{verbosityFlags = normal}) (globalConfigFile globalFlags)
   extraConfig <- parseExtraLines verbosity extraLines
   newConfig <- initialSavedConfig
   commentConf <- commentSavedConfig
-  cabalFile <- getConfigFilePath $ globalConfigFile globalFlags
+  cabalFile <- getConfigFilePath verbosity $ globalConfigFile globalFlags
   let backup = cabalFile ++ ".backup"
   notice verbosity $ "Renaming " ++ cabalFile ++ " to " ++ backup ++ "."
   renameFile cabalFile backup
@@ -1933,4 +1987,4 @@ userConfigUpdate verbosity globalFlags extraLines = do
   writeConfigFile
     cabalFile
     commentConf
-    (newConfig `mappend` userConfig `mappend` extraConfig)
+    (newConfig <> userConfig <> extraConfig)

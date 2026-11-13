@@ -1,3 +1,5 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE RecordWildCards #-}
 
 module Distribution.Client.CmdClean (cleanCommand, cleanAction) where
@@ -35,49 +37,72 @@ import Distribution.Simple.Command
   , ShowOrParseArgs
   , liftOptionL
   , option
+  , usageAlternatives
   )
 import Distribution.Simple.Setup
-  ( Flag (..)
+  ( Flag
   , falseArg
   , flagToMaybe
   , fromFlagOrDefault
   , optionDistPref
   , optionVerbosity
   , toFlag
+  , pattern NoFlag
   )
 import Distribution.Simple.Utils
   ( dieWithException
-  , handleDoesNotExist
   , info
+  , removeFileForcibly
   , wrapText
   )
+import Distribution.System
+  ( OS (Windows)
+  , buildOS
+  )
+import Distribution.Utils.Path hiding
+  ( (<.>)
+  , (</>)
+  )
 import Distribution.Verbosity
-  ( normal
+  ( VerbosityFlags
+  , defaultVerbosityHandles
+  , mkVerbosity
+  , normal
   )
 
+import Control.Concurrent
+  ( threadDelay
+  )
+import Control.Exception
+  ( throw
+  )
 import Control.Monad
   ( forM
   , forM_
   , mapM
   )
 import qualified Data.Set as Set
+import qualified GHC.IO.Exception as GHC
 import System.Directory
   ( canonicalizePath
   , doesDirectoryExist
   , doesFileExist
-  , getDirectoryContents
   , listDirectory
-  , removeDirectoryRecursive
-  , removeFile
+  , removePathForcibly
   )
 import System.FilePath
   ( (</>)
   )
+import System.IO.Error
+  ( ioeGetErrorType
+  , isPermissionError
+  )
+import qualified System.Process as Process
 
 data CleanFlags = CleanFlags
   { cleanSaveConfig :: Flag Bool
-  , cleanVerbosity :: Flag Verbosity
-  , cleanDistDir :: Flag FilePath
+  , cleanVerbosity :: Flag VerbosityFlags
+  , cleanDistDir :: Flag (SymbolicPath Pkg (Dir Dist))
   }
   deriving (Eq)
 
@@ -94,8 +119,7 @@ cleanCommand =
   CommandUI
     { commandName = "v2-clean"
     , commandSynopsis = "Clean the package store and remove temporary files."
-    , commandUsage = \pname ->
-        "Usage: " ++ pname ++ " new-clean [FLAGS]\n"
+    , commandUsage = usageAlternatives "v2-clean" ["[FLAGS]"]
     , commandDescription = Just $ \_ ->
         wrapText $
           "Removes all temporary files created during the building process "
@@ -130,9 +154,9 @@ cleanOptions showOrParseArgs =
 
 cleanAction :: (ProjectFlags, CleanFlags) -> [String] -> GlobalFlags -> IO ()
 cleanAction (ProjectFlags{..}, CleanFlags{..}) extraArgs _ = do
-  let verbosity = fromFlagOrDefault normal cleanVerbosity
+  let verbosity = mkVerbosity defaultVerbosityHandles $ fromFlagOrDefault normal cleanVerbosity
       saveConfig = fromFlagOrDefault False cleanSaveConfig
-      mdistDirectory = flagToMaybe cleanDistDir
+      mdistDirectory = getSymbolicPath <$> flagToMaybe cleanDistDir
       mprojectDir = flagToMaybe flagProjectDir
       mprojectFile = flagToMaybe flagProjectFile
 
@@ -158,14 +182,29 @@ cleanAction (ProjectFlags{..}, CleanFlags{..}) extraArgs _ = do
 
         when buildRootExists $ do
           info verbosity ("Deleting build root (" ++ buildRoot ++ ")")
-          handleDoesNotExist () $ removeDirectoryRecursive buildRoot
+          removePathForcibly buildRoot
       else do
         let distRoot = distDirectory distLayout
 
         info verbosity ("Deleting dist-newstyle (" ++ distRoot ++ ")")
-        handleDoesNotExist () $ removeDirectoryRecursive distRoot
+        -- Windows can't delete some git files #10182
+        when (buildOS == Windows) $
+          void $
+            Process.createProcess_ "attrib" $
+              Process.shell $
+                "attrib -s -h -r " <> distRoot <> "\\*.* /s /d"
+        catch
+          (removePathForcibly distRoot)
+          ( \e ->
+              -- Permission error is usually when some files are (temporarily) locked.
+              -- Unsatisfied constraints (directory is non empty) error happens
+              -- when some files inside the directory were not removed (perhaps because they are locked).
+              if isPermissionError e || ioeGetErrorType e == GHC.UnsatisfiedConstraints
+                then threadDelay 1000 >> removePathForcibly distRoot
+                else throw e
+          )
 
-    removeEnvFiles (distProjectRootDirectory distLayout)
+    removeEnvFiles $ distProjectRootDirectory distLayout
 
   -- Clean specified script build caches and orphaned caches.
   -- There is currently no good way to specify to only clean orphaned caches.
@@ -182,9 +221,9 @@ cleanAction (ProjectFlags{..}, CleanFlags{..}) extraArgs _ = do
     exists <- doesFileExist script
     when (not exists || script `Set.member` toClean) $ do
       info verbosity ("Deleting cache (" ++ cache ++ ") for script (" ++ script ++ ")")
-      removeDirectoryRecursive cache
+      removePathForcibly cache
 
 removeEnvFiles :: FilePath -> IO ()
 removeEnvFiles dir =
-  (traverse_ (removeFile . (dir </>)) . filter ((".ghc.environment" ==) . take 16))
-    =<< getDirectoryContents dir
+  (traverse_ (removeFileForcibly . (dir </>)) . filter ((".ghc.environment" ==) . take 16))
+    =<< listDirectory dir

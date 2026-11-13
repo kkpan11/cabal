@@ -1,12 +1,10 @@
-{-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE NoMonoLocalBinds #-}
 
 module UnitTests.Distribution.Client.InstallPlan (tests) where
 
 import Distribution.Client.Compat.Prelude
 
-import Distribution.Client.InstallPlan (GenericInstallPlan, IsUnit)
+import Distribution.Client.InstallPlan (GenericInstallPlan, IsGraph)
 import qualified Distribution.Client.InstallPlan as InstallPlan
 import Distribution.Client.JobControl
 import Distribution.Client.Types
@@ -21,6 +19,7 @@ import Distribution.Version
 import Control.Concurrent (threadDelay)
 import Control.Monad (replicateM)
 import Data.Array hiding (index)
+import Data.Bifunctor (bimap)
 import Data.Graph
 import Data.IORef
 import Data.List ()
@@ -136,7 +135,7 @@ isReversePartialTopologicalOrder g vs =
     | let ixs =
             array
               (bounds g)
-              ( zip (range (bounds g)) (repeat Nothing)
+              ( map (,Nothing) (range (bounds g))
                   ++ zip vs (map Just [0 :: Int ..])
               )
     , (u, v) <- edges g
@@ -224,8 +223,10 @@ arbitraryTestInstallPlan = do
 -- It takes generators for installed and source packages and the chance that
 -- each package is installed (for those packages with no prerequisites).
 arbitraryInstallPlan
-  :: ( IsUnit ipkg
-     , IsUnit srcpkg
+  :: forall ipkg srcpkg
+   . ( IsGraph ipkg srcpkg
+     , Show (Key ipkg)
+     , Pretty (Key ipkg)
      )
   => (Vertex -> [Vertex] -> Gen ipkg)
   -> (Vertex -> [Vertex] -> Gen srcpkg)
@@ -234,11 +235,8 @@ arbitraryInstallPlan
   -> Gen (InstallPlan.GenericInstallPlan ipkg srcpkg)
 arbitraryInstallPlan mkIPkg mkSrcPkg ipkgProportion graph = do
   (ipkgvs, srcpkgvs) <-
-    fmap
-      ( (\(ipkgs, srcpkgs) -> (map fst ipkgs, map fst srcpkgs))
-          . partition snd
-      )
-      $ sequenceA
+    bimap (map fst) (map fst) . partition snd
+      <$> sequenceA
         [ do
           isipkg <-
             if isRoot
@@ -316,9 +314,9 @@ renderDotGraph :: Graph -> String
 renderDotGraph graph =
   unlines (
       [header
-      ,graphDefaultAtribs
-      ,nodeDefaultAtribs
-      ,edgeDefaultAtribs]
+      ,graphDefaultAttribs
+      ,nodeDefaultAttribs
+      ,edgeDefaultAttribs]
     ++ map renderNode (vertices graph)
     ++ map renderEdge (edges graph)
     ++ [footer]
@@ -328,12 +326,12 @@ renderDotGraph graph =
 
     renderEdge (n, n') = "\t" ++ show n ++ " -> " ++ show n' ++ "[];"
 
-header, footer, graphDefaultAtribs, nodeDefaultAtribs, edgeDefaultAtribs :: String
+header, footer, graphDefaultAttribs, nodeDefaultAttribs, edgeDefaultAttribs :: String
 
 header = "digraph packages {"
 footer = "}"
 
-graphDefaultAtribs = "\tgraph [fontsize=14, fontcolor=black, color=black];"
-nodeDefaultAtribs  = "\tnode [label=\"\\N\", width=\"0.75\", shape=ellipse];"
-edgeDefaultAtribs  = "\tedge [fontsize=10];"
+graphDefaultAttribs = "\tgraph [fontsize=14, fontcolor=black, color=black];"
+nodeDefaultAttribs  = "\tnode [label=\"\\N\", width=\"0.75\", shape=ellipse];"
+edgeDefaultAttribs  = "\tedge [fontsize=10];"
 -}

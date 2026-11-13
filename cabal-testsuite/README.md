@@ -1,17 +1,20 @@
 cabal-testsuite is a suite of integration tests for Cabal-based
 frameworks.
 
-How to run
-----------
+# How to run
 
 1. Build `cabal-testsuite` (`cabal build cabal-testsuite:cabal-tests`)
 2. Run the `cabal-tests` executable. It will scan for all tests
    in your current directory and subdirectories and run them.
-   To run a specific set of tests, use `cabal-tests --with-cabal=CABALBIN PATH ...`.
-   (e.g. `cabal run cabal-testsuite:cabal-tests -- --with-cabal=cabal cabal-testsuite/PackageTests/TestOptions/setup.test.hs`)
-   You can control parallelism using the `-j` flag.
 
 There are a few useful flags:
+
+* To run a specific set of tests, pass the path to a `.test.hs` file to run or
+  use the `-p`/`--pattern` flag to filter tests.
+
+  See the ["Selecting tests"](#selecting-tests) section below for more details.
+
+* `-j INT` controls the number of threads used for running tests.
 
 * `--with-cabal PATH` can be used to specify the path of a
   `cabal-install` executable.  IF YOU DO NOT SPECIFY THIS FLAG,
@@ -27,6 +30,28 @@ There are a few useful flags:
 
 * `--keep-tmp-files` can be used to keep the temporary directories that tests
   are run in.
+
+## Selecting tests
+
+To run a specific set of tests, use `cabal-tests --with-cabal=CABALBIN PATH ...`, e.g.:
+
+```
+cabal run cabal-testsuite:cabal-tests -- \
+   --with-cabal=cabal \
+   cabal-testsuite/PackageTests/TestOptions/setup.test.hs
+```
+
+Alternatively, use `-p`/`--pattern` to select tests dynamically:
+
+```
+cabal run cabal-testsuite:cabal-tests -- \
+   --with-cabal=cabal \
+   --pattern "/TestOptions/"
+```
+
+See [the documentation for Tasty pattern
+syntax](https://hackage.haskell.org/package/tasty#patterns) for more
+information.
 
 ## Which Cabal library version do cabal-install tests use?
 
@@ -65,7 +90,7 @@ cabal install doctest --overwrite-policy=always --ignore-project
 After that you can run doctests for a component of your choice via the following command:
 
 ``` shellsession
-cabal repl --with-ghc=doctest --build-depends=QuickCheck --build-depends=template-haskell --repl-options="-w" --project-file="cabal.project.validate" Cabal-syntax
+cabal repl --with-ghc=doctest --build-depends=QuickCheck --build-depends=template-haskell --repl-options="-w" --project-file="cabal.validate.project" Cabal-syntax
 ```
 
 In this example we have run doctests in `Cabal-syntax`. Notice, that some
@@ -74,8 +99,7 @@ components have broken doctests
 our CI currently checks that `Cabal-syntax` and `Cabal` doctests pass via
 `make doctest-install && make doctest` (you can use this `make`-based workflow too).
 
-How to write
-------------
+# How to write
 
 If you learn better by example, just look at the tests that live
 in `cabal-testsuite/PackageTests`; if you `git log -p`, you can
@@ -155,8 +179,7 @@ allow multiple tests to be defined in one file but run in parallel;
 at the moment, these just indicate long running tests that should
 be run early (to avoid straggling).
 
-Frequently asked questions
---------------------------
+# Frequently asked questions
 
 For all of these answers, to see examples of the functions in
 question, grep the test suite.
@@ -195,10 +218,31 @@ variants of a command (e.g., `cabal'` rather than `cabal`) and use
 `assertOutputContains`.  Note that this will search over BOTH stdout
 and stderr.
 
+For convenience, paste expected multiline string values verbatim into a text
+file and read these with `readFileVerbatim`. The suggested extension for these
+files are `.expect.txt`.
+
 **How do I skip running a test in some environments?**  Use the
 `skipIf` and `skipUnless` combinators.  Useful parameters to test
 these with include `hasSharedLibraries`, `hasProfiledLibraries`,
 `hasCabalShared`, `isGhcVersion`, `isWindows`, `isLinux`, `isOSX`.
+
+There are some pre-defined versions of those combinators like `skipIfWindows`
+or `skipIfCI`. If possible try to use those as the error message will be uniform
+with other tests, allowing for `grep`ing the output more easily.
+
+Make sure that you only skip tests which cannot be run by fundamental reasons,
+like the OS or the capabilities of the GHC version. If a test is failing do not
+skip it, mark it as broken instead (see next question).
+
+**How do I mark a test as broken?**  Use `expectBroken`, which takes
+the ticket number as its first argument.
+
+**How do I mark a flaky test?** If a test passes only sometimes for unknown
+reasons, it is better to mark it as flaky with the `flaky` and `flakyIf`
+combinators. They both take a ticket number so the flaky tests has to be tracked
+in an issue. Flaky tests are executed, and the outcome is reported by the
+test-suite but even if they fail they won't make the test-suite fail.
 
 **I programmatically modified a file in my test suite, but Cabal/GHC
 doesn't seem to be picking it up.**  You need to sleep sufficiently
@@ -206,13 +250,7 @@ long before editing a file, in order for file system timestamp
 resolution to pick it up.  Use `withDelay` and `delay` prior to
 making a modification.
 
-**How do I mark a test as broken?**  Use `expectBroken`, which takes
-the ticket number as its first argument.  Note that this does NOT
-handle accept-test brokenness, so you will have to add a manual
-string output test, if that is how your test is "failing."
-
-Hermetic tests
---------------
+# Hermetic tests
 
 Tests are run in a fresh temporary system directory. This attempts to isolate the
 tests from anything specific to do with your directory structure. In particular
@@ -223,8 +261,7 @@ tests from anything specific to do with your directory structure. In particular
 * You must `git add` all files which are relevant to the test, otherwise
   they will not be copied.
 
-Design notes
-------------
+# Design notes
 
 This is the second rewrite of the integration testing framework.  The
 primary goal was to use Haskell as the test language (letting us take
@@ -284,8 +321,7 @@ figure out how to get out the threading setting, and then spawn
 that many GHCi servers to service the running threads.  Improvements
 welcome.
 
-Expect tests
-------------
+# Expect tests
 
 An expect test (aka _golden test_)
 is a test where we read out the output of the test
@@ -354,8 +390,7 @@ Some other notes:
   on the output for the string you're looking for.  Try to be
   deterministic, but sometimes it's not (easily) possible.
 
-Non-goals
----------
+# Non-goals
 
 Here are some things we do not currently plan on supporting:
 

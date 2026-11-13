@@ -1,6 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-
 module Distribution.Types.ExeDependency
   ( ExeDependency (..)
   , qualifiedExeName
@@ -25,11 +22,11 @@ data ExeDependency
       PackageName
       UnqualComponentName -- name of executable component of package
       VersionRange
-  deriving (Generic, Read, Show, Eq, Ord, Typeable, Data)
+  deriving (Generic, Read, Show, Eq, Ord, Data)
 
 instance Binary ExeDependency
 instance Structured ExeDependency
-instance NFData ExeDependency where rnf = genericRnf
+instance NFData ExeDependency
 
 instance Pretty ExeDependency where
   pretty (ExeDependency name exe ver) =

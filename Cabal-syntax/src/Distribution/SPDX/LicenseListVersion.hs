@@ -7,15 +7,33 @@ import Distribution.CabalSpecVersion
 
 -- | SPDX License List version @Cabal@ is aware of.
 data LicenseListVersion
-  = LicenseListVersion_3_0
-  | LicenseListVersion_3_2
-  | LicenseListVersion_3_6
-  | LicenseListVersion_3_9
-  | LicenseListVersion_3_10
-  | LicenseListVersion_3_16
+  = -- | @since 2.4.0.0
+    LicenseListVersion_3_0
+  | -- | @since 2.4.0.0
+    LicenseListVersion_3_2
+  | -- | @since 3.0.0.0
+    LicenseListVersion_3_6
+  | -- | @since 3.4.0.0
+    LicenseListVersion_3_9
+  | -- | @since 3.6.0.0
+    LicenseListVersion_3_10
+  | -- | @since 3.8.0.0
+    LicenseListVersion_3_16
+  | -- | @since 3.12.0.0
+    LicenseListVersion_3_23
+  | -- | @since 3.14.0.0
+    LicenseListVersion_3_25
+  | -- | @since 3.16.0.0
+    LicenseListVersion_3_26
+  | -- | @since 3.18.0.0
+    LicenseListVersion_3_28
   deriving (Eq, Ord, Show, Enum, Bounded)
 
 cabalSpecVersionToSPDXListVersion :: CabalSpecVersion -> LicenseListVersion
+cabalSpecVersionToSPDXListVersion CabalSpecV3_18 = LicenseListVersion_3_28
+cabalSpecVersionToSPDXListVersion CabalSpecV3_16 = LicenseListVersion_3_26
+cabalSpecVersionToSPDXListVersion CabalSpecV3_14 = LicenseListVersion_3_25
+cabalSpecVersionToSPDXListVersion CabalSpecV3_12 = LicenseListVersion_3_23
 cabalSpecVersionToSPDXListVersion CabalSpecV3_8 = LicenseListVersion_3_16
 cabalSpecVersionToSPDXListVersion CabalSpecV3_6 = LicenseListVersion_3_10
 cabalSpecVersionToSPDXListVersion CabalSpecV3_4 = LicenseListVersion_3_9

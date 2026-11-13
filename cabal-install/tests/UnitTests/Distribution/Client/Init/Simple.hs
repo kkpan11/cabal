@@ -63,13 +63,13 @@ simpleCreateProjectTests v pkgIx srcDb pkgName =
             flags = emptyFlags{packageType = Flag Library}
             settings =
               ProjectSettings
-                (WriteOpts False False False v "/home/test/1" Library pkgName defaultCabalVersion)
+                (WriteOpts False False False (verbosityFlags v) "/home/test/1" Library pkgName defaultCabalVersion)
                 (simplePkgDesc pkgName)
                 (Just $ simpleLibTarget baseDep)
                 Nothing
                 Nothing
 
-        case _runPrompt (createProject v pkgIx srcDb flags) inputs of
+        case runPrompt (createProject v pkgIx srcDb flags) inputs of
           Left e -> assertFailure $ "Failed to create simple lib project: " ++ show e
           Right (settings', _) -> settings @=? settings'
     , testCase "Simple lib createProject - with tests" $ do
@@ -77,13 +77,13 @@ simpleCreateProjectTests v pkgIx srcDb pkgName =
             flags = emptyFlags{packageType = Flag Library}
             settings =
               ProjectSettings
-                (WriteOpts False False False v "/home/test/1" Library pkgName defaultCabalVersion)
+                (WriteOpts False False False (verbosityFlags v) "/home/test/1" Library pkgName defaultCabalVersion)
                 (simplePkgDesc pkgName)
                 (Just $ simpleLibTarget baseDep)
                 Nothing
                 (Just $ simpleTestTarget (Just pkgName) baseDep)
 
-        case _runPrompt (createProject v pkgIx srcDb flags) inputs of
+        case runPrompt (createProject v pkgIx srcDb flags) inputs of
           Left e -> assertFailure $ "Failed to create simple lib (with tests)project: " ++ show e
           Right (settings', _) -> settings @=? settings'
     , testCase "Simple exe createProject" $ do
@@ -91,13 +91,13 @@ simpleCreateProjectTests v pkgIx srcDb pkgName =
             flags = emptyFlags{packageType = Flag Executable}
             settings =
               ProjectSettings
-                (WriteOpts False False False v "/home/test/2" Executable pkgName defaultCabalVersion)
+                (WriteOpts False False False (verbosityFlags v) "/home/test/2" Executable pkgName defaultCabalVersion)
                 (simplePkgDesc pkgName)
                 Nothing
                 (Just $ simpleExeTarget Nothing baseDep)
                 Nothing
 
-        case _runPrompt (createProject v pkgIx srcDb flags) inputs of
+        case runPrompt (createProject v pkgIx srcDb flags) inputs of
           Left e -> assertFailure $ "Failed to create simple exe project: " ++ show e
           Right (settings', _) -> settings @=? settings'
     , testCase "Simple lib+exe createProject - no tests" $ do
@@ -105,13 +105,13 @@ simpleCreateProjectTests v pkgIx srcDb pkgName =
             flags = emptyFlags{packageType = Flag LibraryAndExecutable}
             settings =
               ProjectSettings
-                (WriteOpts False False False v "/home/test/2" LibraryAndExecutable pkgName defaultCabalVersion)
+                (WriteOpts False False False (verbosityFlags v) "/home/test/2" LibraryAndExecutable pkgName defaultCabalVersion)
                 (simplePkgDesc pkgName)
                 (Just $ simpleLibTarget baseDep)
                 (Just $ simpleExeTarget (Just pkgName) baseDep)
                 Nothing
 
-        case _runPrompt (createProject v pkgIx srcDb flags) inputs of
+        case runPrompt (createProject v pkgIx srcDb flags) inputs of
           Left e -> assertFailure $ "Failed to create simple lib+exe project: " ++ show e
           Right (settings', _) -> settings @=? settings'
     , testCase "Simple lib+exe createProject - with tests" $ do
@@ -119,13 +119,13 @@ simpleCreateProjectTests v pkgIx srcDb pkgName =
             flags = emptyFlags{packageType = Flag LibraryAndExecutable}
             settings =
               ProjectSettings
-                (WriteOpts False False False v "/home/test/2" LibraryAndExecutable pkgName defaultCabalVersion)
+                (WriteOpts False False False (verbosityFlags v) "/home/test/2" LibraryAndExecutable pkgName defaultCabalVersion)
                 (simplePkgDesc pkgName)
                 (Just $ simpleLibTarget baseDep)
                 (Just $ simpleExeTarget (Just pkgName) baseDep)
                 (Just $ simpleTestTarget (Just pkgName) baseDep)
 
-        case _runPrompt (createProject v pkgIx srcDb flags) inputs of
+        case runPrompt (createProject v pkgIx srcDb flags) inputs of
           Left e -> assertFailure $ "Failed to create simple lib+exe (with tests) project: " ++ show e
           Right (settings', _) -> settings @=? settings'
     , testCase "Simple standalone tests" $ do
@@ -133,18 +133,18 @@ simpleCreateProjectTests v pkgIx srcDb pkgName =
             flags = emptyFlags{packageType = Flag TestSuite}
             settings =
               ProjectSettings
-                (WriteOpts False False False v "/home/test/2" TestSuite pkgName defaultCabalVersion)
+                (WriteOpts False False False (verbosityFlags v) "/home/test/2" TestSuite pkgName defaultCabalVersion)
                 (simplePkgDesc pkgName)
                 Nothing
                 Nothing
                 (Just $ simpleTestTarget Nothing baseDep)
 
-        case _runPrompt (createProject v pkgIx srcDb flags) inputs of
+        case runPrompt (createProject v pkgIx srcDb flags) inputs of
           Left e -> assertFailure $ "Failed to create simple standalone test project: " ++ show e
           Right (settings', _) -> settings @=? settings'
     ]
   where
-    baseDep = case _runPrompt (getBaseDep pkgIx emptyFlags) $ fromList [] of
+    baseDep = case runPrompt (getBaseDep pkgIx emptyFlags) $ fromList [] of
       Left e -> error $ show e
       Right a -> fst a
 
@@ -168,7 +168,7 @@ simplePkgDesc pkgName =
     ""
     ""
     mempty
-    (Just $ Set.singleton defaultChangelog)
+    (Just $ Set.fromList [defaultReadme, defaultChangelog])
 
 simpleLibTarget :: [Dependency] -> LibTarget
 simpleLibTarget baseDep =

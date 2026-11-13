@@ -1,11 +1,7 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveFoldable #-}
-{-# LANGUAGE DeriveFunctor #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE DeriveTraversable #-}
-{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
 
 -- | The only purpose of this module is to prevent the export of
 -- 'VersionRange' constructors from
@@ -25,7 +21,7 @@ module Distribution.Types.VersionRange.Internal
   , intersectVersionRanges
   , withinVersion
   , majorBoundVersion
-  , VersionRangeF (..)
+  , VersionRangeF (.., LEUpperBound, GTLowerBound, TZUpperBound)
   , projectVersionRange
   , embedVersionRange
   , cataVersionRange
@@ -36,6 +32,7 @@ module Distribution.Types.VersionRange.Internal
   , wildcardUpperBound
   ) where
 
+import Data.Functor (($>))
 import Distribution.Compat.Prelude
 import Distribution.Types.Version
 import Prelude ()
@@ -58,11 +55,11 @@ data VersionRange
   | MajorBoundVersion Version -- @^>= ver@ (same as >= ver && < MAJ(ver)+1)
   | UnionVersionRanges VersionRange VersionRange
   | IntersectVersionRanges VersionRange VersionRange
-  deriving (Data, Eq, Ord, Generic, Read, Show, Typeable)
+  deriving (Data, Eq, Ord, Generic, Read, Show)
 
 instance Binary VersionRange
 instance Structured VersionRange
-instance NFData VersionRange where rnf = genericRnf
+instance NFData VersionRange
 
 -- | The version range @-any@. That is, a version range containing all
 -- versions.
@@ -181,11 +178,26 @@ data VersionRangeF a
     , Generic
     , Read
     , Show
-    , Typeable
     , Functor
     , Foldable
     , Traversable
     )
+
+pattern LEUpperBound, GTLowerBound, TZUpperBound :: VersionRangeF a
+pattern LEUpperBound <- OrEarlierVersionF _
+pattern GTLowerBound <- LaterVersionF _
+pattern TZUpperBound <- (upperTrailingZero -> True)
+
+upperTrailingZero :: VersionRangeF a -> Bool
+upperTrailingZero (OrEarlierVersionF x) = trailingZero x
+upperTrailingZero (EarlierVersionF x) = trailingZero x
+upperTrailingZero _ = False
+
+trailingZero :: Version -> Bool
+trailingZero (versionNumbers -> vs)
+  | [0] <- vs = False
+  | 0 : _ <- reverse vs = True
+  | otherwise = False
 
 -- | Generic destructor for 'VersionRange'.
 --
@@ -344,29 +356,14 @@ instance Parsec VersionRange where
 versionRangeParser :: forall m. CabalParsing m => m Int -> CabalSpecVersion -> m VersionRange
 versionRangeParser digitParser csv = expr
   where
-    expr = do
-      P.spaces
-      t <- term
-      P.spaces
-      ( do
-          _ <- P.string "||"
-          checkOp
-          P.spaces
-          e <- expr
-          return (unionVersionRanges t e)
-          <|> return t
-        )
-    term = do
-      f <- factor
-      P.spaces
-      ( do
-          _ <- P.string "&&"
-          checkOp
-          P.spaces
-          t <- term
-          return (intersectVersionRanges f t)
-          <|> return f
-        )
+    expr =
+      (maybe <*> unionVersionRanges)
+        <$> (P.spaces *> term <* P.spaces)
+        <*> P.optional (P.string "||" *> checkOp *> P.spaces *> expr)
+    term =
+      (maybe <*> intersectVersionRanges)
+        <$> (factor <* P.spaces)
+        <*> P.optional (P.string "&&" *> checkOp *> P.spaces *> term)
     factor = parens expr <|> prim
 
     prim = do
@@ -375,22 +372,19 @@ versionRangeParser digitParser csv = expr
         "-" -> anyVersion <$ P.string "any" <|> P.string "none" *> noVersion'
         "==" -> do
           P.spaces
-          ( do
-              (wild, v) <- verOrWild
-              checkWild wild
-              pure $ (if wild then withinVersion else thisVersion) v
-              <|> (verSet' thisVersion =<< verSet)
-            )
+          do
+            (wild, v) <- verOrWild
+            checkWild wild
+            pure $ (if wild then withinVersion else thisVersion) v
+            <|> (verSet' thisVersion =<< verSet)
         "^>=" -> do
           P.spaces
-          ( do
-              (wild, v) <- verOrWild
-              when wild $
-                P.unexpected $
-                  "wild-card version after ^>= operator"
-              majorBoundVersion' v
-              <|> (verSet' majorBoundVersion =<< verSet)
-            )
+          do
+            (wild, v) <- verOrWild
+            when wild $
+              P.unexpected "wild-card version after ^>= operator"
+            majorBoundVersion' v
+            <|> (verSet' majorBoundVersion =<< verSet)
         _ -> do
           P.spaces
           (wild, v) <- verOrWild
@@ -489,7 +483,7 @@ versionRangeParser digitParser csv = expr
               , prettyShow (foldr1 unionVersionRanges (fmap op vs))
               ]
 
-    verSet :: CabalParsing m => m (NonEmpty Version)
+    verSet :: m (NonEmpty Version)
     verSet = do
       _ <- P.char '{'
       P.spaces
@@ -498,22 +492,22 @@ versionRangeParser digitParser csv = expr
       pure vs
 
     -- a plain version without tags or wildcards
-    verPlain :: CabalParsing m => m Version
-    verPlain = mkVersion <$> toList <$> P.sepByNonEmpty digitParser (P.char '.')
+    verPlain :: m Version
+    verPlain = mkVersion . toList <$> P.sepByNonEmpty digitParser (P.char '.')
 
     -- either wildcard or normal version
-    verOrWild :: CabalParsing m => m (Bool, Version)
+    verOrWild :: m (Bool, Version)
     verOrWild = do
       x <- digitParser
       verLoop (DList.singleton x)
 
     -- trailing: wildcard (.y.*) or normal version (optional tags) (.y.z-tag)
-    verLoop :: CabalParsing m => DList.DList Int -> m (Bool, Version)
+    verLoop :: DList.DList Int -> m (Bool, Version)
     verLoop acc =
       verLoop' acc
-        <|> (tags *> pure (False, mkVersion (DList.toList acc)))
+        <|> (tags $> (False, mkVersion (DList.toList acc)))
 
-    verLoop' :: CabalParsing m => DList.DList Int -> m (Bool, Version)
+    verLoop' :: DList.DList Int -> m (Bool, Version)
     verLoop' acc = do
       _ <- P.char '.'
       let digit = digitParser >>= verLoop . DList.snoc acc
@@ -528,7 +522,7 @@ versionRangeParser digitParser csv = expr
         P.spaces
         return a
 
-    tags :: CabalParsing m => m ()
+    tags :: m ()
     tags = do
       ts <- many $ P.char '-' *> some (P.satisfy isAlphaNum)
       case ts of
@@ -546,7 +540,7 @@ versionRangeParser digitParser csv = expr
 --
 -- @since 2.2
 majorUpperBound :: Version -> Version
-majorUpperBound = alterVersion $ \numbers -> case numbers of
+majorUpperBound = alterVersion $ \case
   [] -> [0, 1] -- should not happen
   [m1] -> [m1, 1] -- e.g. version '1'
   (m1 : m2 : _) -> [m1, m2 + 1]

@@ -1,15 +1,5 @@
-{-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
-
------------------------------------------------------------------------------
-
------------------------------------------------------------------------------
 
 -- |
 -- Module      :  Distribution.Compat.Graph
@@ -106,10 +96,10 @@ import Distribution.Utils.Structured (Structure (..), Structured (..))
 import qualified Data.Array as Array
 import qualified Data.Foldable as Foldable
 import qualified Data.Graph as G
+import qualified Data.List.NonEmpty as NE
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Tree as Tree
-import qualified Distribution.Compat.Prelude as Prelude
 
 -- | A graph of nodes @a@.  The nodes are expected to have instance
 -- of class 'IsNode'.
@@ -120,9 +110,8 @@ data Graph a = Graph
   , graphAdjoint :: G.Graph
   , graphVertexToNode :: G.Vertex -> a
   , graphKeyToVertex :: Key a -> Maybe G.Vertex
-  , graphBroken :: [(a, [Key a])]
+  , graphBroken :: [(a, NonEmpty (Key a))]
   }
-  deriving (Typeable)
 
 -- NB: Not a Functor! (or Traversable), because you need
 -- to restrict Key a ~ Key b.  We provide our own mapping
@@ -134,12 +123,12 @@ data Graph a = Graph
 instance Show a => Show (Graph a) where
   show = show . toList
 
-instance (IsNode a, Read a, Show (Key a)) => Read (Graph a) where
-  readsPrec d s = map (\(a, r) -> (fromDistinctList a, r)) (readsPrec d s)
+instance (IsNode a, Read a) => Read (Graph a) where
+  readsPrec d s = map (first fromDistinctListTrusted) (readsPrec d s)
 
-instance (IsNode a, Binary a, Show (Key a)) => Binary (Graph a) where
+instance (IsNode a, Binary a) => Binary (Graph a) where
   put x = put (toList x)
-  get = fmap fromDistinctList get
+  get = fmap fromDistinctListTrusted get
 
 instance Structured a => Structured (Graph a) where
   structure p = Nominal (typeRep p) 0 "Graph" [structure (Proxy :: Proxy a)]
@@ -148,24 +137,20 @@ instance (Eq (Key a), Eq a) => Eq (Graph a) where
   g1 == g2 = graphMap g1 == graphMap g2
 
 instance Foldable.Foldable Graph where
-  fold = Foldable.fold . graphMap
-  foldr f z = Foldable.foldr f z . graphMap
-  foldl f z = Foldable.foldl f z . graphMap
-  foldMap f = Foldable.foldMap f . graphMap
-  foldl' f z = Foldable.foldl' f z . graphMap
-  foldr' f z = Foldable.foldr' f z . graphMap
-#ifdef MIN_VERSION_base
-#if MIN_VERSION_base(4,8,0)
-  length = Foldable.length . graphMap
-  null   = Foldable.null   . graphMap
-  toList = Foldable.toList . graphMap
   elem x = Foldable.elem x . graphMap
+  fold = Foldable.fold . graphMap
+  foldl f z = Foldable.foldl f z . graphMap
+  foldl' f z = Foldable.foldl' f z . graphMap
+  foldr f z = Foldable.foldr f z . graphMap
+  foldr' f z = Foldable.foldr' f z . graphMap
+  foldMap f = Foldable.foldMap f . graphMap
+  length = Foldable.length . graphMap
   maximum = Foldable.maximum . graphMap
   minimum = Foldable.minimum . graphMap
-  sum     = Foldable.sum     . graphMap
+  null = Foldable.null . graphMap
   product = Foldable.product . graphMap
-#endif
-#endif
+  sum = Foldable.sum . graphMap
+  toList = Foldable.toList . graphMap
 
 instance (NFData a, NFData (Key a)) => NFData (Graph a) where
   rnf
@@ -295,7 +280,7 @@ cycles g = [vs | CyclicSCC vs <- stronglyConnComp g]
 -- | /O(1)/.  Return a list of nodes paired with their broken
 -- neighbors (i.e., neighbor keys which are not in the graph).
 -- Requires amortized construction of graph.
-broken :: Graph a -> [(a, [Key a])]
+broken :: Graph a -> [(a, NonEmpty (Key a))]
 broken g = graphBroken g
 
 -- | Lookup the immediate neighbors from a key in the graph.
@@ -354,7 +339,7 @@ revTopSort g = map (graphVertexToNode g) $ G.topSort (graphAdjoint g)
 -- if you can't fulfill this invariant use @'fromList' ('Data.Map.elems' m)@
 -- instead.  The values of the map are assumed to already
 -- be in WHNF.
-fromMap :: IsNode a => Map (Key a) a -> Graph a
+fromMap :: forall a. IsNode a => Map (Key a) a -> Graph a
 fromMap m =
   Graph
     { graphMap = m
@@ -363,17 +348,25 @@ fromMap m =
     , graphAdjoint = G.transposeG g
     , graphVertexToNode = vertex_to_node
     , graphKeyToVertex = key_to_vertex
-    , graphBroken = broke
+    , graphBroken =
+        map (\ns'' -> (fst (NE.head ns''), NE.map snd ns'')) $
+          NE.groupWith (nodeKey . fst) brokenEdges'
     }
   where
-    try_key_to_vertex k = maybe (Left k) Right (key_to_vertex k)
+    brokenEdges' :: [(a, Key a)]
+    brokenEdges' = concat brokenEdges
 
+    brokenEdges :: [[(a, Key a)]]
     (brokenEdges, edges) =
-      unzip $
-        [ partitionEithers (map try_key_to_vertex (nodeNeighbors n))
+      unzip
+        [ partitionEithers
+          [ case key_to_vertex n' of
+            Just v -> Right v
+            Nothing -> Left (n, n')
+          | n' <- nodeNeighbors n
+          ]
         | n <- ns
         ]
-    broke = filter (not . Prelude.null . snd) (zip ns brokenEdges)
 
     g = Array.listArray bounds edges
 
@@ -398,6 +391,15 @@ fromDistinctList =
       error $
         "Graph.fromDistinctList: duplicate key: "
           ++ show (nodeKey n)
+
+-- | Like 'fromDistinctList', but for reconstructing a graph whose keys are
+-- already known to be distinct — in particular a graph produced by 'toList'
+-- and round-tripped through the 'Binary'/'Read' instances. It performs no
+-- duplicate-key check, and so (unlike 'fromDistinctList') does not require
+-- @Show (Key a)@.
+fromDistinctListTrusted :: IsNode a => [a] -> Graph a
+fromDistinctListTrusted =
+  fromMap . Map.fromList . map (\n -> n `seq` (nodeKey n, n))
 
 -- Map-like operations
 

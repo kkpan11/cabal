@@ -1,4 +1,3 @@
-{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE RecordWildCards #-}
 
 module Distribution.Client.ProjectBuilding.PackageFileMonitor where
@@ -24,9 +23,9 @@ import Distribution.InstalledPackageInfo (InstalledPackageInfo)
 import Distribution.Simple.LocalBuildInfo
   ( ComponentName (..)
   )
+import Distribution.Simple.Utils (removeFileForcibly)
 
 import qualified Data.Set as Set
-import Distribution.Client.Init.Types (removeExistingFile)
 
 -----------------------------
 -- Package change detection
@@ -151,9 +150,7 @@ checkPackageFileMonitorChanged
         pkgconfig
     case configChanged of
       MonitorChanged monitorReason ->
-        return (Left (BuildStatusConfigure monitorReason'))
-        where
-          monitorReason' = fmap (const ()) monitorReason
+        return (Left (BuildStatusConfigure $ void monitorReason))
       MonitorUnchanged () _
         -- The configChanged here includes the identity of the dependencies,
         -- so depsBuildStatus is just needed for the changes in the content
@@ -182,16 +179,14 @@ checkPackageFileMonitorChanged
               (MonitorChanged monitorReason, _) ->
                 return (Left (BuildStatusBuild mreg buildReason))
                 where
-                  buildReason = BuildReasonFilesChanged monitorReason'
-                  monitorReason' = fmap (const ()) monitorReason
+                  buildReason = BuildReasonFilesChanged $ void monitorReason
               (MonitorUnchanged _ _, MonitorChanged monitorReason) ->
                 -- this should only happen if the file is corrupt or been
                 -- manually deleted. We don't want to bother with another
                 -- phase just for this, so we'll reregister by doing a build.
                 return (Left (BuildStatusBuild Nothing buildReason))
                 where
-                  buildReason = BuildReasonFilesChanged monitorReason'
-                  monitorReason' = fmap (const ()) monitorReason
+                  buildReason = BuildReasonFilesChanged $ void monitorReason
               (MonitorUnchanged _ _, MonitorUnchanged _ _)
                 | pkgHasEphemeralBuildTargets pkg ->
                     return (Left (BuildStatusBuild mreg buildReason))
@@ -204,6 +199,7 @@ checkPackageFileMonitorChanged
                       { buildResultDocs = docsResult
                       , buildResultTests = testsResult
                       , buildResultLogFile = Nothing
+                      , buildResultBenchmark = Nothing
                       }
                 where
                   (docsResult, testsResult) = buildResult
@@ -291,4 +287,4 @@ updatePackageRegFileMonitor
 
 invalidatePackageRegFileMonitor :: PackageFileMonitor -> IO ()
 invalidatePackageRegFileMonitor PackageFileMonitor{pkgFileMonitorReg} =
-  removeExistingFile (fileMonitorCacheFile pkgFileMonitorReg)
+  removeFileForcibly (fileMonitorCacheFile pkgFileMonitorReg)

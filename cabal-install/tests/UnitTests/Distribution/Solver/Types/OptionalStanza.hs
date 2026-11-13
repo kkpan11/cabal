@@ -1,5 +1,3 @@
-{-# LANGUAGE CPP #-}
-
 module UnitTests.Distribution.Solver.Types.OptionalStanza
   ( tests
   ) where
@@ -9,10 +7,6 @@ import UnitTests.Distribution.Client.ArbitraryInstances ()
 
 import Test.Tasty
 import Test.Tasty.QuickCheck
-
-#if !MIN_VERSION_base(4,8,0)
-import Data.Monoid
-#endif
 
 tests :: [TestTree]
 tests =
@@ -29,5 +23,5 @@ tests =
       optStanzaTabulate (optStanzaIndex xs) === (xs :: OptionalStanzaMap Int)
   , testProperty "keysFilteredByValue" $ \xs ->
       let set i = if optStanzaIndex xs i then optStanzaSetSingleton i else mempty
-       in optStanzaKeysFilteredByValue id xs === set TestStanzas `mappend` set BenchStanzas
+       in optStanzaKeysFilteredByValue id xs === set TestStanzas <> set BenchStanzas
   ]

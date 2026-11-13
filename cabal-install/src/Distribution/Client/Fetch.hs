@@ -44,10 +44,6 @@ import Distribution.Package
   ( packageId
   )
 import Distribution.Simple.Compiler
-  ( Compiler
-  , PackageDBStack
-  , compilerInfo
-  )
 import Distribution.Simple.PackageIndex (InstalledPackageIndex)
 import Distribution.Simple.Program
   ( ProgramDb
@@ -64,6 +60,7 @@ import Distribution.Simple.Utils
 import Distribution.System
   ( Platform
   )
+import Distribution.Verbosity (verbosityLevel)
 
 -- ------------------------------------------------------------
 
@@ -88,7 +85,7 @@ import Distribution.System
 -- | Fetch a list of packages and their dependencies.
 fetch
   :: Verbosity
-  -> PackageDBStack
+  -> PackageDBStackCWD
   -> RepoContext
   -> Compiler
   -> Platform
@@ -161,7 +158,7 @@ planPackages
   -> FetchFlags
   -> InstalledPackageIndex
   -> SourcePackageDb
-  -> PkgConfigDb
+  -> Maybe PkgConfigDb
   -> [PackageSpecifier UnresolvedSourcePackage]
   -> IO [UnresolvedSourcePackage]
 planPackages
@@ -210,7 +207,7 @@ planPackages
           . setStrongFlags strongFlags
           . setAllowBootLibInstalls allowBootLibInstalls
           . setOnlyConstrained onlyConstrained
-          . setSolverVerbosity verbosity
+          . setSolverVerbosity (verbosityLevel verbosity)
           . addConstraints
             [ let pc =
                     PackageConstraint

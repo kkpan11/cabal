@@ -1,4 +1,4 @@
-{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE DataKinds #-}
 
 -- |
 -- Module      :  Distribution.PackageDescription.Check
@@ -46,10 +46,14 @@ import Distribution.Compat.Prelude
 import Prelude ()
 
 import Data.List (group)
+import qualified Data.List as L
+import Data.Text (Text)
 import Distribution.CabalSpecVersion
 import Distribution.Compat.Lens
 import Distribution.Compiler
+import Distribution.FieldGrammar.Parsec (freeTextIgnoreDotlineVers)
 import Distribution.License
+import Distribution.ModuleName (toFilePath)
 import Distribution.Package
 import Distribution.PackageDescription
 import Distribution.PackageDescription.Check.Common
@@ -70,25 +74,24 @@ import Distribution.Simple.Glob
 import Distribution.Simple.Utils hiding (findPackageDesc, notice)
 import Distribution.Utils.Generic (isAscii)
 import Distribution.Utils.Path
-  ( LicenseFile
-  , PackageDir
-  , SymbolicPath
-  , getSymbolicPath
-  )
 import Distribution.Verbosity
 import Distribution.Version
-import System.FilePath (splitExtension, takeFileName, (<.>), (</>))
+import System.FilePath (splitExtension, takeFileName)
 
 import qualified Data.ByteString.Lazy as BS
 import qualified Distribution.SPDX as SPDX
 import qualified System.Directory as System
 
-import qualified System.Directory (getDirectoryContents)
+import qualified System.Directory (listDirectory)
 import qualified System.FilePath.Windows as FilePath.Windows (isValid)
 
 import qualified Data.Set as Set
+import qualified Data.Text as Text
 import qualified Distribution.Utils.ShortText as ShortText
+import qualified Distribution.Utils.String as String
 
+import qualified Distribution.Compat.Lens as L
+import qualified Distribution.Types.BuildInfo.Lens as L
 import qualified Distribution.Types.GenericPackageDescription.Lens as L
 
 import Control.Monad
@@ -175,16 +178,17 @@ checkPackageFilesGPD verbosity gpd root =
       CheckPackageContentOps
         { doesFileExist = System.doesFileExist . relative
         , doesDirectoryExist = System.doesDirectoryExist . relative
-        , getDirectoryContents = System.Directory.getDirectoryContents . relative
+        , listDirectory = System.Directory.listDirectory . relative
         , getFileContents = BS.readFile . relative
         }
 
     checkPreIO =
       CheckPreDistributionOps
         { runDirFileGlobM = \fp g -> runDirFileGlob verbosity (Just . specVersion $ packageDescription gpd) (root </> fp) g
-        , getDirectoryContentsM = System.Directory.getDirectoryContents . relative
+        , listDirectoryM = System.Directory.listDirectory . relative
         }
 
+    relative :: FilePath -> FilePath
     relative path = root </> path
 
 -- | Same as  'checkPackageFilesGPD', but working with 'PackageDescription'.
@@ -242,7 +246,7 @@ checkGenericPackageDescription
       -- Targets should be present...
       let condAllLibraries =
             maybeToList condLibrary_
-              ++ (map snd condSubLibraries_)
+              ++ map snd condSubLibraries_
       checkP
         ( and
             [ null condExecutables_
@@ -271,8 +275,6 @@ checkGenericPackageDescription
       checkP
         (not . null $ dups names)
         (PackageBuildImpossible $ DuplicateSections dupes)
-      -- PackageDescription checks.
-      checkPackageDescription packageDescription_
       -- Flag names.
       mapM_ checkFlagName genPackageFlags_
 
@@ -353,6 +355,18 @@ checkGenericPackageDescription
 
       -- Duplicate modules.
       mapM_ tellP (checkDuplicateModules gpd)
+
+      -- Module name checks (path validity on Windows and tar).
+      -- We collect all unique module names from the GPD and check each
+      -- once, rather than re-checking in every conditional branch.
+      let allModuleNames =
+            Set.fromList $
+              maybe [] (explicitLibModules . ignoreConditions) condLibrary_
+                ++ concatMap (explicitLibModules . ignoreConditions . snd) condSubLibraries_
+                ++ concatMap (exeModules . ignoreConditions . snd) condExecutables_
+                ++ concatMap (testModules . ignoreConditions . snd) condTestSuites_
+                ++ concatMap (benchmarkModules . ignoreConditions . snd) condBenchmarks_
+      mapM_ (\m -> checkPackageFileNamesWithGlob PathKindFile (toFilePath m)) allModuleNames
     where
       -- todo is this caught at parse time?
       checkFlagName :: Monad m => PackageFlag -> CheckM m ()
@@ -412,6 +426,7 @@ checkPackageDescription
           extraSrcFiles_
           extraTmpFiles_
           extraDocFiles_
+          extraFiles_
         ) = do
     -- § Sanity checks.
     checkPackageId package_
@@ -427,7 +442,7 @@ checkPackageDescription
     -- But it is OK for executables to have the same name.
     nsubs <- asksCM (pnSubLibs . ccNames)
     checkP
-      (any (== prettyShow pn) (prettyShow <$> nsubs))
+      (prettyShow pn `elem` (prettyShow <$> nsubs))
       (PackageBuildImpossible $ IllegalLibraryName pn)
 
     -- § Fields check.
@@ -455,27 +470,45 @@ checkPackageDescription
       )
       (PackageDistSuspicious ShortDesc)
 
+    -- § Freeform fields no longer include "dotlines". Generally taken from
+    -- Distribution.PackageDescription.FieldGrammar fields that use some
+    -- freeTextField parser.
+    checkDotline "author" _author_
+    checkDotline "bug-reports" _bugReports_
+    checkDotline "category" category_
+    checkDotline "copyright" _copyright_
+    checkDotline "description" description_
+    checkDotline "homepage" _homepage_
+    checkDotline "maintainer" maintainer_
+    checkDotline "package-url" _pkgUrl_
+    checkDotline "stability" _stability_
+    checkDotline "synopsis" synopsis_
+
     -- § Paths.
-    mapM_ (checkPath False "extra-source-files" PathKindGlob) extraSrcFiles_
-    mapM_ (checkPath False "extra-tmp-files" PathKindFile) extraTmpFiles_
-    mapM_ (checkPath False "extra-doc-files" PathKindGlob) extraDocFiles_
-    mapM_ (checkPath False "data-files" PathKindGlob) dataFiles_
-    checkPath True "data-dir" PathKindDirectory dataDir_
+    mapM_ (checkPath False "extra-source-files" PathKindGlob . getSymbolicPath) extraSrcFiles_
+    mapM_ (checkPath False "extra-tmp-files" PathKindFile . getSymbolicPath) extraTmpFiles_
+    mapM_ (checkPath False "extra-doc-files" PathKindGlob . getSymbolicPath) extraDocFiles_
+    mapM_ (checkPath False "extra-files" PathKindGlob . getSymbolicPath) extraFiles_
+    mapM_ (checkPath False "data-files" PathKindGlob . getSymbolicPath) dataFiles_
+    let rawDataDir = getSymbolicPath dataDir_
+    checkPath True "data-dir" PathKindDirectory rawDataDir
     let licPaths = map getSymbolicPath licenseFiles_
     mapM_ (checkPath False "license-file" PathKindFile) licPaths
     mapM_ checkLicFileExist licenseFiles_
 
     -- § Globs.
-    dataGlobs <- mapM (checkGlob "data-files") dataFiles_
-    extraGlobs <- mapM (checkGlob "extra-source-files") extraSrcFiles_
-    docGlobs <- mapM (checkGlob "extra-doc-files") extraDocFiles_
+    dataGlobs <- mapM (checkGlob "data-files" . getSymbolicPath) dataFiles_
+    extraSrcGlobs <- mapM (checkGlob "extra-source-files" . getSymbolicPath) extraSrcFiles_
+    docGlobs <- mapM (checkGlob "extra-doc-files" . getSymbolicPath) extraDocFiles_
+    extraGlobs <- mapM (checkGlob "extra-files" . getSymbolicPath) extraFiles_
     -- We collect globs to feed them to checkMissingDocs.
 
     -- § Missing documentation.
     checkMissingDocs
       (catMaybes dataGlobs)
-      (catMaybes extraGlobs)
+      (catMaybes extraSrcGlobs)
       (catMaybes docGlobs)
+      (catMaybes extraGlobs)
 
     -- § Datafield checks.
     checkSetupBuildInfo setupBuildInfo_
@@ -507,21 +540,22 @@ checkPackageDescription
       ( isNothing setupBuildInfo_
           && buildTypeRaw_ == Just Custom
       )
-      (PackageDistSuspiciousWarn CVExpliticDepsCustomSetup)
+      (PackageDistSuspiciousWarn CVExplicitDepsCustomSetup)
     checkP
       (isNothing buildTypeRaw_ && specVersion_ < CabalSpecV2_2)
       (PackageBuildWarning NoBuildType)
     checkP
-      (isJust setupBuildInfo_ && buildType pkg /= Custom)
+      (isJust setupBuildInfo_ && buildType pkg `notElem` [Custom, Hooks])
       (PackageBuildWarning NoCustomSetup)
 
     -- Contents.
     checkConfigureExists (buildType pkg)
     checkSetupExists (buildType pkg)
     checkCabalFile (packageName pkg)
-    mapM_ (checkGlobFile specVersion_ "." "extra-source-files") extraSrcFiles_
-    mapM_ (checkGlobFile specVersion_ "." "extra-doc-files") extraDocFiles_
-    mapM_ (checkGlobFile specVersion_ dataDir_ "data-files") dataFiles_
+    mapM_ (checkGlobFile specVersion_ "." "extra-source-files" . getSymbolicPath) extraSrcFiles_
+    mapM_ (checkGlobFile specVersion_ "." "extra-doc-files" . getSymbolicPath) extraDocFiles_
+    mapM_ (checkGlobFile specVersion_ "." "extra-files" . getSymbolicPath) extraFiles_
+    mapM_ (checkGlobFile specVersion_ rawDataDir "data-files" . getSymbolicPath) dataFiles_
     where
       checkNull
         :: Monad m
@@ -556,6 +590,19 @@ checkPackageDescription
              in tellP (PackageDistInexcusable (InvalidTestWith dep))
           )
 
+-- | Issue a warning if the text contains any "dotlines".
+checkDotline :: Monad m => String -> ShortText.ShortText -> CheckM m ()
+checkDotline fieldName fieldVal = do
+  checkSpecVerGte
+    freeTextIgnoreDotlineVers
+    (hasDotline fieldVal)
+    (PackageDistSuspiciousWarn $ FreeTextDotline fieldName)
+  where
+    hasDotline =
+      L.any ((== ".") . String.trim)
+        . L.lines
+        . ShortText.fromShortText
+
 checkSetupBuildInfo :: Monad m => Maybe SetupBuildInfo -> CheckM m ()
 checkSetupBuildInfo Nothing = return ()
 checkSetupBuildInfo (Just (SetupBuildInfo ds _)) = do
@@ -565,16 +612,27 @@ checkSetupBuildInfo (Just (SetupBuildInfo ds _)) = do
       rck =
         PackageDistSuspiciousWarn
           . MissingUpperBounds CETSetup
-  checkPVP ick is
-  checkPVPs rck rs
+      leuck =
+        PackageDistSuspiciousWarn
+          . LEUpperBounds CETSetup
+      tzuck =
+        PackageDistSuspiciousWarn
+          . TrailingZeroUpperBounds CETSetup
+      gtlck =
+        PackageDistSuspiciousWarn
+          . GTLowerBounds CETSetup
+  checkPVP (checkDependencyVersionRange $ not . hasUpperBound) ick is
+  checkPVPs (checkDependencyVersionRange $ not . hasUpperBound) rck rs
+  checkPVPs (checkDependencyVersionRange hasLEUpperBound) leuck ds
+  checkPVPs (checkDependencyVersionRange hasTrailingZeroUpperBound) tzuck ds
+  checkPVPs (checkDependencyVersionRange hasGTLowerBound) gtlck ds
 
 checkPackageId :: Monad m => PackageIdentifier -> CheckM m ()
 checkPackageId (PackageIdentifier pkgName_ _pkgVersion_) = do
   checkP
     (not . FilePath.Windows.isValid . prettyShow $ pkgName_)
     (PackageDistInexcusable $ InvalidNameWin pkgName_)
-  checkP (isPrefixOf "z-" . prettyShow $ pkgName_) $
-    (PackageDistInexcusable ZPrefix)
+  checkP (isPrefixOf "z-" . prettyShow $ pkgName_) (PackageDistInexcusable ZPrefix)
 
 checkNewLicense :: Monad m => SPDX.License -> CheckM m ()
 checkNewLicense lic = do
@@ -616,7 +674,7 @@ checkOldLicense nullLicFiles lic = do
         -- licenses so don't need license files.
         nullLicFiles
     )
-    $ (PackageDistSuspicious NoLicenseFile)
+    (PackageDistSuspicious NoLicenseFile)
   case unknownLicenseVersion lic of
     Just knownVersions ->
       tellP
@@ -681,6 +739,7 @@ checkSourceRepos rs = do
         checkP
           (isNothing repoLocation_)
           (PackageDistInexcusable MissingLocation)
+        checkGitProtocol repoLocation_
         checkP
           ( repoType_ == Just (KnownRepoType CVS)
               && isNothing repoModule_
@@ -692,7 +751,7 @@ checkSourceRepos rs = do
         checkP
           (any isAbsoluteOnAnyPlatform repoSubdir_)
           (PackageDistInexcusable SubdirRelPath)
-        case join . fmap isGoodRelativeDirectoryPath $ repoSubdir_ of
+        case isGoodRelativeDirectoryPath =<< repoSubdir_ of
           Just err ->
             tellP
               (PackageDistInexcusable $ SubdirGoodRelPath err)
@@ -719,6 +778,17 @@ checkMissingVcsInfo rs =
     repoTypeDirname Monotone = ["_MTN"]
     repoTypeDirname Pijul = [".pijul"]
 
+-- git:// lacks TLS or other encryption, see
+-- https://git-scm.com/book/en/v2/Git-on-the-Server-The-Protocols#_the_cons_4
+checkGitProtocol
+  :: Monad m
+  => Maybe Text -- Repository location
+  -> CheckM m ()
+checkGitProtocol mloc =
+  checkP
+    (fmap (Text.isPrefixOf (Text.pack "git://")) mloc == Just True)
+    (PackageBuildWarning GitProtocol)
+
 -- ------------------------------------------------------------
 -- Package and distribution checks
 -- ------------------------------------------------------------
@@ -729,7 +799,7 @@ checkMissingVcsInfo rs =
 findPackageDesc :: Monad m => CheckPackageContentOps m -> m [FilePath]
 findPackageDesc ops = do
   let dir = "."
-  files <- getDirectoryContents ops dir
+  files <- listDirectory ops dir
   -- to make sure we do not mistake a ~/.cabal/ dir for a <name>.cabal
   -- file we filter to exclude dirs and null base file names:
   cabalFiles <-
@@ -786,7 +856,7 @@ checkCabalFile pn = do
 
 checkLicFileExist
   :: Monad m
-  => SymbolicPath PackageDir LicenseFile
+  => RelativePath Pkg File
   -> CheckM m ()
 checkLicFileExist sp = do
   let fp = getSymbolicPath sp
@@ -808,7 +878,9 @@ checkSetupExists _ =
     ( \ops -> do
         ba <- doesFileExist ops "Setup.hs"
         bb <- doesFileExist ops "Setup.lhs"
-        return (not $ ba || bb)
+        bc <- doesFileExist ops "SetupHooks.hs"
+        bd <- doesFileExist ops "SetupHooks.lhs"
+        return (not $ ba || bb || bc || bd)
     )
     (PackageDistInexcusable MissingSetupFile)
 
@@ -857,7 +929,7 @@ checkGlobResult
   -- one).
   -> [GlobResult FilePath] -- List of glob results.
   -> [PackageCheck]
-checkGlobResult title fp rs = dirCheck ++ catMaybes (map getWarning rs)
+checkGlobResult title fp rs = dirCheck ++ mapMaybe getWarning rs
   where
     dirCheck
       | all (not . withoutNoMatchesWarning) rs =
@@ -911,14 +983,14 @@ wrapParseWarning fp pw = PackageDistSuspicious (ParseWarning fp pw)
 -- each of those branch will be checked one by one.
 extractAssocDeps
   :: UnqualComponentName -- Name of the target library
-  -> CondTree ConfVar [Dependency] Library
+  -> CondTree ConfVar Library
   -> AssocDep
 extractAssocDeps n ct =
   let a = ignoreConditions ct
    in -- Merging is fine here, remember the specific
       -- library dependencies will be checked branch
       -- by branch.
-      (n, snd a)
+      (n, L.view L.targetBuildDepends a)
 
 -- | August 2022: this function is an oddity due to the historical
 -- GenericPackageDescription/PackageDescription split (check
@@ -954,8 +1026,8 @@ pd2gpd pd = gpd
         }
 
     -- From target to simple, unconditional CondTree.
-    t2c :: a -> CondTree ConfVar [Dependency] a
-    t2c a = CondNode a [] []
+    t2c :: a -> CondTree ConfVar a
+    t2c a = CondNode a []
 
     -- From named target to unconditional CondTree. Notice we have
     -- a function to extract the name *and* a function to modify
@@ -965,7 +1037,7 @@ pd2gpd pd = gpd
       :: (a -> UnqualComponentName)
       -> (a -> a)
       -> a
-      -> (UnqualComponentName, CondTree ConfVar [Dependency] a)
+      -> (UnqualComponentName, CondTree ConfVar a)
     t2cName nf mf a = (nf a, t2c . mf $ a)
 
     ln :: Library -> UnqualComponentName
@@ -987,8 +1059,9 @@ checkMissingDocs
   => [Glob] -- data-files globs.
   -> [Glob] -- extra-source-files globs.
   -> [Glob] -- extra-doc-files globs.
+  -> [Glob] -- extra-files globs.
   -> CheckM m ()
-checkMissingDocs dgs esgs edgs = do
+checkMissingDocs dgs esgs edgs efgs = do
   extraDocSupport <- (>= CabalSpecV1_18) <$> asksCM ccSpecVersion
 
   -- Everything in this block uses CheckPreDistributionOps interface.
@@ -996,8 +1069,8 @@ checkMissingDocs dgs esgs edgs = do
     ciPreDistOps
     ( \ops -> do
         -- 1. Get root files, see if they are interesting to us.
-        rootContents <- getDirectoryContentsM ops "."
-        -- Recall getDirectoryContentsM arg is relative to root path.
+        rootContents <- listDirectoryM ops "."
+        -- Recall listDirectoryM arg is relative to root path.
         let des = filter isDesirableExtraDocFile rootContents
 
         -- 2. Realise Globs.
@@ -1007,9 +1080,10 @@ checkMissingDocs dgs esgs edgs = do
         rgs <- realGlob dgs
         res <- realGlob esgs
         red <- realGlob edgs
+        ref <- realGlob efgs
 
         -- 3. Check if anything in 1. is missing in 2.
-        let mcs = checkDoc extraDocSupport des (rgs ++ res ++ red)
+        let mcs = checkDoc extraDocSupport des (rgs ++ res ++ red ++ ref)
 
         -- 4. Check if files are present but in the wrong field.
         let pcsData = checkDocMove extraDocSupport "data-files" des rgs
@@ -1033,13 +1107,10 @@ checkMissingDocs dgs esgs edgs = do
       -> [FilePath] -- Actuals.
       -> [PackageCheck]
     checkDoc b ds as =
-      let fds = map ("." </>) $ filter (flip notElem as) ds
-       in if null fds
-            then []
-            else
-              [ PackageDistSuspiciousWarn $
-                  MissingExpectedDocFiles b fds
-              ]
+      [ PackageDistSuspiciousWarn $ MissingExpectedDocFiles b fds
+      | let fds = map ("." </>) $ filter (`notElem` as) ds
+      , not (null fds)
+      ]
 
     checkDocMove
       :: Bool -- Cabal spec ≥ 1.18?
@@ -1048,13 +1119,10 @@ checkMissingDocs dgs esgs edgs = do
       -> [FilePath] -- Actuals.
       -> [PackageCheck]
     checkDocMove b field ds as =
-      let fds = filter (flip elem as) ds
-       in if null fds
-            then []
-            else
-              [ PackageDistSuspiciousWarn $
-                  WrongFieldForExpectedDocFiles b field fds
-              ]
+      [ PackageDistSuspiciousWarn $ WrongFieldForExpectedDocFiles b field fds
+      | let fds = filter (`elem` as) ds
+      , not (null fds)
+      ]
 
 -- Predicate for desirable documentation file on Hackage server.
 isDesirableExtraDocFile :: FilePath -> Bool

@@ -1,9 +1,7 @@
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 module Distribution.Solver.Types.Settings
     ( ReorderGoals(..)
     , IndependentGoals(..)
-    , PreferOldest(..)
+    , PreferVersion(..)
     , MinimizeConflictSet(..)
     , AvoidReinstalls(..)
     , ShadowPkgs(..)
@@ -41,8 +39,11 @@ newtype MinimizeConflictSet = MinimizeConflictSet Bool
 newtype IndependentGoals = IndependentGoals Bool
   deriving (BooleanFlag, Eq, Generic, Show)
 
-newtype PreferOldest = PreferOldest Bool
-  deriving (BooleanFlag, Eq, Generic, Show)
+data PreferVersion =
+  PreferOldest
+  | PreferLatest
+  | PreferInstalledOrLatest
+  deriving (Eq, Generic, Show)
 
 newtype AvoidReinstalls = AvoidReinstalls Bool
   deriving (BooleanFlag, Eq, Generic, Show)
@@ -73,7 +74,7 @@ instance Binary ReorderGoals
 instance Binary CountConflicts
 instance Binary FineGrainedConflicts
 instance Binary IndependentGoals
-instance Binary PreferOldest
+instance Binary PreferVersion
 instance Binary MinimizeConflictSet
 instance Binary AvoidReinstalls
 instance Binary ShadowPkgs
@@ -86,7 +87,7 @@ instance Structured ReorderGoals
 instance Structured CountConflicts
 instance Structured FineGrainedConflicts
 instance Structured IndependentGoals
-instance Structured PreferOldest
+instance Structured PreferVersion
 instance Structured MinimizeConflictSet
 instance Structured AvoidReinstalls
 instance Structured ShadowPkgs
@@ -95,9 +96,26 @@ instance Structured AllowBootLibInstalls
 instance Structured OnlyConstrained
 instance Structured SolveExecutables
 
+instance NFData ReorderGoals
+instance NFData CountConflicts
+instance NFData FineGrainedConflicts
+instance NFData IndependentGoals
+instance NFData PreferVersion
+instance NFData MinimizeConflictSet
+instance NFData AvoidReinstalls
+instance NFData ShadowPkgs
+instance NFData StrongFlags
+instance NFData AllowBootLibInstalls
+instance NFData OnlyConstrained
+
 instance Pretty OnlyConstrained where
   pretty OnlyConstrainedAll  = PP.text "all"
   pretty OnlyConstrainedNone = PP.text "none"
+
+instance Pretty PreferVersion where
+  pretty PreferOldest = PP.text "oldest"
+  pretty PreferLatest = PP.text "latest"
+  pretty PreferInstalledOrLatest = PP.text "installed-or-latest"
 
 instance Parsec OnlyConstrained where
   parsec = P.choice
@@ -105,3 +123,30 @@ instance Parsec OnlyConstrained where
     , P.string "none" >> return OnlyConstrainedNone
     ]
 
+instance Parsec ReorderGoals where
+  parsec = ReorderGoals <$> parsec
+
+instance Parsec CountConflicts where
+  parsec = CountConflicts <$> parsec
+
+instance Parsec FineGrainedConflicts where
+  parsec = FineGrainedConflicts <$> parsec
+
+instance Parsec MinimizeConflictSet where
+  parsec = MinimizeConflictSet <$> parsec
+
+instance Parsec StrongFlags where
+  parsec = StrongFlags <$> parsec
+
+instance Parsec AllowBootLibInstalls where
+  parsec = AllowBootLibInstalls <$> parsec
+
+instance Parsec PreferVersion where
+  parsec = P.choice
+    [ P.string "oldest"  >> return PreferOldest
+    , P.string "latest" >> return PreferLatest
+    , P.string "installed-or-latest" >> return PreferInstalledOrLatest
+    ]
+
+instance Parsec IndependentGoals where
+  parsec = IndependentGoals <$> parsec

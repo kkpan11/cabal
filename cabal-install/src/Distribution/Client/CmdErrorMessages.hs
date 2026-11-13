@@ -1,7 +1,3 @@
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE NamedFieldPuns #-}
-{-# LANGUAGE RecordWildCards #-}
-
 -- | Utilities to help format error messages for the various CLI commands.
 module Distribution.Client.CmdErrorMessages
   ( module Distribution.Client.CmdErrorMessages

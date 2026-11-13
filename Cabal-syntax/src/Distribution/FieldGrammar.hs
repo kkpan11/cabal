@@ -1,7 +1,3 @@
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-
 -- | This module provides a way to specify a grammar of @.cabal@ -like files.
 module Distribution.FieldGrammar
   ( -- * Field grammar type
@@ -15,6 +11,7 @@ module Distribution.FieldGrammar
   , ParsecFieldGrammar
   , ParsecFieldGrammar'
   , parseFieldGrammar
+  , parseFieldGrammarCheckingStanzas
   , fieldGrammarKnownFieldList
   , PrettyFieldGrammar
   , PrettyFieldGrammar'
@@ -28,7 +25,6 @@ module Distribution.FieldGrammar
   , takeFields
   , runFieldParser
   , runFieldParser'
-  , defaultFreeTextFieldDefST
 
     -- * Newtypes
   , module Distribution.FieldGrammar.Newtypes
@@ -65,6 +61,20 @@ x ^^^ f = f x
 data PS ann = PS (Fields ann) [Section ann] [[Section ann]]
 
 -- | Partition field list into field map and groups of sections.
+-- Groups sections between fields. This means that the following snippet contains
+-- two section groups:
+--
+-- @
+-- -- first group
+-- some-section
+--     field: value
+-- another-section
+--     field: value
+-- foo: bar
+-- -- second group
+-- yet-another-section
+--     field: value
+-- @
 partitionFields :: [Field ann] -> (Fields ann, [[Section ann]])
 partitionFields = finalize . foldl' f (PS mempty mempty mempty)
   where

@@ -1,6 +1,3 @@
-{-# LANGUAGE DeriveFunctor #-}
-{-# LANGUAGE DeriveGeneric #-}
-
 module Distribution.Client.Types.PackageLocation
   ( PackageLocation (..)
   , UnresolvedPkgLoc
@@ -11,12 +8,14 @@ module Distribution.Client.Types.PackageLocation
 import Distribution.Client.Compat.Prelude
 import Prelude ()
 
+import qualified Data.Text as T
 import Network.URI (URI)
 
 import Distribution.Types.PackageId (PackageId)
 
 import Distribution.Client.Types.Repo
-import Distribution.Client.Types.SourceRepo (SourceRepoMaybe)
+import Distribution.Client.Types.SourceRepo (SourceRepoMaybe, SourceRepositoryPackage (..))
+import Distribution.Pretty
 import Distribution.Solver.Types.SourcePackage (SourcePackage)
 
 type UnresolvedPkgLoc = PackageLocation (Maybe FilePath)
@@ -37,7 +36,15 @@ data PackageLocation local
     RepoTarballPackage Repo PackageId local
   | -- | A package available from a version control system source repository
     RemoteSourceRepoPackage SourceRepoMaybe local
-  deriving (Show, Functor, Eq, Ord, Generic, Typeable)
+  deriving (Show, Functor, Eq, Ord, Generic)
+
+instance Pretty (PackageLocation local) where
+  pretty (LocalUnpackedPackage fp) = showFilePath fp
+  pretty (LocalTarballPackage fp) = showFilePath fp
+  pretty (RemoteTarballPackage uri _) = showToken $ show uri
+  pretty (RepoTarballPackage repo pid _) = pretty pid <> showToken "@" <> pretty (repoName repo)
+  pretty (RemoteSourceRepoPackage sourceRepo _) =
+    pretty (srpType sourceRepo) <+> showToken (T.unpack (srpLocation sourceRepo))
 
 instance Binary local => Binary (PackageLocation local)
 instance Structured local => Structured (PackageLocation local)

@@ -1,7 +1,4 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-
------------------------------------------------------------------------------
+{-# LANGUAGE DataKinds #-}
 
 -- |
 -- Module      :  Distribution.Simple.Compiler
@@ -34,11 +31,22 @@ module Distribution.Simple.Compiler
   , compilerInfo
 
     -- * Support for package databases
-  , PackageDB (..)
+  , PackageDB
   , PackageDBStack
+  , PackageDBCWD
+  , PackageDBStackCWD
+  , PackageDBX (..)
+  , PackageDBStackX
+  , PackageDBS
+  , PackageDBStackS
   , registrationPackageDB
   , absolutePackageDBPaths
   , absolutePackageDBPath
+  , interpretPackageDB
+  , interpretPackageDBStack
+  , coercePackageDB
+  , coercePackageDBStack
+  , readPackageDb
 
     -- * Support for optimisation levels
   , OptimisationLevel (..)
@@ -62,12 +70,20 @@ module Distribution.Simple.Compiler
   , unitIdSupported
   , coverageSupported
   , profilingSupported
+  , profilingDynamicSupported
+  , profilingDynamicSupportedOrUnknown
+  , profilingVanillaSupported
+  , profilingVanillaSupportedOrUnknown
+  , dynamicSupported
+  , bytecodeArtifactsSupported
   , backpackSupported
   , arResponseFilesSupported
   , arDashLSupported
   , libraryDynDirSupported
   , libraryVisibilitySupported
   , jsemSupported
+  , jsemVersion
+  , reexportedAsSupported
 
     -- * Support for profiling detail levels
   , ProfDetailLevel (..)
@@ -76,15 +92,24 @@ module Distribution.Simple.Compiler
   , showProfDetailLevel
   ) where
 
+import Distribution.Compat.CharParsing
 import Distribution.Compat.Prelude
+import Distribution.Parsec
 import Distribution.Pretty
 import Prelude ()
 
 import Distribution.Compiler
+import Distribution.Package (PackageName, mkPackageName, unPackageName)
 import Distribution.Simple.Utils
+import Distribution.Types.UnitId (UnitId, mkUnitId, unUnitId)
+import Distribution.Utils.Path
 import Distribution.Version
+
+import qualified Text.Read as Read
+
 import Language.Haskell.Extension
 
+import Data.Bool (bool)
 import qualified Data.Map as Map (lookup)
 import System.Directory (canonicalizePath)
 
@@ -101,13 +126,110 @@ data Compiler = Compiler
   -- ^ Supported language standards.
   , compilerExtensions :: [(Extension, Maybe CompilerFlag)]
   -- ^ Supported extensions.
+  , compilerWiredInUnitIds :: Maybe [(PackageName, UnitId)]
+  -- ^ 'UnitId's that the compiler doesn't support reinstalling.
+  -- For instance, when using GHC plugins, one wants to use the exact same
+  -- version of the `ghc` package as the one the compiler was linked against.
+  -- 'Nothing' indicates that the compiler hasn't supplied this
+  -- information and that we should act pessimistically.
   , compilerProperties :: Map String String
   -- ^ A key-value map for properties not covered by the above fields.
   }
-  deriving (Eq, Generic, Typeable, Show, Read)
+  deriving (Eq, Generic)
 
 instance Binary Compiler
+instance NFData Compiler
 instance Structured Compiler
+
+instance Show Compiler where
+  showsPrec d (Compiler cid abi compat langs exts wired props) =
+    showParen (d > 10) $
+      showString "Compiler {compilerId = "
+        . shows cid
+        . showString ", compilerAbiTag = "
+        . shows abi
+        . showString ", compilerCompat = "
+        . shows compat
+        . showString ", compilerLanguages = "
+        . shows langs
+        . showString ", compilerExtensions = "
+        . shows exts
+        . showString ", compilerWiredInUnitIds = "
+        . showsWiredInUnitIds wired
+        . showString ", compilerProperties = "
+        . shows props
+        . showChar '}'
+    where
+      showsWiredInUnitIds Nothing = showString "Nothing"
+      showsWiredInUnitIds (Just us) =
+        showString "Just ["
+          . foldr (.) id (intersperse (showString ",") (map (uncurry showsWiredInUnitId) us))
+          . showChar ']'
+
+      showsWiredInUnitId pn uid =
+        showString "(mkPackageName "
+          . shows (unPackageName pn)
+          . showString ",mkUnitId "
+          . shows (unUnitId uid)
+          . showChar ')'
+
+instance Read Compiler where
+  readPrec = Read.parens $ Read.prec 10 $ do
+    Read.Ident "Compiler" <- Read.lexP
+    Read.Punc "{" <- Read.lexP
+    cid <- readField "compilerId" Read.readPrec
+    comma
+    abi <- readField "compilerAbiTag" Read.readPrec
+    comma
+    compat <- readField "compilerCompat" Read.readPrec
+    comma
+    langs <- readField "compilerLanguages" Read.readPrec
+    comma
+    exts <- readField "compilerExtensions" Read.readPrec
+    comma
+    wired <- readField "compilerWiredInUnitIds" readWiredInUnitIds
+    comma
+    props <- readField "compilerProperties" Read.readPrec
+    Read.Punc "}" <- Read.lexP
+    pure (Compiler cid abi compat langs exts wired props)
+    where
+      comma = do
+        Read.Punc "," <- Read.lexP
+        pure ()
+
+      readField name k = do
+        Read.Ident name' <- Read.lexP
+        guard (name' == name)
+        Read.Punc "=" <- Read.lexP
+        k
+
+      readWiredInUnitIds :: Read.ReadPrec (Maybe [(PackageName, UnitId)])
+      readWiredInUnitIds = parseNothing <|> parseJust
+        where
+          parseNothing = do
+            Read.Ident "Nothing" <- Read.lexP
+            pure Nothing
+          parseJust = do
+            Read.Ident "Just" <- Read.lexP
+            Read.Punc "[" <- Read.lexP
+            us <- endOfList <|> parseUs
+            pure (Just us)
+          endOfList = do
+            Read.Punc "]" <- Read.lexP
+            pure []
+          parseUs = do
+            u <- readWiredInUnitId
+            us <- endOfList <|> (comma >> parseUs)
+            pure (u : us)
+          readWiredInUnitId = do
+            Read.Punc "(" <- Read.lexP
+            Read.Ident "mkPackageName" <- Read.lexP
+            pn <- mkPackageName <$> Read.readPrec
+            Read.Punc "," <- Read.lexP
+            Read.Ident "mkUnitId" <- Read.lexP
+            uid <- mkUnitId <$> Read.readPrec
+            Read.Punc ")" <- Read.lexP
+            pure (pn, uid)
 
 showCompilerId :: Compiler -> String
 showCompilerId = prettyShow . compilerId
@@ -128,7 +250,7 @@ compilerVersion = (\(CompilerId _ v) -> v) . compilerId
 -- | Is this compiler compatible with the compiler flavour we're interested in?
 --
 -- For example this checks if the compiler is actually GHC or is another
--- compiler that claims to be compatible with some version of GHC, e.g. GHCJS.
+-- compiler that claims to be compatible with some version of GHC.
 --
 -- > if compilerCompatFlavor GHC compiler then ... else ...
 compilerCompatFlavor :: CompilerFlavor -> Compiler -> Bool
@@ -159,6 +281,7 @@ compilerInfo c =
     (Just . compilerCompat $ c)
     (Just . map fst . compilerLanguages $ c)
     (Just . map fst . compilerExtensions $ c)
+    (compilerWiredInUnitIds c)
 
 -- ------------------------------------------------------------
 
@@ -172,14 +295,27 @@ compilerInfo c =
 --  the file system. This can be used to build isolated environments of
 --  packages, for example to build a collection of related packages
 --  without installing them globally.
-data PackageDB
+--
+--  Abstracted over
+data PackageDBX fp
   = GlobalPackageDB
   | UserPackageDB
-  | SpecificPackageDB FilePath
-  deriving (Eq, Generic, Ord, Show, Read, Typeable)
+  | -- | NB: the path might be relative or it might be absolute
+    SpecificPackageDB fp
+  deriving (Eq, Generic, Ord, Show, Read, Functor, Foldable, Traversable)
 
-instance Binary PackageDB
-instance Structured PackageDB
+instance Binary fp => Binary (PackageDBX fp)
+instance NFData fp => NFData (PackageDBX fp)
+instance Structured fp => Structured (PackageDBX fp)
+
+-- | Parse a PackageDB stack entry
+--
+-- @since 3.7.0.0
+readPackageDb :: String -> Maybe PackageDB
+readPackageDb "clear" = Nothing
+readPackageDb "global" = Just GlobalPackageDB
+readPackageDb "user" = Just UserPackageDB
+readPackageDb other = Just (SpecificPackageDB (makeSymbolicPath other))
 
 -- | We typically get packages from several databases, and stack them
 -- together. This type lets us be explicit about that stacking. For example
@@ -196,24 +332,63 @@ instance Structured PackageDB
 -- we can use several custom package dbs and the user package db together.
 --
 -- When it comes to writing, the top most (last) package is used.
-type PackageDBStack = [PackageDB]
+type PackageDBStackX from = [PackageDBX from]
+
+type PackageDB = PackageDBX (SymbolicPath Pkg (Dir PkgDB))
+type PackageDBStack = PackageDBStackX (SymbolicPath Pkg (Dir PkgDB))
+
+type PackageDBS from = PackageDBX (SymbolicPath from (Dir PkgDB))
+type PackageDBStackS from = PackageDBStackX (SymbolicPath from (Dir PkgDB))
+
+type PackageDBCWD = PackageDBX FilePath
+type PackageDBStackCWD = PackageDBStackX FilePath
 
 -- | Return the package that we should register into. This is the package db at
 -- the top of the stack.
-registrationPackageDB :: PackageDBStack -> PackageDB
+registrationPackageDB :: PackageDBStackX from -> PackageDBX from
 registrationPackageDB dbs = case safeLast dbs of
   Nothing -> error "internal error: empty package db set"
   Just p -> p
 
 -- | Make package paths absolute
-absolutePackageDBPaths :: PackageDBStack -> IO PackageDBStack
-absolutePackageDBPaths = traverse absolutePackageDBPath
+absolutePackageDBPaths
+  :: Maybe (SymbolicPath CWD (Dir Pkg))
+  -> PackageDBStack
+  -> IO PackageDBStack
+absolutePackageDBPaths mbWorkDir = traverse $ absolutePackageDBPath mbWorkDir
 
-absolutePackageDBPath :: PackageDB -> IO PackageDB
-absolutePackageDBPath GlobalPackageDB = return GlobalPackageDB
-absolutePackageDBPath UserPackageDB = return UserPackageDB
-absolutePackageDBPath (SpecificPackageDB db) =
-  SpecificPackageDB `liftM` canonicalizePath db
+absolutePackageDBPath
+  :: Maybe (SymbolicPath CWD (Dir Pkg))
+  -> PackageDB
+  -> IO PackageDB
+absolutePackageDBPath _ GlobalPackageDB = return GlobalPackageDB
+absolutePackageDBPath _ UserPackageDB = return UserPackageDB
+absolutePackageDBPath mbWorkDir (SpecificPackageDB db) = do
+  let db' =
+        case symbolicPathRelative_maybe db of
+          Nothing -> getSymbolicPath db
+          Just rel_path -> interpretSymbolicPath mbWorkDir rel_path
+  SpecificPackageDB . makeSymbolicPath <$> canonicalizePath db'
+
+interpretPackageDB :: Maybe (SymbolicPath CWD (Dir Pkg)) -> PackageDB -> PackageDBCWD
+interpretPackageDB _ GlobalPackageDB = GlobalPackageDB
+interpretPackageDB _ UserPackageDB = UserPackageDB
+interpretPackageDB mbWorkDir (SpecificPackageDB db) =
+  SpecificPackageDB (interpretSymbolicPath mbWorkDir db)
+
+interpretPackageDBStack :: Maybe (SymbolicPath CWD (Dir Pkg)) -> PackageDBStack -> PackageDBStackCWD
+interpretPackageDBStack mbWorkDir = map (interpretPackageDB mbWorkDir)
+
+-- | Transform a package db using a FilePath into one using symbolic paths.
+coercePackageDB :: PackageDBCWD -> PackageDBX (SymbolicPath CWD (Dir PkgDB))
+coercePackageDB GlobalPackageDB = GlobalPackageDB
+coercePackageDB UserPackageDB = UserPackageDB
+coercePackageDB (SpecificPackageDB db) = SpecificPackageDB (makeSymbolicPath db)
+
+coercePackageDBStack
+  :: [PackageDBCWD]
+  -> [PackageDBX (SymbolicPath CWD (Dir PkgDB))]
+coercePackageDBStack = map coercePackageDB
 
 -- ------------------------------------------------------------
 
@@ -228,24 +403,27 @@ data OptimisationLevel
   = NoOptimisation
   | NormalOptimisation
   | MaximumOptimisation
-  deriving (Bounded, Enum, Eq, Generic, Read, Show, Typeable)
+  deriving (Bounded, Enum, Eq, Generic, Read, Show)
 
 instance Binary OptimisationLevel
+instance NFData OptimisationLevel
 instance Structured OptimisationLevel
+
+instance Parsec OptimisationLevel where
+  parsec = parsecOptimisationLevel
+
+parsecOptimisationLevel :: CabalParsing m => m OptimisationLevel
+parsecOptimisationLevel = boolParser <|> intParser
+  where
+    boolParser = bool NoOptimisation NormalOptimisation <$> parsec
+    intParser = intToEnum "optimisation level" <$> integral
 
 flagToOptimisationLevel :: Maybe String -> OptimisationLevel
 flagToOptimisationLevel Nothing = NormalOptimisation
-flagToOptimisationLevel (Just s) = case reads s of
-  [(i, "")]
-    | i >= fromEnum (minBound :: OptimisationLevel)
-        && i <= fromEnum (maxBound :: OptimisationLevel) ->
-        toEnum i
-    | otherwise ->
-        error $
-          "Bad optimisation level: "
-            ++ show i
-            ++ ". Valid values are 0..2"
-  _ -> error $ "Can't parse optimisation level " ++ s
+flagToOptimisationLevel (Just s)
+  | Just i <- readMaybe s = intToEnum "optimisation level" i
+  | Just b <- readMaybe s = if b then NormalOptimisation else NoOptimisation
+  | otherwise = error $ "Can't parse optimisation level: " ++ s
 
 -- ------------------------------------------------------------
 
@@ -261,24 +439,27 @@ data DebugInfoLevel
   | MinimalDebugInfo
   | NormalDebugInfo
   | MaximalDebugInfo
-  deriving (Bounded, Enum, Eq, Generic, Read, Show, Typeable)
+  deriving (Bounded, Enum, Eq, Generic, Read, Show)
 
 instance Binary DebugInfoLevel
+instance NFData DebugInfoLevel
 instance Structured DebugInfoLevel
+
+instance Parsec DebugInfoLevel where
+  parsec = parsecDebugInfoLevel
+
+parsecDebugInfoLevel :: CabalParsing m => m DebugInfoLevel
+parsecDebugInfoLevel = boolParser <|> intParser
+  where
+    boolParser = bool NoDebugInfo NormalDebugInfo <$> parsec
+    intParser = intToEnum "debug info level" <$> integral
 
 flagToDebugInfoLevel :: Maybe String -> DebugInfoLevel
 flagToDebugInfoLevel Nothing = NormalDebugInfo
-flagToDebugInfoLevel (Just s) = case reads s of
-  [(i, "")]
-    | i >= fromEnum (minBound :: DebugInfoLevel)
-        && i <= fromEnum (maxBound :: DebugInfoLevel) ->
-        toEnum i
-    | otherwise ->
-        error $
-          "Bad debug info level: "
-            ++ show i
-            ++ ". Valid values are 0..3"
-  _ -> error $ "Can't parse debug info level " ++ s
+flagToDebugInfoLevel (Just s)
+  | Just i <- readMaybe s = intToEnum "debug info level" i
+  | Just b <- readMaybe s = if b then NormalDebugInfo else NoDebugInfo
+  | otherwise = error $ "Can't parse debug info level " ++ s
 
 -- ------------------------------------------------------------
 
@@ -294,8 +475,7 @@ unsupportedLanguages comp langs =
 languageToFlags :: Compiler -> Maybe Language -> [CompilerFlag]
 languageToFlags comp =
   filter (not . null)
-    . catMaybes
-    . map (languageToFlag comp)
+    . mapMaybe (languageToFlag comp)
     . maybe [Haskell98] (\x -> [x])
 
 languageToFlag :: Compiler -> Language -> Maybe CompilerFlag
@@ -314,8 +494,7 @@ extensionsToFlags :: Compiler -> [Extension] -> [CompilerFlag]
 extensionsToFlags comp =
   nub
     . filter (not . null)
-    . catMaybes
-    . map (extensionToFlag comp)
+    . mapMaybe (extensionToFlag comp)
 
 -- | Looks up the flag for a given extension, for a given compiler.
 -- Ignores the subtlety of extensions which lack associated flags.
@@ -372,19 +551,29 @@ jsemSupported comp = case compilerFlavor comp of
   where
     v = compilerVersion comp
 
+-- | What semaphore protocol version does this compiler use?
+--
+-- Returns @Nothing@ for compilers that don't report a "Semaphore version"
+-- field in @ghc --info@ (i.e. GHC 9.8–9.14, which use v1).
+jsemVersion :: Compiler -> Maybe Int
+jsemVersion comp = case compilerFlavor comp of
+  GHC -> Map.lookup "Semaphore version" (compilerProperties comp) >>= readMaybe
+  _ -> Nothing
+
+-- | Does the compiler support the -reexported-modules "A as B" syntax
+reexportedAsSupported :: Compiler -> Bool
+reexportedAsSupported comp = case compilerFlavor comp of
+  GHC -> v >= mkVersion [9, 12]
+  _ -> False
+  where
+    v = compilerVersion comp
+
 -- | Does this compiler support a package database entry with:
 -- "dynamic-library-dirs"?
 libraryDynDirSupported :: Compiler -> Bool
 libraryDynDirSupported comp = case compilerFlavor comp of
-  GHC ->
-    -- Not just v >= mkVersion [8,0,1,20161022], as there
-    -- are many GHC 8.1 nightlies which don't support this.
-    ( (v >= mkVersion [8, 0, 1, 20161022] && v < mkVersion [8, 1])
-        || v >= mkVersion [8, 1, 20161021]
-    )
+  GHC -> True
   _ -> False
-  where
-    v = compilerVersion comp
 
 -- | Does this compiler's "ar" command supports response file
 -- arguments (i.e. @file-style arguments).
@@ -402,7 +591,6 @@ coverageSupported :: Compiler -> Bool
 coverageSupported comp =
   case compilerFlavor comp of
     GHC -> True
-    GHCJS -> True
     _ -> False
 
 -- | Does this compiler support profiling?
@@ -410,8 +598,60 @@ profilingSupported :: Compiler -> Bool
 profilingSupported comp =
   case compilerFlavor comp of
     GHC -> True
-    GHCJS -> True
     _ -> False
+
+-- | Returns Just if we can certainly determine whether a way is supported
+-- if we don't know, return Nothing
+waySupported :: String -> Compiler -> Maybe Bool
+waySupported way comp =
+  case compilerFlavor comp of
+    GHC ->
+      -- Information about compiler ways is only accurately reported after
+      -- 9.10.1. Which is useful as this is before profiling dynamic support
+      -- was introduced. (See GHC #24881)
+      if compilerVersion comp >= mkVersion [9, 10, 1]
+        then case Map.lookup "RTS ways" (compilerProperties comp) of
+          Just ways -> Just (way `elem` words ways)
+          Nothing -> Just False
+        else Nothing
+    _ -> Nothing
+
+-- | Either profiling is definitely supported or we don't know (so assume
+-- it is)
+profilingVanillaSupportedOrUnknown :: Compiler -> Bool
+profilingVanillaSupportedOrUnknown comp = profilingVanillaSupported comp `elem` [Just True, Nothing]
+
+-- | Is the compiler distributed with profiling libraries
+profilingVanillaSupported :: Compiler -> Maybe Bool
+profilingVanillaSupported comp = waySupported "p" comp
+
+-- | Is the compiler distributed with profiling dynamic libraries
+profilingDynamicSupported :: Compiler -> Maybe Bool
+profilingDynamicSupported comp
+  | GHC <- compilerFlavor comp
+  , -- Certainly not before 9.11, as prof+dyn was not implemented yet.
+    compilerVersion comp <= mkVersion [9, 11, 0] =
+      Just False
+  | otherwise =
+      waySupported "p_dyn" comp
+
+-- | Either profiling dynamic is definitely supported or we don't know (so assume
+-- it is)
+profilingDynamicSupportedOrUnknown :: Compiler -> Bool
+profilingDynamicSupportedOrUnknown comp =
+  profilingDynamicSupported comp `elem` [Just True, Nothing]
+
+-- | Is the compiler distributed with dynamic libraries
+dynamicSupported :: Compiler -> Maybe Bool
+dynamicSupported comp = waySupported "dyn" comp
+
+-- | Does the compiler support producing bytecode objects and bytecode libraries?
+bytecodeArtifactsSupported :: Compiler -> Bool
+bytecodeArtifactsSupported comp
+  | GHC <- compilerFlavor comp
+  , compilerVersion comp >= mkVersion [9, 15, 0] =
+      True
+  | otherwise = False
 
 -- | Does this compiler support a package database entry with:
 -- "visibility"?
@@ -427,7 +667,6 @@ ghcSupported :: String -> Compiler -> Bool
 ghcSupported key comp =
   case compilerFlavor comp of
     GHC -> checkProp
-    GHCJS -> checkProp
     _ -> False
   where
     checkProp =
@@ -455,10 +694,17 @@ data ProfDetailLevel
   | ProfDetailAllFunctions
   | ProfDetailTopLate
   | ProfDetailOther String
-  deriving (Eq, Generic, Read, Show, Typeable)
+  deriving (Eq, Generic, Read, Show)
 
 instance Binary ProfDetailLevel
+instance NFData ProfDetailLevel
 instance Structured ProfDetailLevel
+
+instance Parsec ProfDetailLevel where
+  parsec = parsecProfDetailLevel
+
+parsecProfDetailLevel :: CabalParsing m => m ProfDetailLevel
+parsecProfDetailLevel = flagToProfDetailLevel <$> parsecToken
 
 flagToProfDetailLevel :: String -> ProfDetailLevel
 flagToProfDetailLevel "" = ProfDetailDefault

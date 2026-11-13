@@ -166,10 +166,8 @@ Programs used for building
 The following options govern the programs used to process the source
 files of a package:
 
-.. option:: -g, --ghc
-            --ghcjs
+.. option:: --ghc
             --uhc
-            --haskell-suite
 
     Specify which Haskell implementation to use to build the package. At
     most one of these flags may be given. If none is given, the
@@ -201,8 +199,10 @@ files of a package:
     name of a program that can be found on the program search path. For
     example: ``--with-ghc=ghc-6.6.1`` or
     ``--with-cpphs=/usr/local/bin/cpphs``. The full list of accepted
-    programs is not enumerated in this user guide. Rather, run
-    ``cabal install --help`` to view the list.
+    programs is as follows:
+    ``alex``, ``ar``, ``c2hs``, ``cpphs``, ``doctest``, ``gcc``, ``ghc``,
+    ``ghc-pkg``, ``haddock``, ``happy``, ``hpc``, ``hsc2hs``, ``hscolour``,
+    ``jhc``, ``ld``, ``pkg-config``, ``runghc``, ``strip``, ``tar``, ``uhc``.
 
 .. option:: --PROG-options=OPTS
 
@@ -210,19 +210,31 @@ files of a package:
     to Cabal can be used in place of *prog*. For example:
     ``--alex-options="--template=mytemplatedir/"``. The *options* is
     split into program options based on spaces. Any options containing
-    embedded spaced need to be quoted, for example
-    ``--foo-options='--bar="C:\Program File\Bar"'``. As an alternative
-    that takes only one option at a time but avoids the need to quote,
-    use :option:`--PROG-option` instead.
+    embedded spaces need to be quoted with double quotes (``""``), for example
+    ``--foo-options='--bar="C:\Program Files\Bar"'``. (The single quotes
+    (``''``) are for your shell, the ``"double"`` quotes are passed to Cabal.)
+    For an alternative that takes only one option at a time but avoids the need
+    to quote, use :option:`--PROG-option` instead.
+
+    Note: if *prog* is ``ghc``, then options that do not affect build
+    artifacts, such as warning flags, are dropped. This is because
+    ``--ghc-options`` applies to GHC for the entire build plan, not just the
+    current package, and recompiling the entire dependency tree is probably
+    unintended. If you want to apply some options to ``cabal repl`` only, pass
+    ``--repl-options`` to ``cabal repl``.
 
 .. option:: --PROG-option=OPT
 
-    Specify a single additional option to the program *prog*. For
+    Specify a single additional option to the program *prog*. The option is
+    passed to *prog* as a single argument, without any splitting. For
     passing an option that contains embedded spaces, such as a file name
     with embedded spaces, using this rather than :option:`--PROG-options`
     means you do not need an additional level of quoting. Of course if you
     are using a command shell you may still need to quote, for example
-    ``--foo-options="--bar=C:\Program File\Bar"``.
+    ``--foo-options="--bar=C:\Program Files\Bar"``.
+
+    The same note regarding dropping flags as for :option:`--PROG-options`
+    applies to ``--PROG-option`` as well.
 
 All of the options passed with either :option:`--PROG-options`
 or :option:`--PROG-option` are passed in the order they were
@@ -273,6 +285,17 @@ package:
     variables: ``$prefix``, ``$bindir``, ``$libdir``, ``$pkgid``, ``$pkg``,
     ``$version``, ``$compiler``, ``$os``, ``$arch``, ``$abi``,
     ``$abitag``
+
+.. option:: --bytecodelibdir=DIR
+
+    Bytecode libraries are installed here.
+
+    By default, this is set to ``$libdir/$libsubdir``.
+
+    In the simple build system, *dir* may contain the following path
+    variables: ``$prefix``, ``$bindir``, ``$libdir``, ``$libsubdir``,
+    ``$pkgid``, ``$pkg``, ``$version``, ``$compiler``, ``$os``,
+    ``$arch``, ``$abi``, ``$abitag``
 
 .. option:: --libexecdir=DIR
 
@@ -400,6 +423,8 @@ $libsubdir
     As above but for :option:`--libsubdir`
 $dynlibdir
     As above but for :option:`--dynlibdir`
+$bytecodelibdir
+    As above but for :option:`--bytecodelibdir`
 $datadir
     As above but for :option:`--datadir`
 $datasubdir
@@ -423,8 +448,9 @@ $arch
     e.g. ``i386``, ``x86_64``, ``ppc`` or ``sparc``
 $abitag
     An optional tag that a compiler can use for telling incompatible
-    ABI's on the same architecture apart. GHCJS encodes the underlying
-    GHC version in the ABI tag.
+    ABI's on the same architecture apart. GHC uses the part of its project
+    unit id that is not already in its version, e.g. ``inplace`` for an
+    in-tree build.
 $abi
     A shortcut for getting a path that completely identifies the
     platform in terms of binary compatibility. Expands to the same value
@@ -459,6 +485,9 @@ For the simple build system, the following defaults apply:
     * - :option:`--dynlibdir`
       - ``$libdir/$abi``
       - ``$libdir\$abi``
+    * - :option:`--bytecodelibdir`
+      - ``$libdir/$libsubdir``
+      - ``$libdir\$libsubdir``
     * - :option:`--libexecdir`
       - ``$prefix/libexec``
       - ``$prefix\$pkgid``
@@ -502,7 +531,8 @@ particularly useful: it means the user can choose the install location
 bake the path into the binary when it is built.
 
 In order to achieve this, we require that for an executable on Windows,
-all of ``$bindir``, ``$libdir``, ``$dynlibdir``, ``$datadir`` and ``$libexecdir`` begin
+all of ``$bindir``, ``$libdir``, ``$dynlibdir``, ``$bytecodelibdir``,
+``$datadir`` and ``$libexecdir`` begin
 with ``$prefix``. If this is not the case then the compiled executable
 will have baked-in all absolute paths.
 
@@ -713,7 +743,7 @@ Miscellaneous options
     late-toplevel
         Like top-level but costs will be assigned to top level definitions after
         optimization. This lowers profiling overhead massively while giving similar
-        levels of detail as toplevle-functions. However it means functions introduced
+        levels of detail as toplevel-functions. However it means functions introduced
         by GHC during optimization will show up in profiles as well.
         Corresponds to ``-fprof-late`` if supported and ``-fprof-auto-top`` otherwise.
     late
@@ -755,6 +785,21 @@ Miscellaneous options
     to build GHCi libs fails. In such cases this flag can be used as a
     workaround.
 
+.. option:: --enable-library-bytecode
+
+    Build bytecode libraries (``.bytecodelib`` files) in addition to the
+    usual object and shared libraries. This can be useful when combined with `-fprefer-byte-code`
+    in order to also use bytecode for library dependencies. Installed
+    bytecode libraries are placed in :option:`--bytecodelibdir`.
+
+    Bytecode libraries currently require GHC 9.15 or later. When used
+    with older compilers the flag is ignored and a warning is emitted.
+
+.. option:: --disable-library-bytecode
+
+   Do not build bytecode libraries.
+
+
 .. option:: --enable-split-objs
 
     Use the GHC ``-split-objs`` feature when building the library. This
@@ -795,9 +840,20 @@ Miscellaneous options
     Build shared library. This implies a separate compiler run to
     generate position independent code as required on most platforms.
 
+    ``--enable-shared`` is enabled automatically if GHC is dynamically linked or
+    you request to build dynamic executables.
+
 .. option:: --disable-shared
 
     (default) Do not build shared library.
+
+.. option:: --enable-profiling-shared
+
+   Build a profiling shared library.
+
+.. option:: --disable-profiling-shared
+
+   (default) Do not built a profiling shared library.
 
 .. option:: --enable-static
 
@@ -1019,6 +1075,35 @@ This command takes the following options:
     specified at the build step are in addition not in replacement of
     any options specified at the configure step.
 
+.. option:: -j[NUM], --jobs[=NUM]
+
+    :default: ``$ncpus`` (the number of CPUs)
+
+    Run ``NUM`` jobs simultaneously when building.
+
+    :option:`--jobs` is ignored when :option:`--semaphore` is present.
+
+.. option:: --semaphore=SEMAPHORE
+
+    :since: 3.12.0.0
+
+    This option causes Cabal to control parallelism by using the specified
+    semaphore.
+
+    GHC 9.8.1 and later can act as a jobserver client, which enables two or more
+    GHC processes running at once to share system resources with each other,
+    communicating via a semaphore.
+
+    The expected use is that the system controlling the build (e.g.
+    ``cabal-install``, ``stack``, ``nix`` or ``buck2``) (a jobserver) creates or
+    obtains a semaphore using the ``semaphore-compat`` library. It then passes
+    the semaphore to jobserver clients in order to control the amount of
+    parallelism. This is done by passing the corresponding semaphore identifier
+    to Cabal via the ``--semaphore`` option.
+
+    For more information, see
+    `semaphore-compat <https://hackage.haskell.org/package/semaphore-compat>`_.
+
 .. _setup-haddock:
 
 runhaskell Setup.hs haddock
@@ -1039,6 +1124,11 @@ This command takes the following options:
     database for searching. This is equivalent to running Haddock_
     with the ``--hoogle`` flag.
 
+.. option:: --html
+
+    Generate Haddock_ documentation in HTML format (the default). This is
+    equivalent to running Haddock_ with the ``--html`` flag.
+
 .. option:: --html-location=url
 
     Specify a template for the location of HTML documentation for
@@ -1056,6 +1146,12 @@ This command takes the following options:
     Here the argument is quoted to prevent substitution by the shell. If
     this option is omitted, the location for each package is obtained
     using the package tool (e.g. ``ghc-pkg``).
+
+.. option:: --contents-location=url
+
+    Specify a template for the location for the contents page. The substitutions
+    (`see listing <#paths-in-the-simple-build-system>`__) are applied to the
+    template to obtain a location for each package.
 
 .. option:: --executables
 
@@ -1084,6 +1180,10 @@ This command takes the following options:
     generate HTML documentation. Each entity shown in the documentation is
     linked to its definition in the colourised code.
 
+.. option:: --quickjump
+
+    Generate an index for interactive navigation of Haddock_ documentation.
+
 .. option:: --hscolour-css=path
 
     The argument *path* denotes a CSS file, which is passed to HsColour_ as in
@@ -1091,6 +1191,16 @@ This command takes the following options:
     ::
 
         $ runhaskell Setup.hs hscolour --css=*path*
+
+.. option:: --for-hackage
+
+    Sets flags to generate Haddock_ documentation that is suitable for upload to
+    Hackage.
+
+    Equivalent to setting :option:`--hoogle`, :option:`--html`,
+    :option:`--html-location` equal to ``/package/$pkg-$version/docs``,
+    :option:`--contents-location` equal to ``/package/$pkg-$version``,
+    :option:`--hyperlink-source`, and :option:`--quickjump`.
 
 .. _setup-hscolour:
 
@@ -1319,18 +1429,23 @@ the package.
 
     Default value is ``direct``: it leaves test output untouched and does not
     produce a log. This allows for colored output, which is popular with testing
-    frameworks. (On the other hand, ``streaming`` creates a log but looses
+    frameworks. (On the other hand, ``streaming`` creates a log but loses
     coloring.)
 
 .. option:: --test-options=TEMPLATES
 
-    Give extra options to the test executables.
+    Give extra options to the test executables. Options are split on
+    spaces; use ``""`` to prevent splitting. Template variables allowed
+    are: ``$pkgid``, ``$compiler``, ``$os``, ``$arch``, ``$abi``,
+    ``$abitag`` and ``$test-suite``.
 
 .. option:: --test-option=TEMPLATE
 
     Give an extra option to the test executables. There is no need to
     quote options containing spaces because a single option is assumed,
-    so options will not be split on spaces.
+    so options will not be split on spaces. Template variables allowed
+    are: ``$pkgid``, ``$compiler``, ``$os``, ``$arch``, ``$abi``,
+    ``$abitag`` and ``$test-suite``.
 
 .. option:: --test-wrapper=FILE
 
@@ -1352,13 +1467,18 @@ the package.
 
 .. option:: --benchmark-options=TEMPLATES
 
-    Give extra options to the benchmark executables.
+    Give extra options to the benchmark executables. Options are split
+    on spaces; use ``""`` to prevent splitting. Template variables
+    allowed are: ``$pkgid``, ``$compiler``, ``$os``, ``$arch``,
+    ``$abi``, ``$abitag`` and ``$benchmark``.
 
 .. option:: --benchmark-option=TEMPLATE
 
     Give an extra option to the benchmark executables. There is no need to
     quote options containing spaces because a single option is assumed,
-    so options will not be split on spaces.
+    so options will not be split on spaces. Template variables allowed
+    are: ``$pkgid``, ``$compiler``, ``$os``, ``$arch``, ``$abi``,
+    ``$abitag`` and ``$benchmark``.
 
 .. _setup-sdist:
 
@@ -1374,7 +1494,8 @@ The files placed in this distribution are the package description file,
 the setup script, the sources of the modules named in the package
 description file, and files named in the ``license-file``, ``main-is``,
 ``c-sources``, ``asm-sources``, ``cmm-sources``, ``js-sources``,
-``data-files``, ``extra-source-files`` and ``extra-doc-files`` fields.
+``data-files``, ``extra-source-files``, ``extra-doc-files``, and
+``extra-files`` fields.
 
 This command takes the following option:
 
@@ -1387,3 +1508,60 @@ This command takes the following option:
 
 
 .. include:: references.inc
+
+.. _setup-repl:
+
+runhaskell Setup.hs repl
+------------------------
+
+Open an interpreter session for the given component.
+
+Usage:
+
+.. program:: runhaskell Setup.hs repl [COMPONENT] [FLAGS]
+
+If the current directory contains no package, ignores COMPONENT parameters and
+opens an interactive interpreter session.
+
+Otherwise, (re)configures with the given or default flags, and loads the
+interpreter with the relevant modules. For executables, tests and benchmarks,
+loads the main module (and its dependencies); for libraries all exposed/other
+modules.
+
+The default component is the library itself, or the executable if that is the
+only component.
+
+Support for loading specific modules is planned but not implemented yet. For
+certain scenarios, ``Setup.hs exec -- ghci :l Foo`` may be used instead. Note
+that ``exec`` will not (re)configure and you will have to specify the location
+of other modules, if required.
+
+Flags for repl:
+
+.. option:: -v, --verbose[=n]
+
+    Control verbosity (n is 0--3, default verbosity level is 1).
+
+.. option:: --builddir=DIR
+
+    The directory where Cabal puts generated build files (default dist).
+
+.. option:: --with-PROG=PATH
+
+    Give the path to PROG.
+
+.. option:: --PROG-option=OPT
+
+    Give an extra option to PROG (passed directly to PROG as a single argument).
+
+.. option:: --PROG-options=OPTS
+
+    Give extra options to PROG (split on spaces, use "" to prevent splitting).
+
+.. option:: --repl-no-load
+
+    Disable loading of project modules at REPL startup.
+
+.. option:: --repl-options=FLAG
+
+    Use the option(s) for the repl.

@@ -1,15 +1,7 @@
-{-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-
------------------------------------------------------------------------------
-
------------------------------------------------------------------------------
 
 -- |
 -- Module      :  Distribution.Client.IndexUtils
@@ -32,6 +24,9 @@ module Distribution.Client.IndexUtils
   , getSourcePackagesAtIndexState
   , ActiveRepos
   , filterSkippedActiveRepos
+  , applyStrategy
+  , addIndex
+  , deprecationAwareStrategy
   , Index (..)
   , RepoIndexState (..)
   , PackageEntry (..)
@@ -65,6 +60,10 @@ import Distribution.Client.Types
 import Distribution.Parsec (simpleParsecBS)
 import Distribution.Verbosity
 
+import Distribution.Client.ProjectConfig
+  ( CabalFileParseError
+  , readSourcePackageCabalFile'
+  )
 import Distribution.Client.Setup
   ( RepoContext (..)
   )
@@ -82,9 +81,6 @@ import Distribution.PackageDescription
   , emptyPackageDescription
   )
 import Distribution.Simple.Compiler
-  ( Compiler
-  , PackageDBStack
-  )
 import qualified Distribution.Simple.Configure as Configure
   ( getInstalledPackages
   , getInstalledPackagesMonitorFiles
@@ -99,6 +95,7 @@ import Distribution.Simple.Utils
   , fromUTF8LBS
   , info
   , warn
+  , warnError
   )
 import Distribution.Types.Dependency
 import Distribution.Types.PackageName (PackageName)
@@ -114,7 +111,6 @@ import Distribution.PackageDescription.Parsec
   , parseGenericPackageDescriptionMaybe
   )
 import qualified Distribution.PackageDescription.Parsec as PackageDesc.Parse
-import qualified Distribution.Simple.PackageDescription as PackageDesc.Parse
 
 import Distribution.Solver.Types.PackageIndex (PackageIndex)
 import qualified Distribution.Solver.Types.PackageIndex as PackageIndex
@@ -134,13 +130,12 @@ import qualified Data.Set as Set
 import Distribution.Client.GZipUtils (maybeDecompress)
 import Distribution.Client.Utils
   ( byteStringToFilePath
-  , tryFindAddSourcePackageDesc
+  , tryReadAddSourcePackageDesc
   )
-import Distribution.Compat.Directory (listDirectory)
 import Distribution.Compat.Time (getFileAge, getModTime)
 import Distribution.Utils.Generic (fstOf3)
 import Distribution.Utils.Structured (Structured (..), nominalStructure, structuredDecodeFileOrFail, structuredEncodeFile)
-import System.Directory (doesDirectoryExist, doesFileExist)
+import System.Directory (doesDirectoryExist, doesFileExist, listDirectory)
 import System.FilePath
   ( normalise
   , splitDirectories
@@ -150,7 +145,7 @@ import System.FilePath
   , (<.>)
   , (</>)
   )
-import qualified System.FilePath.Posix as FilePath.Posix
+import qualified System.FilePath as FilePath
 import System.IO
 import System.IO.Error (isDoesNotExistError)
 import System.IO.Unsafe (unsafeInterleaveIO)
@@ -163,13 +158,13 @@ import qualified Hackage.Security.Util.Some as Sec
 getInstalledPackages
   :: Verbosity
   -> Compiler
-  -> PackageDBStack
+  -> PackageDBStackCWD
   -> ProgramDb
   -> IO InstalledPackageIndex
 getInstalledPackages verbosity comp packageDbs progdb =
-  Configure.getInstalledPackages verbosity' comp packageDbs progdb
+  Configure.getInstalledPackages verbosity' comp Nothing (coercePackageDBStack packageDbs) progdb
   where
-    verbosity' = lessVerbose verbosity
+    verbosity' = modifyVerbosityFlags lessVerbose verbosity
 
 -- | Get filename base (i.e. without file extension) for index-related files
 --
@@ -260,7 +255,7 @@ getSourcePackagesAtIndexState verbosity repoCtxt _ _
   | null (repoContextRepos repoCtxt) = do
       -- In the test suite, we routinely don't have any remote package
       -- servers, so don't bleat about it
-      warn (verboseUnmarkOutput verbosity) $
+      warn (modifyVerbosityFlags verboseUnmarkOutput verbosity) $
         "No remote package servers have been specified. Usually "
           ++ "you would have one specified in the config file."
       return
@@ -356,7 +351,7 @@ getSourcePackagesAtIndexState verbosity repoCtxt mb_idxState mb_activeRepos = do
 
   pkgss' <- case organizeByRepos activeRepos rdRepoName pkgss of
     Right x -> return x
-    Left err -> warn verbosity err >> return (map (\x -> (x, CombineStrategyMerge)) pkgss)
+    Left err -> warn verbosity err >> return (map (,CombineStrategyMerge) pkgss)
 
   let activeRepos' :: ActiveRepos
       activeRepos' =
@@ -375,16 +370,8 @@ getSourcePackagesAtIndexState verbosity repoCtxt mb_idxState mb_activeRepos = do
             ts /= NoTimestamp
             ]
 
-  let addIndex
-        :: PackageIndex UnresolvedSourcePackage
-        -> (RepoData, CombineStrategy)
-        -> PackageIndex UnresolvedSourcePackage
-      addIndex acc (RepoData _ _ _ _, CombineStrategySkip) = acc
-      addIndex acc (RepoData _ _ idx _, CombineStrategyMerge) = PackageIndex.merge acc idx
-      addIndex acc (RepoData _ _ idx _, CombineStrategyOverride) = PackageIndex.override acc idx
-
   let pkgs :: PackageIndex UnresolvedSourcePackage
-      pkgs = foldl' addIndex mempty pkgss'
+      pkgs = foldl' (\acc (rd, s) -> addIndex acc (rdIndex rd, rdPreferences rd, s)) mempty pkgss'
 
   -- Note: preferences combined without using CombineStrategy
   let prefs :: Map PackageName VersionRange
@@ -416,6 +403,58 @@ data RepoData = RepoData
   , rdPreferences :: [Dependency]
   }
 
+-- | Fold one package index into an accumulator according to a 'CombineStrategy'.
+--
+-- This is the per-repository step used by 'getSourcePackagesAtIndexState' when
+-- building the combined 'PackageIndex' from multiple repositories.
+applyStrategy
+  :: Package pkg
+  => PackageIndex pkg
+  -> (PackageIndex pkg, CombineStrategy)
+  -> PackageIndex pkg
+applyStrategy acc (_, CombineStrategySkip) = acc
+applyStrategy acc (idx, CombineStrategyMerge) = PackageIndex.merge acc idx
+applyStrategy acc (idx, CombineStrategyOverride) = PackageIndex.override acc idx
+
+-- | Fold one package index and its preferred-versions into an accumulator
+-- according to a 'CombineStrategy'.
+--
+-- Like 'applyStrategy', but for 'CombineStrategyOverride' consults the
+-- repo's @preferred-versions@ via 'deprecationAwareStrategy': if all
+-- versions of a package are deprecated in the override repo, merge
+-- semantics are used for that package instead of override semantics.
+addIndex
+  :: Package pkg
+  => PackageIndex pkg
+  -> (PackageIndex pkg, [Dependency], CombineStrategy)
+  -> PackageIndex pkg
+addIndex acc (idx, prefs, CombineStrategyOverride) =
+  PackageIndex.overrideOrMerge (deprecationAwareStrategy idx prefsByPkg) acc idx
+  where
+    prefsByPkg =
+      Map.fromListWith
+        intersectVersionRanges
+        [(name, range) | Dependency name range _ <- prefs]
+addIndex acc (idx, _, s) = applyStrategy acc (idx, s)
+
+-- | Per-package override-or-merge decision for a 'CombineStrategyOverride' repo.
+--
+-- Returns 'PackageIndex.Merge' when every version of the package in the
+-- override index is deprecated (i.e. excluded by the repo's
+-- @preferred-versions@), so that versions from earlier repos remain visible.
+-- Returns 'PackageIndex.Override' otherwise.
+deprecationAwareStrategy
+  :: Package pkg
+  => PackageIndex pkg
+  -> Map PackageName VersionRange
+  -> PackageName
+  -> PackageIndex.OverrideOrMerge
+deprecationAwareStrategy idx prefsByPkg pkgname
+  | Just pkgPrefs <- Map.lookup pkgname prefsByPkg
+  , null $ PackageIndex.lookupDependency idx pkgname pkgPrefs =
+      PackageIndex.Merge
+  | otherwise = PackageIndex.Override
+
 -- | Read a repository index from disk, from the local file specified by
 -- the 'Repo'.
 --
@@ -446,7 +485,7 @@ readRepoIndex verbosity repoCtxt repo idxState =
         { srcpkgPackageId = pkgid
         , srcpkgDescription = pkgdesc
         , srcpkgSource = case pkgEntry of
-            NormalPackage _ _ _ _ -> RepoTarballPackage repo pkgid Nothing
+            NormalPackage{} -> RepoTarballPackage repo pkgid Nothing
             BuildTreeRef _ _ _ path _ -> LocalUnpackedPackage path
         , srcpkgDescrOverride = case pkgEntry of
             NormalPackage _ _ pkgtxt _ -> Just pkgtxt
@@ -460,11 +499,11 @@ readRepoIndex verbosity repoCtxt repo idxState =
       if isDoesNotExistError e
         then do
           case repo of
-            RepoRemote{..} -> dieWithException verbosity $ MissingPackageList repoRemote
-            RepoSecure{..} -> dieWithException verbosity $ MissingPackageList repoRemote
+            RepoRemote{..} -> warn verbosity $ exceptionMessageCabalInstall $ MissingPackageList repoRemote
+            RepoSecure{..} -> warn verbosity $ exceptionMessageCabalInstall $ MissingPackageList repoRemote
             RepoLocalNoIndex local _ ->
               warn verbosity $
-                "Error during construction of local+noindex "
+                "Error during construction of file+noindex "
                   ++ unRepoName (localRepoName local)
                   ++ " repository index: "
                   ++ show e
@@ -524,7 +563,7 @@ whenCacheOutOfDate index action = do
     then action
     else
       if localNoIndex index
-        then return () -- TODO: don't update cache for local+noindex repositories
+        then return () -- TODO: don't update cache for file+noindex repositories
         else do
           indexTime <- getModTime $ indexFile index
           cacheTime <- getModTime $ cacheFile index
@@ -638,8 +677,7 @@ extractPkg verbosity entry blockNo = case Tar.entryContent entry of
           if not dirExists
             then return Nothing
             else do
-              cabalFile <- tryFindAddSourcePackageDesc verbosity path "Error reading package index."
-              descr <- PackageDesc.Parse.readGenericPackageDescription normal cabalFile
+              descr <- tryReadAddSourcePackageDesc verbosity path "Error reading package index."
               return . Just $
                 BuildTreeRef
                   (refTypeFromTypeCode typeCode)
@@ -696,7 +734,7 @@ data PreferredVersionsParseError = PreferredVersionsParseError
   , preferredVersionsOriginalDependency :: String
   -- ^ Original input that produced the parser error.
   }
-  deriving (Generic, Read, Show, Eq, Ord, Typeable)
+  deriving (Generic, Read, Show, Eq, Ord)
 
 -- | Parse `preferred-versions` file, collecting parse errors that can be shown
 -- in error messages.
@@ -884,14 +922,22 @@ withIndexEntries verbosity (RepoIndex _repoCtxt (RepoLocalNoIndex (LocalRepo nam
         where
           cabalPath = prettyShow pkgid ++ ".cabal"
       Just pkgId -> do
+        let tarFile = localDir </> file
         -- check for the right named .cabal file in the compressed tarball
-        tarGz <- BS.readFile (localDir </> file)
+        tarGz <- BS.readFile tarFile
         let tar = GZip.decompress tarGz
             entries = Tar.read tar
+            expectFilename = prettyShow pkgId FilePath.</> prettyShow (packageName pkgId) ++ ".cabal"
 
-        case Tar.foldEntries (readCabalEntry pkgId) Nothing (const Nothing) entries of
+        tarballPackageDescription <-
+          Tar.foldEntries
+            (readCabalEntry tarFile expectFilename)
+            (pure Nothing)
+            (handleTarFormatError tarFile)
+            entries
+        case tarballPackageDescription of
           Just ce -> return (Just ce)
-          Nothing -> dieWithException verbosity $ CannotReadCabalFile file
+          Nothing -> dieWithException verbosity $ CannotReadCabalFile expectFilename tarFile
 
   let (prefs, gpds) =
         partitionEithers $
@@ -922,16 +968,55 @@ withIndexEntries verbosity (RepoIndex _repoCtxt (RepoLocalNoIndex (LocalRepo nam
 
     stripSuffix sfx str = fmap reverse (stripPrefix (reverse sfx) (reverse str))
 
-    -- look for <pkgid>/<pkgname>.cabal inside the tarball
-    readCabalEntry :: PackageIdentifier -> Tar.Entry -> Maybe NoIndexCacheEntry -> Maybe NoIndexCacheEntry
-    readCabalEntry pkgId entry Nothing
-      | filename == Tar.entryPath entry
-      , Tar.NormalFile contents _ <- Tar.entryContent entry =
-          let bs = BS.toStrict contents
-           in ((`CacheGPD` bs) <$> parseGenericPackageDescriptionMaybe bs)
-      where
-        filename = prettyShow pkgId FilePath.Posix.</> prettyShow (packageName pkgId) ++ ".cabal"
-    readCabalEntry _ _ x = x
+    handleTarFormatError :: FilePath -> Tar.FormatError -> IO (Maybe NoIndexCacheEntry)
+    handleTarFormatError tarFile formatError = do
+      -- This is printed at warning-level because malformed `.tar.gz`s in
+      -- indexes are unexpected and we want users to tell us about them.
+      warnError verbosity $
+        "Failed to parse "
+          <> tarFile
+          <> ": "
+          <> displayException formatError
+      pure Nothing
+
+    -- look for `expectFilename` inside the tarball
+    readCabalEntry
+      :: FilePath
+      -> FilePath
+      -> Tar.Entry
+      -> IO (Maybe NoIndexCacheEntry)
+      -> IO (Maybe NoIndexCacheEntry)
+    readCabalEntry tarFile expectFilename entry previous' = do
+      previous <- previous'
+      case previous of
+        Just _entry -> pure previous
+        Nothing -> do
+          if expectFilename /= Tar.entryPath entry
+            then pure Nothing
+            else case Tar.entryContent entry of
+              Tar.NormalFile contents _fileSize -> do
+                let bytes = BS.toStrict contents
+                maybePackageDescription
+                  :: Either CabalFileParseError GenericPackageDescription <-
+                  -- Warnings while parsing `.cabal` files are only shown in
+                  -- verbose mode because people are allowed to upload packages
+                  -- with warnings to Hackage (and we may _add_ warnings by
+                  -- shipping new versions of Cabal). You probably don't care
+                  -- if there's a warning in some random package in your
+                  -- transitive dependency tree, as long as it's not causing
+                  -- issues. If it is causing issues, you can add `-v` to see
+                  -- the warnings!
+                  try $ readSourcePackageCabalFile' (info verbosity) expectFilename bytes
+                case maybePackageDescription of
+                  Left exception -> do
+                    -- Here we show the _failure_ to parse the `.cabal` file as
+                    -- a warning. This will impact which versions/packages are
+                    -- available in your index, so users should know!
+                    warn verbosity $ "In " <> tarFile <> ": " <> displayException exception
+                    pure Nothing
+                  Right genericPackageDescription ->
+                    pure $ Just $ CacheGPD genericPackageDescription bytes
+              _ -> pure Nothing
 withIndexEntries verbosity index callback _ = do
   -- non-secure repositories
   withFile (indexFile index) ReadMode $ \h -> do
@@ -1044,8 +1129,7 @@ packageListFromCache verbosity mkPkg hnd Cache{..} = accum mempty [] mempty cach
       path <- fmap byteStringToFilePath . getEntryContent $ blockno
       pkg <- do
         let err = "Error reading package index from cache."
-        file <- tryFindAddSourcePackageDesc verbosity path err
-        PackageDesc.Parse.readGenericPackageDescription normal file
+        tryReadAddSourcePackageDesc verbosity path err
       let srcpkg = mkPkg (BuildTreeRef refType (packageId pkg) pkg path blockno)
       accum srcpkgs (srcpkg : btrs) prefs entries
     accum srcpkgs btrs prefs (CachePreference pref@(Dependency pn _ _) _ _ : entries) =
@@ -1125,12 +1209,14 @@ readIndexCache verbosity index = do
 -- 'dieWithException's if it fails again). Throws IOException if any arise.
 readNoIndexCache :: Verbosity -> Index -> IO NoIndexCache
 readNoIndexCache verbosity index = do
-  cacheOrFail <- readNoIndexCache' index
+  cacheOrFail <- readNoIndexCache' verbosity index
   case cacheOrFail of
     Left msg -> do
       warn verbosity $
         concat
-          [ "Parsing the index cache failed ("
+          [ "Parsing the index cache for repo \""
+          , unRepoName (repoName repo)
+          , "\" failed ("
           , msg
           , "). "
           , "Trying to regenerate the index cache..."
@@ -1138,10 +1224,12 @@ readNoIndexCache verbosity index = do
 
       updatePackageIndexCacheFile verbosity index
 
-      either (dieWithException verbosity . CorruptedIndexCache) return =<< readNoIndexCache' index
+      either (dieWithException verbosity . CorruptedIndexCache) return =<< readNoIndexCache' verbosity index
 
     -- we don't hash cons local repository cache, they are hopefully small
     Right res -> return res
+  where
+    RepoIndex _ctxt repo = index
 
 -- | Read the 'Index' cache from the filesystem. Throws IO exceptions
 -- if any arise and returns Left on invalid input.
@@ -1152,8 +1240,12 @@ readIndexCache' index
   | otherwise =
       Right . read00IndexCache <$> BSS.readFile (cacheFile index)
 
-readNoIndexCache' :: Index -> IO (Either String NoIndexCache)
-readNoIndexCache' index = structuredDecodeFileOrFail (cacheFile index)
+readNoIndexCache' :: Verbosity -> Index -> IO (Either String NoIndexCache)
+readNoIndexCache' verbosity index = do
+  exists <- doesFileExist (cacheFile index)
+  if exists
+    then structuredDecodeFileOrFail (cacheFile index)
+    else updatePackageIndexCacheFile verbosity index >> readNoIndexCache' verbosity index
 
 -- | Write the 'Index' cache to the filesystem
 writeIndexCache :: Index -> Cache -> IO ()
@@ -1234,7 +1326,7 @@ hashConsCache cache0 =
     go pns pvs (x : xs) = x : go pns pvs xs
 
     mapIntern :: Ord k => k -> Map.Map k k -> (k, Map.Map k k)
-    mapIntern k m = maybe (k, Map.insert k k m) (\k' -> (k', m)) (Map.lookup k m)
+    mapIntern k m = maybe (k, Map.insert k k m) (,m) (Map.lookup k m)
 
 -- | Cabal caches various information about the Hackage index
 data Cache = Cache

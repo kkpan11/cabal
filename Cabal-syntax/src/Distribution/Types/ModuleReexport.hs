@@ -1,6 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-
 module Distribution.Types.ModuleReexport
   ( ModuleReexport (..)
   ) where
@@ -24,11 +21,11 @@ data ModuleReexport = ModuleReexport
   , moduleReexportOriginalName :: ModuleName
   , moduleReexportName :: ModuleName
   }
-  deriving (Eq, Ord, Generic, Read, Show, Typeable, Data)
+  deriving (Eq, Ord, Generic, Read, Show, Data)
 
 instance Binary ModuleReexport
 instance Structured ModuleReexport
-instance NFData ModuleReexport where rnf = genericRnf
+instance NFData ModuleReexport
 
 instance Pretty ModuleReexport where
   pretty (ModuleReexport mpkgname origname newname) =

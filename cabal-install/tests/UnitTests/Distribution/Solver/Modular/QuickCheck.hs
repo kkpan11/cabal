@@ -1,7 +1,4 @@
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE StandaloneDeriving #-}
-{-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
 
 module UnitTests.Distribution.Solver.Modular.QuickCheck (tests) where
 
@@ -10,7 +7,6 @@ import Prelude ()
 
 import Control.Arrow ((&&&))
 import Data.Either (lefts)
-import Data.Hashable (Hashable (..))
 import Data.List (groupBy, isInfixOf)
 
 import Text.Show.Pretty (parseValue, valToStr)
@@ -20,7 +16,7 @@ import Test.QuickCheck.Instances.Cabal ()
 import Test.Tasty (TestTree)
 
 import Distribution.Types.Flag (FlagName)
-import Distribution.Utils.ShortText (ShortText)
+import Distribution.Utils.ShortText (ShortText, fromShortText)
 
 import Distribution.Client.Setup (defaultMaxBackjumps)
 
@@ -45,14 +41,29 @@ import Distribution.Solver.Types.Variable
 import Distribution.Verbosity
 import Distribution.Version
 
+import Distribution.Simple.Utils (ordNub)
 import UnitTests.Distribution.Solver.Modular.DSL
 import UnitTests.Distribution.Solver.Modular.QuickCheck.Utils
-  ( testPropertyWithSeed
+  ( ArbitraryOrd (..)
+  , testPropertyWithSeed
   )
 
 tests :: [TestTree]
 tests =
-  [ -- This test checks that certain solver parameters do not affect the
+  [ testPropertyWithSeed "solver does not throw exceptions" $
+      \test goalOrder reorderGoals indepGoals prefOldest ->
+        let r =
+              solve
+                (EnableBackjumping True)
+                (FineGrainedConflicts True)
+                reorderGoals
+                (CountConflicts True)
+                indepGoals
+                prefOldest
+                (getBlind <$> goalOrder)
+                test
+         in resultPlan r `seq` ()
+  , -- This test checks that certain solver parameters do not affect the
     -- existence of a solution. It runs the solver twice, and only sets those
     -- parameters on the second run. The test also applies parameters that
     -- can affect the existence of a solution to both runs.
@@ -67,7 +78,7 @@ tests =
                 (ReorderGoals False)
                 (CountConflicts True)
                 indepGoals
-                (PreferOldest False)
+                PreferInstalledOrLatest
                 (getBlind <$> goalOrder)
             targets = testTargets test
             targets2 = case targetOrder of
@@ -88,7 +99,7 @@ tests =
                 reorderGoals
                 (CountConflicts True)
                 indep
-                (PreferOldest False)
+                PreferInstalledOrLatest
                 Nothing
          in counterexample (showResults r1 r2) $
               noneReachedBackjumpLimit [r1, r2] ==>
@@ -104,7 +115,7 @@ tests =
                 reorderGoals
                 (CountConflicts True)
                 indepGoals
-                (PreferOldest False)
+                PreferInstalledOrLatest
                 Nothing
          in counterexample (showResults r1 r2) $
               noneReachedBackjumpLimit [r1, r2] ==>
@@ -120,15 +131,15 @@ tests =
                 reorderGoals
                 (CountConflicts True)
                 indepGoals
-                (PreferOldest False)
+                PreferInstalledOrLatest
                 Nothing
          in counterexample (showResults r1 r2) $
               noneReachedBackjumpLimit [r1, r2] ==>
                 isRight (resultPlan r1) === isRight (resultPlan r2)
-  , testPropertyWithSeed "prefer oldest does not affect solvability" $
-      \test reorderGoals indepGoals ->
-        let r1 = solve' (PreferOldest True) test
-            r2 = solve' (PreferOldest False) test
+  , testPropertyWithSeed "PreferVersion does not affect solvability" $
+      \test reorderGoals indepGoals preferVersion ->
+        let r1 = solve' preferVersion test
+            r2 = solve' PreferInstalledOrLatest test
             solve' prefOldest =
               solve
                 (EnableBackjumping True)
@@ -161,7 +172,7 @@ tests =
                 reorderGoals
                 (CountConflicts False)
                 indepGoals
-                (PreferOldest False)
+                PreferInstalledOrLatest
                 Nothing
          in counterexample (showResults r1 r2) $
               noneReachedBackjumpLimit [r1, r2] ==>
@@ -178,7 +189,7 @@ tests =
                 reorderGoals
                 (CountConflicts False)
                 indepGoals
-                (PreferOldest False)
+                PreferInstalledOrLatest
                 Nothing
          in counterexample (showResults r1 r2) $
               noneReachedBackjumpLimit [r1, r2] ==>
@@ -210,13 +221,16 @@ newtype VarOrdering = VarOrdering
   { unVarOrdering :: Variable P.QPN -> Variable P.QPN -> Ordering
   }
 
+instance Arbitrary VarOrdering where
+  arbitrary = VarOrdering <$> arbitraryCompare
+
 solve
   :: EnableBackjumping
   -> FineGrainedConflicts
   -> ReorderGoals
   -> CountConflicts
   -> IndependentGoals
-  -> PreferOldest
+  -> PreferVersion
   -> Maybe VarOrdering
   -> SolverTest
   -> Result
@@ -227,7 +241,8 @@ solve enableBj fineGrainedConflicts reorder countConflicts indep prefOldest goal
             (unTestDb (testDb test))
             Nothing
             Nothing
-            (pkgConfigDbFromList [])
+            Nothing
+            (Just $ pkgConfigDbFromList [])
             (map unPN (testTargets test))
             -- The backjump limit prevents individual tests from using
             -- too much time and memory.
@@ -245,7 +260,7 @@ solve enableBj fineGrainedConflicts reorder countConflicts indep prefOldest goal
             (unVarOrdering <$> goalOrder)
             (testConstraints test)
             (testPreferences test)
-            normal
+            (mkVerbosity defaultVerbosityHandles normal)
             (EnableAllTests False)
 
       failure :: String -> Failure
@@ -327,8 +342,8 @@ instance Show SolverTest where
 instance Arbitrary SolverTest where
   arbitrary = do
     db <- arbitrary
-    let pkgVersions = nub $ map (getName &&& getVersion) (unTestDb db)
-        pkgs = nub $ map fst pkgVersions
+    let pkgVersions = ordNub $ map (getName &&& getVersion) (unTestDb db)
+        pkgs = ordNub $ map fst pkgVersions
     Positive n <- arbitrary
     targets <- randomSubset n pkgs
     constraints <- case pkgVersions of
@@ -516,6 +531,14 @@ instance Arbitrary IndependentGoals where
 
   shrink (IndependentGoals indep) = [IndependentGoals False | indep]
 
+instance Arbitrary PreferVersion where
+  arbitrary =
+    oneof
+      [ pure PreferOldest
+      , pure PreferLatest
+      , pure PreferInstalledOrLatest
+      ]
+
 instance Arbitrary Component where
   arbitrary =
     oneof
@@ -537,7 +560,7 @@ instance Arbitrary Component where
 -- internal libraries.
 arbitraryUQN :: Gen UnqualComponentName
 arbitraryUQN =
-  mkUnqualComponentName <$> (\c -> "component-" ++ [c]) <$> elements "ABC"
+  mkUnqualComponentName . (\c -> "component-" ++ [c]) <$> elements "ABC"
 
 instance Arbitrary ExampleInstalled where
   arbitrary = error "arbitrary not implemented: ExampleInstalled"
@@ -600,22 +623,18 @@ instance Arbitrary OptionalStanza where
   shrink BenchStanzas = [TestStanzas]
   shrink TestStanzas = []
 
--- Randomly sorts solver variables using 'hash'.
--- TODO: Sorting goals with this function is very slow.
-instance Arbitrary VarOrdering where
-  arbitrary = do
-    f <- arbitrary :: Gen (Int -> Int)
-    return $ VarOrdering (comparing (f . hash))
-
-instance Hashable pn => Hashable (Variable pn)
-instance Hashable a => Hashable (P.Qualified a)
-instance Hashable P.PackagePath
-instance Hashable P.Qualifier
-instance Hashable P.Namespace
-instance Hashable OptionalStanza
-instance Hashable FlagName
-instance Hashable PackageName
-instance Hashable ShortText
+instance ArbitraryOrd pn => ArbitraryOrd (Variable pn)
+instance ArbitraryOrd a => ArbitraryOrd (P.Qualified a)
+instance ArbitraryOrd P.PackagePath
+instance ArbitraryOrd P.Qualifier
+instance ArbitraryOrd P.Namespace
+instance ArbitraryOrd OptionalStanza
+instance ArbitraryOrd FlagName
+instance ArbitraryOrd PackageName
+instance ArbitraryOrd ShortText where
+  arbitraryCompare = do
+    strc <- arbitraryCompare
+    pure $ \l r -> strc (fromShortText l) (fromShortText r)
 
 deriving instance Generic (Variable pn)
 deriving instance Generic (P.Qualified a)

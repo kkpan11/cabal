@@ -1,5 +1,4 @@
 {-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE DeriveGeneric #-}
 module Distribution.Solver.Types.ResolverPackage
     ( ResolverPackage(..)
     , resolverPackageLibDeps
@@ -17,6 +16,7 @@ import qualified Distribution.Solver.Types.ComponentDeps as CD
 import Distribution.Compat.Graph (IsNode(..))
 import Distribution.Package (Package(..), HasUnitId(..))
 import Distribution.Simple.Utils (ordNub)
+import Data.Foldable (fold)
 
 -- | The dependency resolver picks either pre-existing installed packages
 -- or it picks source packages along with package configuration.
@@ -48,5 +48,5 @@ instance IsNode (ResolverPackage loc) where
   nodeKey (Configured spkg) = PlannedId (packageId spkg)
   -- Use dependencies for ALL components
   nodeNeighbors pkg =
-    ordNub $ CD.flatDeps (resolverPackageLibDeps pkg) ++
-             CD.flatDeps (resolverPackageExeDeps pkg)
+    ordNub $ fold (resolverPackageLibDeps pkg) ++
+             fold (resolverPackageExeDeps pkg)

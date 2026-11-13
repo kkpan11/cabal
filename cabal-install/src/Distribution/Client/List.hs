@@ -1,9 +1,3 @@
-{-# LANGUAGE ScopedTypeVariables #-}
-
------------------------------------------------------------------------------
-
------------------------------------------------------------------------------
-
 -- |
 -- Module      :  Distribution.Client.List
 -- Copyright   :  (c) David Himmelstrup 2005
@@ -31,10 +25,7 @@ import Distribution.Package
   , packageName
   , packageVersion
   )
-import Distribution.PackageDescription
-  ( PackageFlag (..)
-  , unFlagName
-  )
+import Distribution.PackageDescription (PackageFlag (..), repoKind, repoLocation, sourceRepos, unFlagName)
 import qualified Distribution.PackageDescription as Source
 import Distribution.PackageDescription.Configuration
   ( flattenPackageDescription
@@ -43,9 +34,6 @@ import Distribution.Types.Dependency
 import Distribution.Types.UnqualComponentName
 
 import Distribution.Simple.Compiler
-  ( Compiler
-  , PackageDBStack
-  )
 import Distribution.Simple.PackageIndex (InstalledPackageIndex)
 import qualified Distribution.Simple.PackageIndex as InstalledPackageIndex
 import Distribution.Simple.Program (ProgramDb)
@@ -112,6 +100,7 @@ import qualified Data.Map as Map
 import Data.Maybe
   ( fromJust
   )
+import qualified Data.Text as Text
 import Data.Tree as Tree
 import System.Directory
   ( doesDirectoryExist
@@ -141,7 +130,7 @@ import qualified Text.Regex.Posix.String as Regex
 -- | Return a list of packages matching given search strings.
 getPkgList
   :: Verbosity
-  -> PackageDBStack
+  -> PackageDBStackCWD
   -> RepoContext
   -> Maybe (Compiler, ProgramDb)
   -> ListFlags
@@ -160,9 +149,7 @@ getPkgList verbosity packageDBs repoCtxt mcompprogdb listFlags pats = do
 
   let sourcePkgIndex = packageIndex sourcePkgDb
       prefs name =
-        fromMaybe
-          anyVersion
-          (Map.lookup name (packagePreferences sourcePkgDb))
+        Map.findWithDefault anyVersion name (packagePreferences sourcePkgDb)
 
       pkgsInfoMatching
         :: [(PackageName, [Installed.InstalledPackageInfo], [UnresolvedSourcePackage])]
@@ -213,7 +200,7 @@ getPkgList verbosity packageDBs repoCtxt mcompprogdb listFlags pats = do
 -- | Show information about packages.
 list
   :: Verbosity
-  -> PackageDBStack
+  -> PackageDBStackCWD
   -> RepoContext
   -> Maybe (Compiler, ProgramDb)
   -> ListFlags
@@ -249,7 +236,7 @@ list verbosity packageDBs repos mcompProgdb listFlags pats = do
 
 info
   :: Verbosity
-  -> PackageDBStack
+  -> PackageDBStackCWD
   -> RepoContext
   -> Compiler
   -> ProgramDb
@@ -272,9 +259,7 @@ info
     sourcePkgDb <- getSourcePackages verbosity repoCtxt
     let sourcePkgIndex = packageIndex sourcePkgDb
         prefs name =
-          fromMaybe
-            anyVersion
-            (Map.lookup name (packagePreferences sourcePkgDb))
+          Map.findWithDefault anyVersion name (packagePreferences sourcePkgDb)
 
     -- Users may specify names of packages that are only installed, not
     -- just available source packages, so we must resolve targets using
@@ -321,7 +306,7 @@ info
         installedPkgIndex
         sourcePkgIndex
         (NamedPackage name props)
-          | null (selectedInstalledPkgs) && null (selectedSourcePkgs) =
+          | null selectedInstalledPkgs && null selectedSourcePkgs =
               Left $ GatherPkgInfo name (simplifyVersionRange verConstraint)
           | otherwise =
               Right $
@@ -614,14 +599,7 @@ mergePackageInfo versionPref installedPkgs sourcePkgs selectedPkg showVer =
             installed
       , bugReports = maybe mempty Source.bugReports source
       , sourceRepo =
-          fromMaybe mempty
-            . join
-            . fmap
-              ( uncons Nothing Source.repoLocation
-                  . sortBy (comparing Source.repoKind)
-                  . Source.sourceRepos
-              )
-            $ source
+          fromMaybe mempty $ (uncons Nothing (fmap Text.unpack . repoLocation) . sortBy (comparing repoKind) . sourceRepos) =<< source
       , -- TODO: installed package info is missing synopsis
         synopsis = maybe mempty Source.synopsis source
       , description =
@@ -657,11 +635,7 @@ mergePackageInfo versionPref installedPkgs sourcePkgs selectedPkg showVer =
             source
             (map InstalledDependency . Installed.depends)
             installed
-      , haddockHtml =
-          fromMaybe ""
-            . join
-            . fmap (listToMaybe . Installed.haddockHTMLs)
-            $ installed
+      , haddockHtml = fromMaybe "" $ (listToMaybe . Installed.haddockHTMLs) =<< installed
       , haveTarball = False
       }
   where

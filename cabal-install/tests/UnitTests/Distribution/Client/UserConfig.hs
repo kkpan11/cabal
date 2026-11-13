@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP #-}
+{-# LANGUAGE PatternSynonyms #-}
 
 module UnitTests.Distribution.Client.UserConfig
   ( tests
@@ -6,27 +6,24 @@ module UnitTests.Distribution.Client.UserConfig
 
 import Control.Exception (bracket)
 import Control.Monad (replicateM_)
-import Data.List (nub, sort)
-#if !MIN_VERSION_base(4,8,0)
-import Data.Monoid
-#endif
+import Data.List (sort)
 import System.Directory
   ( doesFileExist
   , getCurrentDirectory
   , getTemporaryDirectory
   )
 import System.FilePath ((</>))
+import System.IO (hClose, openTempFile)
 
 import Test.Tasty
 import Test.Tasty.HUnit
 
 import Distribution.Client.Config
 import Distribution.Client.Setup (GlobalFlags (..), InstallFlags (..))
-import Distribution.Client.Utils (removeExistingFile)
-import Distribution.Simple.Setup (ConfigFlags (..), Flag (..), fromFlag)
-import Distribution.Simple.Utils (withTempDirectory)
+import Distribution.Simple.Setup (ConfigFlags (..), fromFlag, pattern Flag)
+import Distribution.Simple.Utils (ordNub, removeFileForcibly, withTempDirectory)
 import Distribution.Utils.NubList (fromNubList)
-import Distribution.Verbosity (silent)
+import Distribution.Verbosity
 
 tests :: [TestTree]
 tests =
@@ -40,17 +37,17 @@ tests =
 nullDiffOnCreateTest :: Assertion
 nullDiffOnCreateTest = bracketTest $ \configFile -> do
   -- Create a new default config file in our test directory.
-  _ <- createDefaultConfigFile silent [] configFile
+  _ <- createDefaultConfigFile (mkVerbosity defaultVerbosityHandles silent) [] configFile
   -- Now we read it in and compare it against the default.
-  diff <- userConfigDiff silent (globalFlags configFile) []
+  diff <- userConfigDiff (mkVerbosity defaultVerbosityHandles silent) (globalFlags configFile) []
   assertBool (unlines $ "Following diff should be empty:" : diff) $ null diff
 
 canDetectDifference :: Assertion
 canDetectDifference = bracketTest $ \configFile -> do
   -- Create a new default config file in our test directory.
-  _ <- createDefaultConfigFile silent [] configFile
+  _ <- createDefaultConfigFile (mkVerbosity defaultVerbosityHandles silent) [] configFile
   appendFile configFile "verbose: 0\n"
-  diff <- userConfigDiff silent (globalFlags configFile) []
+  diff <- userConfigDiff (mkVerbosity defaultVerbosityHandles silent) (globalFlags configFile) []
   assertBool (unlines $ "Should detect a difference:" : diff) $
     diff == ["+ verbose: 0"]
 
@@ -59,34 +56,34 @@ canUpdateConfig = bracketTest $ \configFile -> do
   -- Write a trivial cabal file.
   writeFile configFile "tests: True\n"
   -- Update the config file.
-  userConfigUpdate silent (globalFlags configFile) []
+  userConfigUpdate (mkVerbosity defaultVerbosityHandles silent) (globalFlags configFile) []
   -- Load it again.
-  updated <- loadConfig silent (Flag configFile)
-  assertBool ("Field 'tests' should be True") $
+  updated <- loadConfig (mkVerbosity defaultVerbosityHandles silent) (Flag configFile)
+  assertBool "Field 'tests' should be True" $
     fromFlag (configTests $ savedConfigureFlags updated)
 
 doubleUpdateConfig :: Assertion
 doubleUpdateConfig = bracketTest $ \configFile -> do
   -- Create a new default config file in our test directory.
-  _ <- createDefaultConfigFile silent [] configFile
+  _ <- createDefaultConfigFile (mkVerbosity defaultVerbosityHandles silent) [] configFile
   -- Update it twice.
-  replicateM_ 2 $ userConfigUpdate silent (globalFlags configFile) []
+  replicateM_ 2 $ userConfigUpdate (mkVerbosity defaultVerbosityHandles silent) (globalFlags configFile) []
   -- Load it again.
-  updated <- loadConfig silent (Flag configFile)
+  updated <- loadConfig (mkVerbosity defaultVerbosityHandles silent) (Flag configFile)
 
-  assertBool ("Field 'remote-repo' doesn't contain duplicates") $
+  assertBool "Field 'remote-repo' doesn't contain duplicates" $
     listUnique (map show . fromNubList . globalRemoteRepos $ savedGlobalFlags updated)
-  assertBool ("Field 'extra-prog-path' doesn't contain duplicates") $
+  assertBool "Field 'extra-prog-path' doesn't contain duplicates" $
     listUnique (map show . fromNubList . configProgramPathExtra $ savedConfigureFlags updated)
-  assertBool ("Field 'build-summary' doesn't contain duplicates") $
+  assertBool "Field 'build-summary' doesn't contain duplicates" $
     listUnique (map show . fromNubList . installSummaryFile $ savedInstallFlags updated)
 
 newDefaultConfig :: Assertion
 newDefaultConfig = do
   sysTmpDir <- getTemporaryDirectory
-  withTempDirectory silent sysTmpDir "cabal-test" $ \tmpDir -> do
+  withTempDirectory sysTmpDir "cabal-test" $ \tmpDir -> do
     let configFile = tmpDir </> "tmp.config"
-    _ <- createDefaultConfigFile silent [] configFile
+    _ <- createDefaultConfigFile (mkVerbosity defaultVerbosityHandles silent) [] configFile
     exists <- doesFileExist configFile
     assertBool ("Config file should be written to " ++ configFile) exists
 
@@ -96,15 +93,19 @@ globalFlags configFile = mempty{globalConfigFile = Flag configFile}
 listUnique :: Ord a => [a] -> Bool
 listUnique xs =
   let sorted = sort xs
-   in nub sorted == xs
+   in ordNub sorted == xs
 
 bracketTest :: (FilePath -> IO ()) -> Assertion
 bracketTest =
   bracket testSetup testTearDown
   where
     testSetup :: IO FilePath
-    testSetup = fmap (</> "test-user-config") getCurrentDirectory
+    testSetup = do
+      cwd <- getCurrentDirectory
+      (configFile, h) <- openTempFile cwd "test-user-config"
+      hClose h
+      pure configFile
 
     testTearDown :: FilePath -> IO ()
     testTearDown configFile =
-      mapM_ removeExistingFile [configFile, configFile ++ ".backup"]
+      mapM_ removeFileForcibly [configFile, configFile ++ ".backup"]

@@ -1,11 +1,9 @@
+{-# LANGUAGE ApplicativeDo #-}
+{-# LANGUAGE CApiFFI #-}
 {-# LANGUAGE CPP #-}
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveFunctor #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE RankNTypes #-}
-
------------------------------------------------------------------------------
+{-# LANGUAGE DerivingVia #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards #-}
 
 -- |
 -- Module      :  Distribution.Simple.InstallDirs
@@ -45,6 +43,7 @@ module Distribution.Simple.InstallDirs
   , compilerTemplateEnv
   , packageTemplateEnv
   , abiTemplateEnv
+  , installDirsGrammar
   , installDirsTemplateEnv
   ) where
 
@@ -52,9 +51,13 @@ import Distribution.Compat.Prelude
 import Prelude ()
 
 import Distribution.Compat.Environment (lookupEnv)
+import Distribution.Compat.Lens (Lens')
 import Distribution.Compiler
+import Distribution.FieldGrammar
 import Distribution.Package
+import Distribution.Parsec
 import Distribution.Pretty
+import Distribution.Simple.Flag
 import Distribution.Simple.InstallDirs.Internal
 import Distribution.System
 
@@ -72,7 +75,6 @@ import qualified Prelude
 import Foreign
 import Foreign.C
 #endif
-
 -- ---------------------------------------------------------------------------
 -- Installation directories
 
@@ -88,6 +90,7 @@ data InstallDirs dir = InstallDirs
   , libdir :: dir
   , libsubdir :: dir
   , dynlibdir :: dir
+  , bytecodelibdir :: dir
   , flibdir :: dir
   -- ^ foreign libraries
   , libexecdir :: dir
@@ -101,17 +104,12 @@ data InstallDirs dir = InstallDirs
   , haddockdir :: dir
   , sysconfdir :: dir
   }
-  deriving (Eq, Read, Show, Functor, Generic, Typeable)
+  deriving (Eq, Read, Show, Functor, Generic)
+  deriving (Semigroup, Monoid) via Generically (InstallDirs dir)
 
 instance Binary dir => Binary (InstallDirs dir)
+instance NFData dir => NFData (InstallDirs dir)
 instance Structured dir => Structured (InstallDirs dir)
-
-instance (Semigroup dir, Monoid dir) => Monoid (InstallDirs dir) where
-  mempty = gmempty
-  mappend = (<>)
-
-instance Semigroup dir => Semigroup (InstallDirs dir) where
-  (<>) = gmappend
 
 combineInstallDirs
   :: (a -> b -> c)
@@ -125,6 +123,7 @@ combineInstallDirs combine a b =
     , libdir = libdir a `combine` libdir b
     , libsubdir = libsubdir a `combine` libsubdir b
     , dynlibdir = dynlibdir a `combine` dynlibdir b
+    , bytecodelibdir = bytecodelibdir a `combine` bytecodelibdir b
     , flibdir = flibdir a `combine` flibdir b
     , libexecdir = libexecdir a `combine` libexecdir b
     , libexecsubdir = libexecsubdir a `combine` libexecsubdir b
@@ -210,45 +209,47 @@ defaultInstallDirs' False comp userInstall _hasLibs = do
     case buildOS of
       Windows -> return "$prefix"
       _ -> return ("$prefix" </> "lib")
-  return $
-    fmap toPathTemplate $
-      InstallDirs
-        { prefix = installPrefix
-        , bindir = "$prefix" </> "bin"
-        , libdir = installLibDir
-        , libsubdir = case comp of
-            UHC -> "$pkgid"
-            _other -> "$abi" </> "$libname"
-        , dynlibdir =
-            "$libdir" </> case comp of
+  return
+    ( toPathTemplate
+        <$> InstallDirs
+          { prefix = installPrefix
+          , bindir = "$prefix" </> "bin"
+          , libdir = installLibDir
+          , libsubdir = case comp of
               UHC -> "$pkgid"
-              _other -> "$abi"
-        , libexecsubdir = "$abi" </> "$pkgid"
-        , flibdir = "$libdir"
-        , libexecdir = case buildOS of
-            Windows -> "$prefix" </> "$libname"
-            Haiku -> "$libdir"
-            _other -> "$prefix" </> "libexec"
-        , includedir = case buildOS of
-            Haiku -> "$prefix" </> "develop" </> "headers"
-            _other -> "$libdir" </> "$libsubdir" </> "include"
-        , datadir = case buildOS of
-            Windows -> "$prefix"
-            Haiku -> "$prefix" </> "data"
-            _other -> "$prefix" </> "share"
-        , datasubdir = "$abi" </> "$pkgid"
-        , docdir = case buildOS of
-            Haiku -> "$prefix" </> "documentation"
-            _other -> "$datadir" </> "doc" </> "$abi" </> "$pkgid"
-        , mandir = case buildOS of
-            Haiku -> "$docdir" </> "man"
-            _other -> "$datadir" </> "man"
-        , htmldir = "$docdir" </> "html"
-        , haddockdir = "$htmldir"
-        , sysconfdir = case buildOS of
-            Haiku -> "boot" </> "system" </> "settings"
-            _other -> "$prefix" </> "etc"
-        }
+              _other -> "$abi" </> "$libname"
+          , dynlibdir =
+              "$libdir" </> case comp of
+                UHC -> "$pkgid"
+                _other -> "$abi"
+          , bytecodelibdir = "$libdir" </> "$libsubdir"
+          , libexecsubdir = "$abi" </> "$pkgid"
+          , flibdir = "$libdir"
+          , libexecdir = case buildOS of
+              Windows -> "$prefix" </> "$libname"
+              Haiku -> "$libdir"
+              _other -> "$prefix" </> "libexec"
+          , includedir = case buildOS of
+              Haiku -> "$prefix" </> "develop" </> "headers"
+              _other -> "$libdir" </> "$libsubdir" </> "include"
+          , datadir = case buildOS of
+              Windows -> "$prefix"
+              Haiku -> "$prefix" </> "data"
+              _other -> "$prefix" </> "share"
+          , datasubdir = "$abi" </> "$pkgid"
+          , docdir = case buildOS of
+              Haiku -> "$prefix" </> "documentation"
+              _other -> "$datadir" </> "doc" </> "$abi" </> "$pkgid"
+          , mandir = case buildOS of
+              Haiku -> "$docdir" </> "man"
+              _other -> "$datadir" </> "man"
+          , htmldir = "$docdir" </> "html"
+          , haddockdir = "$htmldir"
+          , sysconfdir = case buildOS of
+              Haiku -> "boot" </> "system" </> "settings"
+              _other -> "$prefix" </> "etc"
+          }
+    )
 
 -- ---------------------------------------------------------------------------
 -- Converting directories, absolute or prefix-relative
@@ -278,6 +279,8 @@ substituteInstallDirTemplates env dirs = dirs'
         , libdir = subst libdir [prefixVar, bindirVar]
         , libsubdir = subst libsubdir []
         , dynlibdir = subst dynlibdir [prefixVar, bindirVar, libdirVar]
+        , bytecodelibdir =
+            subst bytecodelibdir [prefixVar, bindirVar, libdirVar, libsubdirVar]
         , flibdir = subst flibdir [prefixVar, bindirVar, libdirVar]
         , libexecdir = subst libexecdir prefixBinLibVars
         , libexecsubdir = subst libexecsubdir []
@@ -344,6 +347,8 @@ data CopyDest
     CopyToDb FilePath
   deriving (Eq, Show, Generic)
 
+-- TODO: are these paths absolute or relative? Relative to what?
+
 instance Binary CopyDest
 instance Structured CopyDest
 
@@ -387,9 +392,10 @@ prefixRelativeInstallDirs pkgId libname compilerId platform dirs =
 -- | An abstract path, possibly containing variables that need to be
 -- substituted for to get a real 'FilePath'.
 newtype PathTemplate = PathTemplate [PathComponent]
-  deriving (Eq, Ord, Generic, Typeable)
+  deriving (Eq, Ord, Generic)
 
 instance Binary PathTemplate
+instance NFData PathTemplate
 instance Structured PathTemplate
 
 type PathTemplateEnv = [(PathTemplateVariable, PathTemplate)]
@@ -480,6 +486,7 @@ installDirsTemplateEnv dirs =
   , (LibdirVar, libdir dirs)
   , (LibsubdirVar, libsubdir dirs)
   , (DynlibdirVar, dynlibdir dirs)
+  , (BytecodelibdirVar, bytecodelibdir dirs)
   , (DatadirVar, datadir dirs)
   , (DatasubdirVar, datasubdir dirs)
   , (DocdirVar, docdir dirs)
@@ -504,6 +511,12 @@ instance Read PathTemplate where
     | (path, s') <- readsPrec p s
     , (template, "") <- reads path
     ]
+
+instance Parsec PathTemplate where
+  parsec = parsecPathTemplate
+
+parsecPathTemplate :: CabalParsing m => m PathTemplate
+parsecPathTemplate = toPathTemplate <$> parsecFilePath
 
 -- ---------------------------------------------------------------------------
 -- Internal utilities
@@ -535,14 +548,7 @@ csidl_PROGRAM_FILES = 0x0026
 -- csidl_PROGRAM_FILES_COMMON :: CInt
 -- csidl_PROGRAM_FILES_COMMON = 0x002b
 
-{- FOURMOLU_DISABLE -}
-#ifdef x86_64_HOST_ARCH
-#define CALLCONV ccall
-#else
-#define CALLCONV stdcall
-#endif
-
-foreign import CALLCONV unsafe "shlobj.h SHGetFolderPathW"
+foreign import capi unsafe "shlobj.h SHGetFolderPathW"
             c_SHGetFolderPath :: Ptr ()
                               -> CInt
                               -> Ptr ()
@@ -550,4 +556,86 @@ foreign import CALLCONV unsafe "shlobj.h SHGetFolderPathW"
                               -> CWString
                               -> Prelude.IO CInt
 #endif
-{- FOURMOLU_ENABLE -}
+
+-- ---------------------------------------------------------------------------
+-- FieldGrammar
+
+installDirsGrammar :: ParsecFieldGrammar' (InstallDirs (Flag PathTemplate))
+installDirsGrammar = do
+  prefix <- optionalFieldDef "prefix" installDirsPrefixLens mempty
+  bindir <- optionalFieldDef "bindir" installDirsBindirLens mempty
+  libdir <- optionalFieldDef "libdir" installDirsLibdirLens mempty
+  libsubdir <- optionalFieldDef "libsubdir" installDirsLibsubdirLens mempty
+  dynlibdir <- optionalFieldDef "dynlibdir" installDirsDynlibdirLens mempty
+  bytecodelibdir <- optionalFieldDef "bytecodelibdir" installDirsBytecodelibdirLens mempty
+  let flibdir = NoFlag
+  libexecdir <- optionalFieldDef "libexecdir" installDirsLibexecdirLens mempty
+  libexecsubdir <- optionalFieldDef "libexecsubdir" installDirsLibexecsubdirLens mempty
+  let includedir = NoFlag
+  datadir <- optionalFieldDef "datadir" installDirsDatadirLens mempty
+  datasubdir <- optionalFieldDef "datasubdir" installDirsDatasubdirLens mempty
+  docdir <- optionalFieldDef "docdir" installDirsDocdirLens mempty
+  let mandir = NoFlag
+  htmldir <- optionalFieldDef "htmldir" installDirsHtmldirLens mempty
+  haddockdir <- optionalFieldDef "haddockdir" installDirsHaddockdirLens mempty
+  sysconfdir <- optionalFieldDef "sysconfdir" installDirsSysconfdirLens mempty
+  pure InstallDirs{..}
+
+-- ---------------------------------------------------------------------------
+-- Lenses
+
+installDirsPrefixLens :: Lens' (InstallDirs a) a
+installDirsPrefixLens f c = fmap (\x -> c{prefix = x}) (f (prefix c))
+{-# INLINEABLE installDirsPrefixLens #-}
+
+installDirsBindirLens :: Lens' (InstallDirs a) a
+installDirsBindirLens f c = fmap (\x -> c{bindir = x}) (f (bindir c))
+{-# INLINEABLE installDirsBindirLens #-}
+
+installDirsLibdirLens :: Lens' (InstallDirs a) a
+installDirsLibdirLens f c = fmap (\x -> c{libdir = x}) (f (libdir c))
+{-# INLINEABLE installDirsLibdirLens #-}
+
+installDirsLibsubdirLens :: Lens' (InstallDirs a) a
+installDirsLibsubdirLens f c = fmap (\x -> c{libsubdir = x}) (f (libsubdir c))
+{-# INLINEABLE installDirsLibsubdirLens #-}
+
+installDirsDynlibdirLens :: Lens' (InstallDirs a) a
+installDirsDynlibdirLens f c = fmap (\x -> c{dynlibdir = x}) (f (dynlibdir c))
+{-# INLINEABLE installDirsDynlibdirLens #-}
+
+installDirsBytecodelibdirLens :: Lens' (InstallDirs a) a
+installDirsBytecodelibdirLens f c = fmap (\x -> c{bytecodelibdir = x}) (f (bytecodelibdir c))
+{-# INLINEABLE installDirsBytecodelibdirLens #-}
+
+installDirsLibexecdirLens :: Lens' (InstallDirs a) a
+installDirsLibexecdirLens f c = fmap (\x -> c{libexecdir = x}) (f (libexecdir c))
+{-# INLINEABLE installDirsLibexecdirLens #-}
+
+installDirsLibexecsubdirLens :: Lens' (InstallDirs a) a
+installDirsLibexecsubdirLens f c = fmap (\x -> c{libexecsubdir = x}) (f (libexecsubdir c))
+{-# INLINEABLE installDirsLibexecsubdirLens #-}
+
+installDirsDatadirLens :: Lens' (InstallDirs a) a
+installDirsDatadirLens f c = fmap (\x -> c{datadir = x}) (f (datadir c))
+{-# INLINEABLE installDirsDatadirLens #-}
+
+installDirsDatasubdirLens :: Lens' (InstallDirs a) a
+installDirsDatasubdirLens f c = fmap (\x -> c{datasubdir = x}) (f (datasubdir c))
+{-# INLINEABLE installDirsDatasubdirLens #-}
+
+installDirsDocdirLens :: Lens' (InstallDirs a) a
+installDirsDocdirLens f c = fmap (\x -> c{docdir = x}) (f (docdir c))
+{-# INLINEABLE installDirsDocdirLens #-}
+
+installDirsHtmldirLens :: Lens' (InstallDirs a) a
+installDirsHtmldirLens f c = fmap (\x -> c{htmldir = x}) (f (htmldir c))
+{-# INLINEABLE installDirsHtmldirLens #-}
+
+installDirsHaddockdirLens :: Lens' (InstallDirs a) a
+installDirsHaddockdirLens f c = fmap (\x -> c{haddockdir = x}) (f (haddockdir c))
+{-# INLINEABLE installDirsHaddockdirLens #-}
+
+installDirsSysconfdirLens :: Lens' (InstallDirs a) a
+installDirsSysconfdirLens f c = fmap (\x -> c{sysconfdir = x}) (f (sysconfdir c))
+{-# INLINEABLE installDirsSysconfdirLens #-}

@@ -1,10 +1,4 @@
 {-# LANGUAGE CPP #-}
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE RankNTypes #-}
-
------------------------------------------------------------------------------
 
 -- |
 -- Module      :  Distribution.Simple.Program.Find
@@ -33,6 +27,7 @@ module Distribution.Simple.Program.Find
   , findProgramOnSearchPath
   , programSearchPathAsPATHVar
   , logExtraProgramSearchPath
+  , logExtraProgramOverrideEnv
   , getSystemSearchPath
   , getExtraPathEnv
   , simpleProgram
@@ -47,7 +42,7 @@ import Distribution.Simple.Utils
 import Distribution.System
 import Distribution.Verbosity
 
-import qualified System.Directory as Directory
+import System.Directory
   ( findExecutable
   )
 import System.FilePath as FilePath
@@ -73,6 +68,19 @@ logExtraProgramSearchPath verbosity extraPaths =
   info verbosity . unlines $
     "Including the following directories in PATH:"
       : map ("- " ++) extraPaths
+
+logExtraProgramOverrideEnv
+  :: Verbosity
+  -> [(String, Maybe String)]
+  -> IO ()
+logExtraProgramOverrideEnv verbosity extraEnv =
+  info verbosity . unlines $
+    "Including the following environment variable overrides:"
+      : [ "- " ++ case mbVal of
+          Nothing -> "unset " ++ var
+          Just val -> var ++ "=" ++ val
+        | (var, mbVal) <- extraEnv
+        ]
 
 findProgramOnSearchPath
   :: Verbosity
@@ -172,9 +180,7 @@ programSearchPathAsPATHVar searchpath = do
   return (intercalate [searchPathSeparator] (concat ess))
   where
     getEntries (ProgramSearchPathDir dir) = return [dir]
-    getEntries ProgramSearchPathDefault = do
-      env <- getEnvironment
-      return (maybe [] splitSearchPath (lookup "PATH" env))
+    getEntries ProgramSearchPathDefault = maybe [] splitSearchPath <$> lookupEnv "PATH"
 
 -- | Get the system search path. On Unix systems this is just the @$PATH@ env
 -- var, but on windows it's a bit more complicated.
@@ -192,29 +198,6 @@ getSystemSearchPath = fmap nub $ do
     return path
 #else
     FilePath.getSearchPath
-#endif
-
-#ifdef MIN_VERSION_directory
-#if MIN_VERSION_directory(1,2,1)
-#define HAVE_directory_121
-#endif
-#endif
-
-findExecutable :: FilePath -> IO (Maybe FilePath)
-#ifdef HAVE_directory_121
-findExecutable = Directory.findExecutable
-#else
-findExecutable prog = do
-      -- With directory < 1.2.1 'findExecutable' doesn't check that the path
-      -- really refers to an executable.
-      mExe <- Directory.findExecutable prog
-      case mExe of
-        Just exe -> do
-          exeExists <- doesExecutableExist exe
-          if exeExists
-            then return mExe
-            else return Nothing
-        _     -> return mExe
 #endif
 
 -- | Make a simple named program.

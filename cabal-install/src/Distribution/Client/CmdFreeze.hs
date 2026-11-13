@@ -1,5 +1,4 @@
-{-# LANGUAGE NamedFieldPuns #-}
-{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE PatternSynonyms #-}
 
 -- | cabal-install CLI command: freeze
 module Distribution.Client.CmdFreeze
@@ -12,11 +11,13 @@ import Prelude ()
 
 import Distribution.Client.DistDirLayout
   ( DistDirLayout (distProjectFile)
+  , ProjectFileKey (ProjectFileKeyFreeze)
   )
 import Distribution.Client.IndexUtils (ActiveRepos, TotalIndexState, filterSkippedActiveRepos)
 import qualified Distribution.Client.InstallPlan as InstallPlan
 import Distribution.Client.NixStyleOptions
   ( NixStyleFlags (..)
+  , cfgVerbosity
   , defaultNixStyleFlags
   , nixStyleOptions
   )
@@ -40,8 +41,7 @@ import Distribution.Solver.Types.PackageConstraint
   )
 
 import Distribution.Client.Setup
-  ( ConfigFlags (..)
-  , GlobalFlags
+  ( GlobalFlags
   )
 import Distribution.Package
   ( PackageName
@@ -52,7 +52,7 @@ import Distribution.PackageDescription
   ( FlagAssignment
   , nullFlagAssignment
   )
-import Distribution.Simple.Flag (Flag (..), fromFlagOrDefault)
+import Distribution.Simple.Flag (pattern Flag)
 import Distribution.Simple.Utils
   ( dieWithException
   , notice
@@ -124,7 +124,7 @@ freezeCommand =
 -- For more details on how this works, see the module
 -- "Distribution.Client.ProjectOrchestration"
 freezeAction :: NixStyleFlags () -> [String] -> GlobalFlags -> IO ()
-freezeAction flags@NixStyleFlags{..} extraArgs globalFlags = do
+freezeAction flags extraArgs globalFlags = do
   unless (null extraArgs) $
     dieWithException verbosity $
       FreezeAction extraArgs
@@ -157,9 +157,9 @@ freezeAction flags@NixStyleFlags{..} extraArgs globalFlags = do
     else do
       writeProjectLocalFreezeConfig distDirLayout freezeConfig
       notice verbosity $
-        "Wrote freeze file: " ++ distProjectFile distDirLayout "freeze"
+        "Wrote freeze file: " ++ distProjectFile distDirLayout ProjectFileKeyFreeze
   where
-    verbosity = fromFlagOrDefault normal (configVerbosity configFlags)
+    verbosity = cfgVerbosity normal flags
     cliConfig =
       commandLineFlagsToProjectConfig
         globalFlags

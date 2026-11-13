@@ -1,5 +1,3 @@
-{-# LANGUAGE DeriveGeneric #-}
-
 module Distribution.Client.Dependency.Types
   ( PreSolver (..)
   , Solver (..)
@@ -24,6 +22,8 @@ data Solver = Modular
 instance Binary PreSolver
 instance Binary Solver
 
+instance NFData PreSolver
+
 instance Structured PreSolver
 instance Structured Solver
 
@@ -44,11 +44,12 @@ data PackagesPreferenceDefault
     -- installed version.
     --
     -- * This is the standard policy for upgrade.
+    -- * This is enabled by --prefer-version=latest for install
     PreferAllLatest
   | -- | Always prefer the oldest version irrespective of any existing
     -- installed version or packages explicitly requested.
     --
-    -- * This is enabled by --prefer-oldest.
+    -- * This is enabled by --prefer-version=oldest for install.
     PreferAllOldest
   | -- | Always prefer the installed versions over ones that would need to be
     -- installed. Secondarily, prefer latest versions (eg the latest installed

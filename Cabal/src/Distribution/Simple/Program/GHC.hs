@@ -1,18 +1,25 @@
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DerivingVia #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 
 module Distribution.Simple.Program.GHC
   ( GhcOptions (..)
   , GhcMode (..)
   , GhcOptimisation (..)
   , GhcDynLinkMode (..)
+  , GhcObjectMode (..)
   , GhcProfAuto (..)
+  , GhcFeature (..)
+  , ghcFeatureFlag
+  , detectGhcFeatures
+  , ghcSupports
   , ghcInvocation
   , renderGhcOptions
   , runGHC
+  , runGHCWithResponseFile
+  , runReplProgram
   , packageDbArgsDb
   , normaliseGhcArgs
   ) where
@@ -20,8 +27,8 @@ module Distribution.Simple.Program.GHC
 import Distribution.Compat.Prelude
 import Prelude ()
 
+import Data.Semigroup (First (..), Last (..))
 import Distribution.Backpack
-import Distribution.Compat.Semigroup (First' (..), Last' (..), Option' (..))
 import Distribution.ModuleName
 import Distribution.PackageDescription
 import Distribution.Pretty
@@ -29,25 +36,33 @@ import Distribution.Simple.Compiler
 import Distribution.Simple.Flag
 import Distribution.Simple.GHC.ImplInfo
 import Distribution.Simple.Program.Find (getExtraPathEnv)
+import Distribution.Simple.Program.ResponseFile
 import Distribution.Simple.Program.Run
 import Distribution.Simple.Program.Types
+import Distribution.Simple.Utils (TempFileOptions, infoNoWrap)
 import Distribution.System
 import Distribution.Types.ComponentId
+import Distribution.Types.ParStrat
 import Distribution.Utils.NubList
+import Distribution.Utils.Path
 import Distribution.Verbosity
 import Distribution.Version
+
+import GHC.IO.Encoding (TextEncoding)
 import Language.Haskell.Extension
 
 import Data.List (stripPrefix)
 import qualified Data.Map as Map
 import Data.Monoid (All (..), Any (..), Endo (..))
 import qualified Data.Set as Set
-import Distribution.Types.ParStrat
+import Data.Text (Text)
+import qualified Data.Text as Text
+import qualified System.Process as Process
 
 normaliseGhcArgs :: Maybe Version -> PackageDescription -> [String] -> [String]
 normaliseGhcArgs (Just ghcVersion) PackageDescription{..} ghcArgs
   | ghcVersion `withinRange` supportedGHCVersions =
-      argumentFilters . filter simpleFilters . filterRtsOpts $ ghcArgs
+      argumentFilters . filter simpleFilters . filterRtsArgs $ ghcArgs
   where
     supportedGHCVersions :: VersionRange
     supportedGHCVersions = orLaterVersion (mkVersion [8, 0])
@@ -80,15 +95,15 @@ normaliseGhcArgs (Just ghcVersion) PackageDescription{..} ghcArgs
         checkComponentFlags getInfo = foldMap (checkComponent . getInfo)
           where
             checkComponent :: BuildInfo -> m
-            checkComponent = foldMap fun . filterGhcOptions . allGhcOptions
+            checkComponent = foldMap (fun . map Text.unpack) . filterGhcOptions . allGhcOptions
 
-            allGhcOptions :: BuildInfo -> [(CompilerFlavor, [String])]
+            allGhcOptions :: BuildInfo -> [(CompilerFlavor, [Text])]
             allGhcOptions =
               foldMap
                 (perCompilerFlavorToList .)
                 [options, profOptions, sharedOptions, staticOptions]
 
-            filterGhcOptions :: [(CompilerFlavor, [String])] -> [[String]]
+            filterGhcOptions :: [(CompilerFlavor, a)] -> [a]
             filterGhcOptions l = [opts | (GHC, opts) <- l]
 
     safeToFilterWarnings :: Bool
@@ -136,15 +151,18 @@ normaliseGhcArgs (Just ghcVersion) PackageDescription{..} ghcArgs
     flagArgumentFilter :: [String] -> [String] -> [String]
     flagArgumentFilter flags = go
       where
-        makeFilter :: String -> String -> Option' (First' ([String] -> [String]))
-        makeFilter flag arg = Option' $ First' . filterRest <$> stripPrefix flag arg
+        makeFilter :: String -> String -> Maybe (First ([String] -> [String]))
+        makeFilter flag arg = First . filterRest <$> stripPrefix flag arg
           where
+            -- Drop the next argument, whether it comes after a `=` or
+            -- is stand-alone.
+            filterRest :: String -> [String] -> [String]
             filterRest leftOver = case dropEq leftOver of
               [] -> drop 1
               _ -> id
 
         checkFilter :: String -> Maybe ([String] -> [String])
-        checkFilter = fmap getFirst' . getOption' . foldMap makeFilter flags
+        checkFilter = fmap getFirst . foldMap makeFilter flags
 
         go :: [String] -> [String]
         go [] = []
@@ -152,24 +170,24 @@ normaliseGhcArgs (Just ghcVersion) PackageDescription{..} ghcArgs
           Just f -> go (f args)
           Nothing -> arg : go args
 
+    -- Options that take parameters and do not modify the generated artifacts
+    -- are filtered out.
     argumentFilters :: [String] -> [String]
     argumentFilters =
       flagArgumentFilter
-        ["-ghci-script", "-H", "-interactive-print"]
+        [ "-ghci-script"
+        , "-H"
+        , "-interactive-print"
+        , "-fghci-browser-assets-dir"
+        ]
 
-    filterRtsOpts :: [String] -> [String]
-    filterRtsOpts = go False
-      where
-        go :: Bool -> [String] -> [String]
-        go _ [] = []
-        go _ ("+RTS" : opts) = go True opts
-        go _ ("-RTS" : opts) = go False opts
-        go isRTSopts (opt : opts) = addOpt $ go isRTSopts opts
-          where
-            addOpt
-              | isRTSopts = id
-              | otherwise = (opt :)
+    -- \| Remove RTS arguments from a list.
+    filterRtsArgs :: [String] -> [String]
+    filterRtsArgs = snd . splitRTSArgs
 
+    -- Simple options (i.e. that do not take parameters, or just
+    -- take int parameters) which do *not* change generated artifacts
+    -- are filtered out.
     simpleFilters :: String -> Bool
     simpleFilters =
       not
@@ -180,7 +198,8 @@ normaliseGhcArgs (Just ghcVersion) PackageDescription{..} ghcArgs
           , Any . isPrefixOf "-dsuppress-"
           , Any . isPrefixOf "-dno-suppress-"
           , flagIn $ invertibleFlagSet "-" ["ignore-dot-ghci"]
-          , flagIn . invertibleFlagSet "-f" . mconcat $
+          , -- -f-something -f-no-something options.
+            flagIn . invertibleFlagSet "-f" . mconcat $
               [
                 [ "reverse-errors"
                 , "warn-unused-binds"
@@ -223,8 +242,27 @@ normaliseGhcArgs (Just ghcVersion) PackageDescription{..} ghcArgs
                   , "keep-going" -- try harder, the build will still fail if it's erroneous
                   , "print-axiom-incomps" -- print more debug info for closed type families
                   ]
+              , from
+                  [9, 2]
+                  [ "family-application-cache"
+                  ]
+              , from
+                  [9, 6]
+                  [ "print-redundant-promotion-ticks"
+                  , "show-error-context"
+                  ]
+              , from
+                  [9, 8]
+                  [ "unoptimized-core-for-interpreter"
+                  ]
+              , from
+                  [9, 10]
+                  [ "diagnostics-as-json"
+                  , "print-error-index-links"
+                  , "break-points"
+                  ]
               ]
-          , flagIn . invertibleFlagSet "-d" $ ["ppr-case-as-let", "ppr-ticks"]
+          , flagIn $ invertibleFlagSet "-d" ["ppr-case-as-let", "ppr-ticks"]
           , isOptIntFlag
           , isIntFlag
           , if safeToFilterWarnings
@@ -285,6 +323,7 @@ normaliseGhcArgs (Just ghcVersion) PackageDescription{..} ghcArgs
         , from [8, 6] ["-dhex-word-literals"]
         , from [8, 8] ["-fshow-docs-of-hole-fits", "-fno-show-docs-of-hole-fits"]
         , from [9, 0] ["-dlinear-core-lint"]
+        , from [9, 10] ["-dipe-stats"]
         ]
 
     isOptIntFlag :: String -> Any
@@ -299,9 +338,12 @@ normaliseGhcArgs (Just ghcVersion) PackageDescription{..} ghcArgs
           , "-ddpr-cols"
           , "-dtrace-level"
           , "-fghci-hist-size"
+          , "-dinitial-unique"
+          , "-dunique-increment"
           ]
         , from [8, 2] ["-fmax-uncovered-patterns", "-fmax-errors"]
         , from [8, 4] $ to [8, 6] ["-fmax-valid-substitutions"]
+        , from [9, 12] ["-fmax-forced-spec-args", "-fwrite-if-compression"]
         ]
 
     dropIntFlag :: Bool -> String -> String -> Any
@@ -340,12 +382,12 @@ normaliseGhcArgs (Just ghcVersion) PackageDescription{..} ghcArgs
     safeToFilterHoles :: Bool
     safeToFilterHoles =
       getAll . checkGhcFlags $
-        All . fromMaybe True . fmap getLast' . getOption' . foldMap notDeferred
+        All . maybe True getLast . foldMap notDeferred
       where
-        notDeferred :: String -> Option' (Last' Bool)
-        notDeferred "-fdefer-typed-holes" = Option' . Just . Last' $ False
-        notDeferred "-fno-defer-typed-holes" = Option' . Just . Last' $ True
-        notDeferred _ = Option' Nothing
+        notDeferred :: String -> Maybe (Last Bool)
+        notDeferred "-fdefer-typed-holes" = Just . Last $ False
+        notDeferred "-fno-defer-typed-holes" = Just . Last $ True
+        notDeferred _ = Nothing
 
     isTypedHoleFlag :: String -> Any
     isTypedHoleFlag =
@@ -398,13 +440,13 @@ data GhcOptions = GhcOptions
   , -----------------------
     -- Inputs and outputs
 
-    ghcOptInputFiles :: NubListR FilePath
+    ghcOptInputFiles :: NubListR (SymbolicPath Pkg File)
   -- ^ The main input files; could be .hs, .hi, .c, .o, depending on mode.
-  , ghcOptInputScripts :: NubListR FilePath
+  , ghcOptInputScripts :: NubListR (SymbolicPath Pkg File)
   -- ^ Script files with irregular extensions that need -x hs.
   , ghcOptInputModules :: NubListR ModuleName
   -- ^ The names of input Haskell modules, mainly for @--make@ mode.
-  , ghcOptOutputFile :: Flag FilePath
+  , ghcOptOutputFile :: Flag (SymbolicPath Pkg File)
   -- ^ Location for output file; the @ghc -o@ flag.
   , ghcOptOutputDynFile :: Flag FilePath
   -- ^ Location for dynamic output file in 'GhcStaticAndDynamic' mode;
@@ -412,8 +454,10 @@ data GhcOptions = GhcOptions
   , ghcOptSourcePathClear :: Flag Bool
   -- ^ Start with an empty search path for Haskell source files;
   -- the @ghc -i@ flag (@-i@ on its own with no path argument).
-  , ghcOptSourcePath :: NubListR FilePath
+  , ghcOptSourcePath :: NubListR (SymbolicPath Pkg (Dir Source))
   -- ^ Search path for Haskell source files; the @ghc -i@ flag.
+  , ghcOptUnitFiles :: [FilePath]
+  -- ^ Unit files to load; the @ghc -unit@ flag.
   , -------------
     -- Packages
 
@@ -453,13 +497,13 @@ data GhcOptions = GhcOptions
 
     ghcOptLinkLibs :: [FilePath]
   -- ^ Names of libraries to link in; the @ghc -l@ flag.
-  , ghcOptLinkLibPath :: NubListR FilePath
+  , ghcOptLinkLibPath :: NubListR (SymbolicPath Pkg (Dir Lib))
   -- ^ Search path for libraries to link in; the @ghc -L@ flag.
   , ghcOptLinkOptions :: [String]
   -- ^ Options to pass through to the linker; the @ghc -optl@ flag.
   , ghcOptLinkFrameworks :: NubListR String
   -- ^ OSX only: frameworks to link in; the @ghc -framework@ flag.
-  , ghcOptLinkFrameworkDirs :: NubListR String
+  , ghcOptLinkFrameworkDirs :: NubListR (SymbolicPath Pkg (Dir Framework))
   -- ^ OSX only: Search path for frameworks to link in; the
   -- @ghc -framework-path@ flag.
   , ghcOptLinkRts :: Flag Bool
@@ -482,14 +526,18 @@ data GhcOptions = GhcOptions
   -- ^ Options to pass through to the Assembler.
   , ghcOptCppOptions :: [String]
   -- ^ Options to pass through to CPP; the @ghc -optP@ flag.
-  , ghcOptCppIncludePath :: NubListR FilePath
+  , ghcOptJSppOptions :: [String]
+  -- ^ Options to pass through to CPP; the @ghc -optJSP@ flag. @since 3.16.0.0
+  , ghcOptCppIncludePath :: NubListR (SymbolicPath Pkg (Dir Include))
   -- ^ Search path for CPP includes like header files; the @ghc -I@ flag.
-  , ghcOptCppIncludes :: NubListR FilePath
+  , ghcOptCppIncludes :: NubListR (SymbolicPath Pkg File)
   -- ^ Extra header files to include at CPP stage; the @ghc -optP-include@ flag.
   , ghcOptFfiIncludes :: NubListR FilePath
   -- ^ Extra header files to include for old-style FFI; the @ghc -#include@ flag.
   , ghcOptCcProgram :: Flag FilePath
-  -- ^ Program to use for the C and C++ compiler; the @ghc -pgmc@ flag.
+  -- ^ Program to use for the C compiler; the @ghc -pgmc@ flag.
+  , ghcOptGppProgram :: Flag FilePath
+  -- ^ Program to use for the C++ compiler; the @ghc -pgmcxx@ flag.
   , ----------------------------
     -- Language and extensions
 
@@ -517,7 +565,7 @@ data GhcOptions = GhcOptions
   -- ^ Use the \"split object files\" feature; the @ghc -split-objs@ flag.
   , ghcOptNumJobs :: Flag ParStrat
   -- ^ Run N jobs simultaneously (if possible).
-  , ghcOptHPCDir :: Flag FilePath
+  , ghcOptHPCDir :: Flag (SymbolicPath Pkg (Dir Mix))
   -- ^ Enable coverage analysis; the @ghc -fhpc -hpcdir@ flags.
   , ----------------
     -- GHCi
@@ -533,26 +581,29 @@ data GhcOptions = GhcOptions
   -- ^ only in 'GhcStaticAndDynamic' mode
   , ghcOptDynObjSuffix :: Flag String
   -- ^ only in 'GhcStaticAndDynamic' mode
-  , ghcOptHiDir :: Flag FilePath
-  , ghcOptHieDir :: Flag FilePath
-  , ghcOptObjDir :: Flag FilePath
-  , ghcOptOutputDir :: Flag FilePath
-  , ghcOptStubDir :: Flag FilePath
+  , ghcOptHiDir :: Flag (SymbolicPath Pkg (Dir Artifacts))
+  , ghcOptHieDir :: Flag (SymbolicPath Pkg (Dir Artifacts))
+  , ghcOptObjDir :: Flag (SymbolicPath Pkg (Dir Artifacts))
+  , ghcOptOutputDir :: Flag (SymbolicPath Pkg (Dir Artifacts))
+  , ghcOptStubDir :: Flag (SymbolicPath Pkg (Dir Artifacts))
+  , ghcOptBytecodeDir :: Flag (SymbolicPath Pkg (Dir Artifacts))
   , --------------------
     -- Creating libraries
 
     ghcOptDynLinkMode :: Flag GhcDynLinkMode
+  , ghcOptObjectMode :: Flag GhcObjectMode
   , ghcOptStaticLib :: Flag Bool
   , ghcOptShared :: Flag Bool
+  , ghcOptBytecodeLib :: Flag Bool
   , ghcOptFPic :: Flag Bool
   , ghcOptDylibName :: Flag String
   , ghcOptRPaths :: NubListR FilePath
   , ---------------
     -- Misc flags
 
-    ghcOptVerbosity :: Flag Verbosity
+    ghcOptVerbosity :: Flag VerbosityLevel
   -- ^ Get GHC to be quiet or verbose with what it's doing; the @ghc -v@ flag.
-  , ghcOptExtraPath :: NubListR FilePath
+  , ghcOptExtraPath :: NubListR (SymbolicPath Pkg (Dir Build))
   -- ^ Put the extra folders in the PATH environment variable we invoke
   -- GHC with
   , ghcOptCabal :: Flag Bool
@@ -560,6 +611,7 @@ data GhcOptions = GhcOptions
   -- Modifies some of the GHC error messages.
   }
   deriving (Show, Generic)
+  deriving (Semigroup, Monoid) via Generically GhcOptions
 
 data GhcMode
   = -- | @ghc -c@
@@ -571,9 +623,11 @@ data GhcMode
   | -- | @ghci@ \/ @ghc --interactive@
     GhcModeInteractive
   | -- | @ghc --abi-hash@
-    --             | GhcModeDepAnalysis -- ^ @ghc -M@
-    --             | GhcModeEvaluate    -- ^ @ghc -e@
     GhcModeAbiHash
+  | -- | @ghc --merge-objs@
+    GhcModeMergeObjs
+  --             | GhcModeDepAnalysis -- ^ @ghc -M@
+  --             | GhcModeEvaluate    -- ^ @ghc -e@
   deriving (Show, Eq)
 
 data GhcOptimisation
@@ -596,6 +650,15 @@ data GhcDynLinkMode
     GhcStaticAndDynamic
   deriving (Show, Eq)
 
+data GhcObjectMode
+  = -- | -fobject-code
+    GhcObjectCode
+  | -- | -fbyte-code
+    GhcByteCode
+  | -- | -fbyte-code-and-object-code
+    GhcByteCodeAndObjectCode
+  deriving (Show, Eq)
+
 data GhcProfAuto
   = -- | @-fprof-auto@
     GhcProfAutoAll
@@ -612,34 +675,108 @@ runGHC
   -> ConfiguredProgram
   -> Compiler
   -> Platform
+  -> Maybe (SymbolicPath CWD (Dir Pkg))
   -> GhcOptions
   -> IO ()
-runGHC verbosity ghcProg comp platform opts = do
-  runProgramInvocation verbosity =<< ghcInvocation verbosity ghcProg comp platform opts
+runGHC verbosity ghcProg comp platform mbWorkDir opts = do
+  runProgramInvocation verbosity
+    =<< ghcInvocation verbosity ghcProg comp platform mbWorkDir opts
+
+runGHCWithResponseFile
+  :: FilePath
+  -> Maybe TextEncoding
+  -> TempFileOptions
+  -> Verbosity
+  -> ConfiguredProgram
+  -> Compiler
+  -> Platform
+  -> Maybe (SymbolicPath CWD (Dir Pkg))
+  -> GhcOptions
+  -> IO ()
+runGHCWithResponseFile fileNameTemplate encoding tempFileOptions verbosity ghcProg comp platform maybeWorkDir opts = do
+  invocation <- ghcInvocation verbosity ghcProg comp platform maybeWorkDir opts
+
+  let compilerSupportsResponseFiles =
+        case compilerCompatVersion GHC comp of
+          -- GHC 9.4 is the first version which supports response files.
+          Just version -> version >= mkVersion [9, 4]
+          Nothing -> False
+
+      args = progInvokeArgs invocation
+
+  if not compilerSupportsResponseFiles
+    then runProgramInvocation verbosity invocation
+    else do
+      let (rtsArgs, otherArgs) = splitRTSArgs args
+
+      withResponseFile
+        verbosity
+        tempFileOptions
+        fileNameTemplate
+        encoding
+        otherArgs
+        $ \responseFile -> do
+          let newInvocation =
+                invocation{progInvokeArgs = ('@' : responseFile) : rtsArgs}
+
+          infoNoWrap verbosity $
+            "GHC response file arguments: "
+              <> case otherArgs of
+                [] -> ""
+                arg : args' -> Process.showCommandForUser arg args'
+
+          runProgramInvocation verbosity newInvocation
+
+-- Start the repl.  Either use `ghc`, or the program specified by the --with-repl flag.
+runReplProgram
+  :: Maybe FilePath
+  -- ^ --with-repl argument
+  -> TempFileOptions
+  -> Verbosity
+  -> ConfiguredProgram
+  -> Compiler
+  -> Platform
+  -> Maybe (SymbolicPath CWD (Dir Pkg))
+  -> GhcOptions
+  -> IO ()
+runReplProgram withReplProg tempFileOptions verbosity ghcProg comp platform mbWorkDir ghcOpts =
+  let replProg = case withReplProg of
+        Just path -> ghcProg{programLocation = FoundOnSystem path}
+        Nothing -> ghcProg
+   in runGHCWithResponseFile "ghci.rsp" Nothing tempFileOptions verbosity replProg comp platform mbWorkDir ghcOpts
 
 ghcInvocation
   :: Verbosity
   -> ConfiguredProgram
   -> Compiler
   -> Platform
+  -> Maybe (SymbolicPath CWD (Dir Pkg))
   -> GhcOptions
   -> IO ProgramInvocation
-ghcInvocation verbosity ghcProg comp platform opts = do
+ghcInvocation verbosity ghcProg comp platform mbWorkDir opts = do
   -- NOTE: GHC is the only program whose path we modify with more values than
   -- the standard @extra-prog-path@, namely the folders of the executables in
   -- the components, see @componentGhcOptions@.
   let envOverrides = programOverrideEnv ghcProg
-  extraPath <- getExtraPathEnv verbosity envOverrides (fromNubListR (ghcOptExtraPath opts))
+  extraPath <-
+    getExtraPathEnv verbosity envOverrides $
+      map getSymbolicPath $
+        fromNubListR $
+          ghcOptExtraPath opts
   let ghcProg' = ghcProg{programOverrideEnv = envOverrides ++ extraPath}
+  return $
+    programInvocationCwd mbWorkDir ghcProg' $
+      renderGhcOptions comp platform opts
 
-  pure $ programInvocation ghcProg' (renderGhcOptions comp platform opts)
+-- TODO: use the -working-dir GHC flag instead of setting the process
+-- working directory, as this improves error messages.
 
 renderGhcOptions :: Compiler -> Platform -> GhcOptions -> [String]
 renderGhcOptions comp _platform@(Platform _arch os) opts
-  | compilerFlavor comp `notElem` [GHC, GHCJS] =
+  | compilerFlavor comp /= GHC =
       error $
         "Distribution.Simple.Program.GHC.renderGhcOptions: "
-          ++ "compiler flavor must be 'GHC' or 'GHCJS'!"
+          ++ "compiler flavor must be 'GHC'!"
   | otherwise =
       concat
         [ case flagToMaybe (ghcOptMode opts) of
@@ -649,6 +786,7 @@ renderGhcOptions comp _platform@(Platform _arch os) opts
             Just GhcModeMake -> ["--make"]
             Just GhcModeInteractive -> ["--interactive"]
             Just GhcModeAbiHash -> ["--abi-hash"]
+            Just GhcModeMergeObjs -> ["--merge-objs"]
         , --     Just GhcModeDepAnalysis -> ["-M"]
           --     Just GhcModeEvaluate    -> ["-e", expr]
 
@@ -681,31 +819,25 @@ renderGhcOptions comp _platform@(Platform _arch os) opts
               | not (flagBool ghcOptProfilingMode) ->
                   []
             Nothing -> []
-            Just GhcProfAutoAll
-              | flagProfAuto implInfo -> ["-fprof-auto"]
-              | otherwise -> ["-auto-all"] -- not the same, but close
+            Just GhcProfAutoAll -> ["-fprof-auto"]
             Just GhcProfLate
               | flagProfLate implInfo -> ["-fprof-late"]
               | otherwise -> ["-fprof-auto-top"] -- not the same, not very close, but what we have.
-            Just GhcProfAutoToplevel
-              | flagProfAuto implInfo -> ["-fprof-auto-top"]
-              | otherwise -> ["-auto-all"]
-            Just GhcProfAutoExported
-              | flagProfAuto implInfo -> ["-fprof-auto-exported"]
-              | otherwise -> ["-auto"]
+            Just GhcProfAutoToplevel -> ["-fprof-auto-top"]
+            Just GhcProfAutoExported -> ["-fprof-auto-exported"]
         , ["-split-sections" | flagBool ghcOptSplitSections]
-        , ["-split-objs" | flagBool ghcOptSplitObjs]
+        , case compilerCompatVersion GHC comp of
+            -- the -split-objs flag was removed in GHC 9.8
+            Just ver | ver >= mkVersion [9, 8] -> []
+            _ -> ["-split-objs" | flagBool ghcOptSplitObjs]
         , case flagToMaybe (ghcOptHPCDir opts) of
             Nothing -> []
-            Just hpcdir -> ["-fhpc", "-hpcdir", hpcdir]
+            Just hpcdir -> ["-fhpc", "-hpcdir", u hpcdir]
         , if parmakeSupported comp
             then case ghcOptNumJobs opts of
               NoFlag -> []
               Flag Serial -> []
-              Flag (UseSem name) ->
-                if jsemSupported comp
-                  then ["-jsem " ++ name]
-                  else []
+              Flag (UseSem name) -> ["-jsem " ++ name | jsemSupported comp]
               Flag (NumJobs n) -> ["-j" ++ maybe "" show n]
             else []
         , --------------------
@@ -713,11 +845,17 @@ renderGhcOptions comp _platform@(Platform _arch os) opts
 
           ["-staticlib" | flagBool ghcOptStaticLib]
         , ["-shared" | flagBool ghcOptShared]
+        , ["-bytecodelib" | flagBool ghcOptBytecodeLib]
         , case flagToMaybe (ghcOptDynLinkMode opts) of
             Nothing -> []
             Just GhcStaticOnly -> ["-static"]
             Just GhcDynamicOnly -> ["-dynamic"]
             Just GhcStaticAndDynamic -> ["-static", "-dynamic-too"]
+        , case flagToMaybe (ghcOptObjectMode opts) of
+            Nothing -> []
+            Just GhcObjectCode -> ["-fobject-code"]
+            Just GhcByteCode -> ["-fbyte-code", "-fwrite-interface", "-fwrite-byte-code"]
+            Just GhcByteCodeAndObjectCode -> ["-fbyte-code-and-object-code"]
         , ["-fPIC" | flagBool ghcOptFPic]
         , concat [["-dylib-install-name", libname] | libname <- flag ghcOptDylibName]
         , ------------------------
@@ -727,41 +865,45 @@ renderGhcOptions comp _platform@(Platform _arch os) opts
         , concat [["-hisuf", suf] | suf <- flag ghcOptHiSuffix]
         , concat [["-dynosuf", suf] | suf <- flag ghcOptDynObjSuffix]
         , concat [["-dynhisuf", suf] | suf <- flag ghcOptDynHiSuffix]
-        , concat [["-outputdir", dir] | dir <- flag ghcOptOutputDir]
-        , concat [["-odir", dir] | dir <- flag ghcOptObjDir]
-        , concat [["-hidir", dir] | dir <- flag ghcOptHiDir]
-        , concat [["-hiedir", dir] | dir <- flag ghcOptHieDir]
-        , concat [["-stubdir", dir] | dir <- flag ghcOptStubDir]
+        , concat [["-outputdir", u dir] | dir <- flag ghcOptOutputDir]
+        , concat [["-odir", u dir] | dir <- flag ghcOptObjDir]
+        , concat [["-hidir", u dir] | dir <- flag ghcOptHiDir]
+        , concat [["-hiedir", u dir] | dir <- flag ghcOptHieDir]
+        , concat [["-gbcdir", u dir] | bytecodeArtifactsSupported comp, dir <- flag ghcOptBytecodeDir]
+        , concat [["-stubdir", u dir] | dir <- flag ghcOptStubDir]
         , -----------------------
           -- Source search path
 
           ["-i" | flagBool ghcOptSourcePathClear]
-        , ["-i" ++ dir | dir <- flags ghcOptSourcePath]
+        , ["-i" ++ u dir | dir <- flags ghcOptSourcePath]
         , --------------------
 
           --------------------
           -- CPP, C, and C++ stuff
 
-          ["-I" ++ dir | dir <- flags ghcOptCppIncludePath]
+          ["-I" ++ u dir | dir <- flags ghcOptCppIncludePath]
         , ["-optP" ++ opt | opt <- ghcOptCppOptions opts]
+        , ["-optJSP" ++ opt | opt <- ghcOptJSppOptions opts]
         , concat
-            [ ["-optP-include", "-optP" ++ inc]
+            [ ["-optP-include", "-optP" ++ u inc]
             | inc <- flags ghcOptCppIncludes
             ]
         , ["-optc" ++ opt | opt <- ghcOptCcOptions opts]
         , -- C++ compiler options: GHC >= 8.10 requires -optcxx, older requires -optc
+          -- https://gitlab.haskell.org/ghc/ghc/-/issues/16477
           let cxxflag = case compilerCompatVersion GHC comp of
                 Just v | v >= mkVersion [8, 10] -> "-optcxx"
                 _ -> "-optc"
            in [cxxflag ++ opt | opt <- ghcOptCxxOptions opts]
         , ["-opta" ++ opt | opt <- ghcOptAsmOptions opts]
         , concat [["-pgmc", cc] | cc <- flag ghcOptCcProgram]
+        , concat [["-pgmcxx", cxx] | cxx <- flag ghcOptGppProgram]
         , -----------------
           -- Linker stuff
 
           ["-optl" ++ opt | opt <- ghcOptLinkOptions opts]
         , ["-l" ++ lib | lib <- ghcOptLinkLibs opts]
-        , ["-L" ++ dir | dir <- flags ghcOptLinkLibPath]
+        , ["-L" ++ u dir | dir <- flags ghcOptLinkLibPath]
         , if isOSX
             then
               concat
@@ -772,7 +914,7 @@ renderGhcOptions comp _platform@(Platform _arch os) opts
         , if isOSX
             then
               concat
-                [ ["-framework-path", path]
+                [ ["-framework-path", u path]
                 | path <- flags ghcOptLinkFrameworkDirs
                 ]
             else []
@@ -784,8 +926,7 @@ renderGhcOptions comp _platform@(Platform _arch os) opts
           -- Packages
 
           concat
-            [ [ case () of
-                  _
+            [ [ if
                     | unitIdSupported comp -> "-this-unit-id"
                     | packageKeySupported comp -> "-this-package-key"
                     | otherwise -> "-package-name"
@@ -800,8 +941,8 @@ renderGhcOptions comp _platform@(Platform _arch os) opts
         , if null (ghcOptInstantiatedWith opts)
             then []
             else
-              "-instantiated-with"
-                : intercalate
+              [ "-instantiated-with"
+              , intercalate
                   ","
                   ( map
                       ( \(n, m) ->
@@ -811,12 +952,12 @@ renderGhcOptions comp _platform@(Platform _arch os) opts
                       )
                       (ghcOptInstantiatedWith opts)
                   )
-                : []
+              ]
         , concat [["-fno-code", "-fwrite-interface"] | flagBool ghcOptNoCode]
         , ["-hide-all-packages" | flagBool ghcOptHideAllPackages]
         , ["-Wmissing-home-modules" | flagBool ghcOptWarnMissingHomeModules]
         , ["-no-auto-link-packages" | flagBool ghcOptNoAutoLinkPackages]
-        , packageDbArgs implInfo (ghcOptPackageDBs opts)
+        , packageDbArgsDb (interpretPackageDBStack Nothing (ghcOptPackageDBs opts))
         , concat $
             let space "" = ""
                 space xs = ' ' : xs
@@ -826,9 +967,7 @@ renderGhcOptions comp _platform@(Platform _arch os) opts
         , ----------------------------
           -- Language and extensions
 
-          if supportsHaskell2010 implInfo
-            then ["-X" ++ prettyShow lang | lang <- flag ghcOptLanguage]
-            else []
+          ["-X" ++ prettyShow lang | lang <- flag ghcOptLanguage]
         , [ ext'
           | ext <- flags ghcOptExtensions
           , ext' <- case Map.lookup ext (ghcOptExtensionMap opts) of
@@ -844,57 +983,44 @@ renderGhcOptions comp _platform@(Platform _arch os) opts
           -- GHCi
 
           concat
-            [ ["-ghci-script", script] | script <- ghcOptGHCiScripts opts, flagGhciScript implInfo
+            [ ["-ghci-script", script] | script <- ghcOptGHCiScripts opts
             ]
         , ---------------
           -- Inputs
 
           -- Specify the input file(s) first, so that in ghci the `main-is` module is
           -- in scope instead of the first module defined in `other-modules`.
-          flags ghcOptInputFiles
-        , concat [["-x", "hs", script] | script <- flags ghcOptInputScripts]
+          map u $ flags ghcOptInputFiles
+        , concat [["-x", "hs", u script] | script <- flags ghcOptInputScripts]
         , [prettyShow modu | modu <- flags ghcOptInputModules]
-        , concat [["-o", out] | out <- flag ghcOptOutputFile]
+        , concat [["-o", u out] | out <- flag ghcOptOutputFile]
         , concat [["-dyno", out] | out <- flag ghcOptOutputDynFile]
+        , -- unit files
+          concat [["-unit", "@" ++ unit] | unit <- ghcOptUnitFiles opts]
         , ---------------
           -- Extra
 
           ghcOptExtra opts
         ]
   where
+    -- See Note [Symbolic paths] in Distribution.Utils.Path
+    u :: SymbolicPath Pkg to -> FilePath
+    u = interpretSymbolicPathCWD
     implInfo = getImplInfo comp
     isOSX = os == OSX
     flag flg = flagToList (flg opts)
     flags flg = fromNubListR . flg $ opts
     flagBool flg = fromFlagOrDefault False (flg opts)
 
-verbosityOpts :: Verbosity -> [String]
+verbosityOpts :: VerbosityLevel -> [String]
 verbosityOpts verbosity
-  | verbosity >= deafening = ["-v"]
-  | verbosity >= normal = []
+  | verbosity >= Deafening = ["-v"]
+  | verbosity >= Normal = []
   | otherwise = ["-w", "-v0"]
 
--- | GHC <7.6 uses '-package-conf' instead of '-package-db'.
-packageDbArgsConf :: PackageDBStack -> [String]
-packageDbArgsConf dbstack = case dbstack of
-  (GlobalPackageDB : UserPackageDB : dbs) -> concatMap specific dbs
-  (GlobalPackageDB : dbs) ->
-    ("-no-user-package-conf")
-      : concatMap specific dbs
-  _ -> ierror
-  where
-    specific (SpecificPackageDB db) = ["-package-conf", db]
-    specific _ = ierror
-    ierror =
-      error $
-        "internal error: unexpected package db stack: "
-          ++ show dbstack
-
--- | GHC >= 7.6 uses the '-package-db' flag. See
--- https://gitlab.haskell.org/ghc/ghc/-/issues/5977.
-packageDbArgsDb :: PackageDBStack -> [String]
+packageDbArgsDb :: PackageDBStackCWD -> [String]
 -- special cases to make arguments prettier in common scenarios
-packageDbArgsDb dbstack = case dbstack of
+packageDbArgsDb = \case
   (GlobalPackageDB : UserPackageDB : dbs)
     | all isSpecific dbs -> concatMap single dbs
   (GlobalPackageDB : dbs)
@@ -911,17 +1037,83 @@ packageDbArgsDb dbstack = case dbstack of
     isSpecific (SpecificPackageDB _) = True
     isSpecific _ = False
 
-packageDbArgs :: GhcImplInfo -> PackageDBStack -> [String]
-packageDbArgs implInfo
-  | flagPackageConf implInfo = packageDbArgsConf
-  | otherwise = packageDbArgsDb
+-- | Split a list of command-line arguments into RTS arguments and non-RTS
+-- arguments.
+splitRTSArgs :: [String] -> ([String], [String])
+splitRTSArgs args =
+  let addRTSArg arg ~(rtsArgs, nonRTSArgs) = (arg : rtsArgs, nonRTSArgs)
+      addNonRTSArg arg ~(rtsArgs, nonRTSArgs) = (rtsArgs, arg : nonRTSArgs)
 
--- -----------------------------------------------------------------------------
--- Boilerplate Monoid instance for GhcOptions
+      go _ [] = ([], [])
+      go isRTSArg (arg : rest) =
+        case arg of
+          "+RTS" -> addRTSArg arg $ go True rest
+          "-RTS" -> addRTSArg arg $ go False rest
+          "--RTS" -> ([arg], rest)
+          "--" -> ([], arg : rest)
+          _ ->
+            if isRTSArg
+              then addRTSArg arg $ go isRTSArg rest
+              else addNonRTSArg arg $ go isRTSArg rest
+   in go False args
 
-instance Monoid GhcOptions where
-  mempty = gmempty
-  mappend = (<>)
+-- ---------------------------------------------------------------------------
+-- Feature detection
 
-instance Semigroup GhcOptions where
-  (<>) = gmappend
+-- | A feature of the @ghc@ program that Cabal detects by asking GHC which
+-- command-line flags it accepts (@ghc --show-options@), rather than by
+-- comparing version numbers as 'Distribution.Simple.GHC.ImplInfo' does.
+--
+-- Detection happens once, when the program is configured (see
+-- 'detectGhcFeatures'), and the outcome is recorded in the program's
+-- 'programProperties', so it is saved along with the rest of the configured
+-- program. Query it with 'ghcSupports'.
+--
+-- To add a feature, add a constructor and map it in 'ghcFeatureFlag' to the
+-- flag whose presence signals it.
+data GhcFeature
+  = -- | The @--merge-objs@ mode: merge object files into a GHCi library
+    -- with the merge tool GHC was configured with (GHC 9.4 and later).
+    GhcMergeObjs
+  deriving (Eq, Ord, Show, Enum, Bounded)
+
+-- | The command-line flag whose presence in @ghc --show-options@ signals
+-- the feature.
+ghcFeatureFlag :: GhcFeature -> String
+ghcFeatureFlag GhcMergeObjs = "--merge-objs"
+
+-- | The 'programProperties' key recording whether a feature is supported.
+ghcFeatureProperty :: GhcFeature -> String
+ghcFeatureProperty feature = "Supports " ++ ghcFeatureFlag feature
+
+-- | Ask GHC which command-line flags it accepts and record, for every
+-- 'GhcFeature', whether it is supported.
+--
+-- Meant to be called from the program's 'programPostConf'. If GHC cannot be
+-- queried (e.g. it predates @--show-options@) every feature is recorded as
+-- unsupported.
+detectGhcFeatures :: Verbosity -> ConfiguredProgram -> IO ConfiguredProgram
+detectGhcFeatures verbosity ghcProg = do
+  (output, _errors, exitCode) <-
+    getProgramInvocationOutputAndErrors
+      verbosity
+      (programInvocation (suppressOverrideArgs ghcProg) ["--show-options"])
+      `catchIO` (\_ -> return ("", "", ExitFailure 1))
+  let supportedFlags = case exitCode of
+        ExitSuccess -> Set.fromList (lines output)
+        ExitFailure _ -> Set.empty
+      record feature =
+        Map.insert
+          (ghcFeatureProperty feature)
+          (if ghcFeatureFlag feature `Set.member` supportedFlags then "YES" else "NO")
+  return
+    ghcProg
+      { programProperties =
+          foldr record (programProperties ghcProg) ([minBound .. maxBound] :: [GhcFeature])
+      }
+
+-- | Does the configured GHC support the feature? 'False' when detection did
+-- not run for this program.
+ghcSupports :: GhcFeature -> ConfiguredProgram -> Bool
+ghcSupports feature ghcProg =
+  Map.lookup (ghcFeatureProperty feature) (programProperties ghcProg) == Just "YES"

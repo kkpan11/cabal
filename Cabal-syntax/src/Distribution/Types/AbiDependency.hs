@@ -1,6 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-
 module Distribution.Types.AbiDependency where
 
 import Distribution.Compat.Prelude
@@ -27,19 +24,15 @@ data AbiDependency = AbiDependency
   { depUnitId :: Package.UnitId
   , depAbiHash :: Package.AbiHash
   }
-  deriving (Eq, Generic, Read, Show, Typeable)
+  deriving (Eq, Generic, Read, Show)
 
 instance Pretty AbiDependency where
   pretty (AbiDependency uid abi) =
     pretty uid <<>> Disp.char '=' <<>> pretty abi
 
 instance Parsec AbiDependency where
-  parsec = do
-    uid <- parsec
-    _ <- P.char '='
-    abi <- parsec
-    return (AbiDependency uid abi)
+  parsec = AbiDependency <$> parsec <* P.char '=' <*> parsec
 
 instance Binary AbiDependency
 instance Structured AbiDependency
-instance NFData AbiDependency where rnf = genericRnf
+instance NFData AbiDependency

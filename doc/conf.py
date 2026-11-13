@@ -13,7 +13,7 @@ import sphinx_rtd_theme
 sys.path.insert(0, os.path.abspath('.'))
 import cabaldomain
 
-version = "3.11.0.0"
+version = "3.19.0.0"
 
 extensions = [
     'sphinx.ext.extlinks',
@@ -39,7 +39,7 @@ extlinks = {
 
 # General information about the project.
 project = u'Cabal'
-copyright = u'2003-2024, Cabal Team'
+copyright = u'2003-2026, Cabal Team'
 # N.B. version comes from ghc_config
 release = version  # The full version, including alpha/beta/rc tags.
 
@@ -51,7 +51,7 @@ primary_domain = 'cabal'
 
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
-exclude_patterns = ['.build', "*.gen.rst"]
+exclude_patterns = ['.build', '*.gen.rst', '.venv']
 
 # -- Options for HTML output ---------------------------------------------
 
@@ -63,16 +63,14 @@ html_theme = 'sphinx_rtd_theme'
 if on_rtd:
     html_style = None
     using_rtd_theme = True
-else:
-    import sphinx_rtd_theme
-    html_theme_path = [sphinx_rtd_theme.get_html_theme_path()]
 
 # The name for this set of Sphinx documents.  If None, it defaults to
 # "<project> v<release> documentation".
 html_title = "Cabal {} User's Guide".format(release)
 html_short_title = "Cabal %s User's Guide" % release
 html_logo = 'images/Cabal-dark.png'
-html_static_path = ['images']
+html_static_path = ['images', '_static']
+html_css_files = ['custom.css']
 # Convert quotes and dashes to typographically correct entities
 html_use_smartypants = True
 html_show_copyright = True

@@ -3,10 +3,11 @@
 
 module UnitTests.Distribution.PackageDescription.Check (tests) where
 
-import Distribution.Compat.Prelude.Internal
+import Distribution.Compat.Prelude
 import Prelude ()
 
 import Distribution.PackageDescription.Check
+import Distribution.Simple.Utils (ordNub)
 
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -26,7 +27,7 @@ tests =
     allExplanationIdStrings = map ppCheckExplanationId [minBound..maxBound]
 
     uniqueNames :: Bool
-    uniqueNames = length allExplanationIdStrings == length (nub allExplanationIdStrings)
+    uniqueNames = length allExplanationIdStrings == length (ordNub allExplanationIdStrings)
 
     longerThan :: [CheckExplanationIDString]
     longerThan = filter ((>25). length) allExplanationIdStrings

@@ -61,7 +61,7 @@ GenericPackageDescription {
     synopsis =
     "Generic Programming using True Sums of Products",
     description =
-    concat
+    T.concat
       [
         "A library to support the definition of generic functions.\n",
         "Datatypes are viewed in a uniform, structured way:\n",
@@ -119,11 +119,12 @@ GenericPackageDescription {
     testSuites = [],
     benchmarks = [],
     dataFiles = [],
-    dataDir = ".",
+    dataDir = SymbolicPath ".",
     extraSrcFiles = [
-      "CHANGELOG.md"],
+      SymbolicPath "CHANGELOG.md"],
     extraTmpFiles = [],
-    extraDocFiles = []},
+    extraDocFiles = [],
+    extraFiles = []},
   gpdScannedVersion = Nothing,
   genPackageFlags = [],
   condLibrary = Just
@@ -166,6 +167,7 @@ GenericPackageDescription {
           cmmOptions = [],
           ccOptions = [],
           cxxOptions = [],
+          jsppOptions = [],
           ldOptions = [],
           hsc2hsOptions = [],
           pkgconfigDepends = [],
@@ -242,6 +244,8 @@ GenericPackageDescription {
             [],
           sharedOptions =
           PerCompilerFlavor [] [],
+          profSharedOptions =
+          PerCompilerFlavor [] [],
           staticOptions =
           PerCompilerFlavor [] [],
           customFieldsBI = [],
@@ -279,39 +283,6 @@ GenericPackageDescription {
                   (mkVersion [1, 5])))
               mainLibSet],
           mixins = []}},
-      condTreeConstraints = [
-        Dependency
-          (PackageName "base")
-          (IntersectVersionRanges
-            (OrLaterVersion
-              (mkVersion [4, 7]))
-            (EarlierVersion
-              (mkVersion [5])))
-          mainLibSet,
-        Dependency
-          (PackageName "template-haskell")
-          (IntersectVersionRanges
-            (OrLaterVersion
-              (mkVersion [2, 8]))
-            (EarlierVersion
-              (mkVersion [2, 13])))
-          mainLibSet,
-        Dependency
-          (PackageName "ghc-prim")
-          (IntersectVersionRanges
-            (OrLaterVersion
-              (mkVersion [0, 3]))
-            (EarlierVersion
-              (mkVersion [0, 6])))
-          mainLibSet,
-        Dependency
-          (PackageName "deepseq")
-          (IntersectVersionRanges
-            (OrLaterVersion
-              (mkVersion [1, 3]))
-            (EarlierVersion
-              (mkVersion [1, 5])))
-          mainLibSet],
       condTreeComponents = [
         CondBranch {
           condBranchCondition =
@@ -334,6 +305,7 @@ GenericPackageDescription {
                 cmmOptions = [],
                 ccOptions = [],
                 cxxOptions = [],
+                jsppOptions = [],
                 ldOptions = [],
                 hsc2hsOptions = [],
                 pkgconfigDepends = [],
@@ -373,6 +345,8 @@ GenericPackageDescription {
                   [],
                 sharedOptions =
                 PerCompilerFlavor [] [],
+                profSharedOptions =
+                PerCompilerFlavor [] [],
                 staticOptions =
                 PerCompilerFlavor [] [],
                 customFieldsBI = [],
@@ -386,15 +360,6 @@ GenericPackageDescription {
                         (mkVersion [0, 9])))
                     mainLibSet],
                 mixins = []}},
-            condTreeConstraints = [
-              Dependency
-                (PackageName "tagged")
-                (IntersectVersionRanges
-                  (OrLaterVersion
-                    (mkVersion [0, 7]))
-                  (EarlierVersion
-                    (mkVersion [0, 9])))
-                mainLibSet],
             condTreeComponents = []},
           condBranchIfFalse = Nothing},
         CondBranch {
@@ -418,6 +383,7 @@ GenericPackageDescription {
                 cmmOptions = [],
                 ccOptions = [],
                 cxxOptions = [],
+                jsppOptions = [],
                 ldOptions = [],
                 hsc2hsOptions = [],
                 pkgconfigDepends = [],
@@ -457,6 +423,8 @@ GenericPackageDescription {
                   [],
                 sharedOptions =
                 PerCompilerFlavor [] [],
+                profSharedOptions =
+                PerCompilerFlavor [] [],
                 staticOptions =
                 PerCompilerFlavor [] [],
                 customFieldsBI = [],
@@ -479,24 +447,6 @@ GenericPackageDescription {
                         (mkVersion [0, 6])))
                     mainLibSet],
                 mixins = []}},
-            condTreeConstraints = [
-              Dependency
-                (PackageName
-                  "transformers-compat")
-                (IntersectVersionRanges
-                  (OrLaterVersion
-                    (mkVersion [0, 3]))
-                  (EarlierVersion
-                    (mkVersion [0, 6])))
-                mainLibSet,
-              Dependency
-                (PackageName "transformers")
-                (IntersectVersionRanges
-                  (OrLaterVersion
-                    (mkVersion [0, 3]))
-                  (EarlierVersion
-                    (mkVersion [0, 6])))
-                mainLibSet],
             condTreeComponents = []},
           condBranchIfFalse = Nothing},
         CondBranch {
@@ -520,6 +470,7 @@ GenericPackageDescription {
                 cmmOptions = [],
                 ccOptions = [],
                 cxxOptions = [],
+                jsppOptions = [],
                 ldOptions = [],
                 hsc2hsOptions = [],
                 pkgconfigDepends = [],
@@ -561,12 +512,13 @@ GenericPackageDescription {
                   [],
                 sharedOptions =
                 PerCompilerFlavor [] [],
+                profSharedOptions =
+                PerCompilerFlavor [] [],
                 staticOptions =
                 PerCompilerFlavor [] [],
                 customFieldsBI = [],
                 targetBuildDepends = [],
                 mixins = []}},
-            condTreeConstraints = [],
             condTreeComponents = []},
           condBranchIfFalse = Nothing},
         CondBranch {
@@ -590,6 +542,7 @@ GenericPackageDescription {
                 cmmOptions = [],
                 ccOptions = [],
                 cxxOptions = [],
+                jsppOptions = [],
                 ldOptions = [],
                 hsc2hsOptions = [],
                 pkgconfigDepends = [],
@@ -631,12 +584,13 @@ GenericPackageDescription {
                   [],
                 sharedOptions =
                 PerCompilerFlavor [] [],
+                profSharedOptions =
+                PerCompilerFlavor [] [],
                 staticOptions =
                 PerCompilerFlavor [] [],
                 customFieldsBI = [],
                 targetBuildDepends = [],
                 mixins = []}},
-            condTreeConstraints = [],
             condTreeComponents = []},
           condBranchIfFalse = Nothing}]},
   condSubLibraries = [],
@@ -651,7 +605,7 @@ GenericPackageDescription {
             "",
           testInterface = TestSuiteExeV10
             (mkVersion [1, 0])
-            "doctests.hs",
+            (SymbolicPath "doctests.hs"),
           testBuildInfo = BuildInfo {
             buildable = True,
             buildTools = [],
@@ -661,6 +615,7 @@ GenericPackageDescription {
             cmmOptions = [],
             ccOptions = [],
             cxxOptions = [],
+            jsppOptions = [],
             ldOptions = [],
             hsc2hsOptions = [],
             pkgconfigDepends = [],
@@ -702,6 +657,8 @@ GenericPackageDescription {
               [],
             sharedOptions =
             PerCompilerFlavor [] [],
+            profSharedOptions =
+            PerCompilerFlavor [] [],
             staticOptions =
             PerCompilerFlavor [] [],
             customFieldsBI = [
@@ -723,19 +680,6 @@ GenericPackageDescription {
                 mainLibSet],
             mixins = []},
           testCodeGenerators = []},
-        condTreeConstraints = [
-          Dependency
-            (PackageName "base")
-            (OrLaterVersion (mkVersion [0]))
-            mainLibSet,
-          Dependency
-            (PackageName "doctest")
-            (IntersectVersionRanges
-              (OrLaterVersion
-                (mkVersion [0, 13]))
-              (EarlierVersion
-                (mkVersion [0, 14])))
-            mainLibSet],
         condTreeComponents = []},
     _×_
       (UnqualComponentName
@@ -746,7 +690,7 @@ GenericPackageDescription {
             "",
           testInterface = TestSuiteExeV10
             (mkVersion [1, 0])
-            "Example.hs",
+            (SymbolicPath "Example.hs"),
           testBuildInfo = BuildInfo {
             buildable = True,
             buildTools = [],
@@ -756,6 +700,7 @@ GenericPackageDescription {
             cmmOptions = [],
             ccOptions = [],
             cxxOptions = [],
+            jsppOptions = [],
             ldOptions = [],
             hsc2hsOptions = [],
             pkgconfigDepends = [],
@@ -798,6 +743,8 @@ GenericPackageDescription {
               [],
             sharedOptions =
             PerCompilerFlavor [] [],
+            profSharedOptions =
+            PerCompilerFlavor [] [],
             staticOptions =
             PerCompilerFlavor [] [],
             customFieldsBI = [],
@@ -816,18 +763,5 @@ GenericPackageDescription {
                 mainLibSet],
             mixins = []},
           testCodeGenerators = []},
-        condTreeConstraints = [
-          Dependency
-            (PackageName "base")
-            (IntersectVersionRanges
-              (OrLaterVersion
-                (mkVersion [4, 6]))
-              (EarlierVersion
-                (mkVersion [5])))
-            mainLibSet,
-          Dependency
-            (PackageName "generics-sop")
-            (OrLaterVersion (mkVersion [0]))
-            mainLibSet],
         condTreeComponents = []}],
   condBenchmarks = []}

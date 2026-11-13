@@ -17,22 +17,23 @@ import Distribution.Client.IndexUtils
 import Distribution.Client.Init.Types
 import Distribution.Client.Sandbox
 import Distribution.Client.Setup
+import Distribution.Simple.Compiler
 import Distribution.Verbosity
 
 tests :: IO [TestTree]
 tests = do
   confFlags <- loadConfigOrSandboxConfig v defaultGlobalFlags
 
-  let confFlags' = savedConfigureFlags confFlags `mappend` compFlags
-      initFlags' = savedInitFlags confFlags `mappend` emptyFlags
-      globalFlags' = savedGlobalFlags confFlags `mappend` defaultGlobalFlags
+  let confFlags' = savedConfigureFlags confFlags <> compFlags
+      initFlags' = savedInitFlags confFlags <> emptyFlags
+      globalFlags' = savedGlobalFlags confFlags <> defaultGlobalFlags
 
   (comp, _, progdb) <- configCompilerAux' confFlags'
 
   withRepoContext v globalFlags' $ \repoCtx -> do
     let pkgDb = configPackageDB' confFlags'
 
-    pkgIx <- getInstalledPackages v comp pkgDb progdb
+    pkgIx <- getInstalledPackages v comp (interpretPackageDBStack Nothing pkgDb) progdb
     srcDb <- getSourcePackages v repoCtx
 
     return
@@ -40,11 +41,11 @@ tests = do
       , NonInteractive.tests v initFlags' comp pkgIx srcDb
       , Golden.tests v initFlags' pkgIx srcDb
       , Simple.tests v initFlags' pkgIx srcDb
-      , FileCreators.tests v initFlags' comp pkgIx srcDb
+      , FileCreators.tests v initFlags' pkgIx srcDb
       ]
   where
     v :: Verbosity
-    v = normal
+    v = mkVerbosity defaultVerbosityHandles normal
 
     compFlags :: ConfigFlags
     compFlags = mempty{configHcPath = initHcPath emptyFlags}

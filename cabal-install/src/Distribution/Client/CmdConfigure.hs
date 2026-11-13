@@ -10,6 +10,7 @@ module Distribution.Client.CmdConfigure
 import Distribution.Client.Compat.Prelude
 import Prelude ()
 
+import qualified Data.Text as Text
 import System.Directory
 import System.FilePath
 
@@ -25,12 +26,12 @@ import Distribution.Simple.Flag
 
 import Distribution.Client.NixStyleOptions
   ( NixStyleFlags (..)
+  , cfgVerbosity
   , defaultNixStyleFlags
   , nixStyleOptions
   )
 import Distribution.Client.Setup
   ( ConfigExFlags (..)
-  , ConfigFlags (..)
   , GlobalFlags
   )
 import Distribution.Verbosity
@@ -49,6 +50,7 @@ import Distribution.Simple.Utils
 
 import Distribution.Client.DistDirLayout
   ( DistDirLayout (..)
+  , ProjectFileKey (ProjectFileKeyLocal)
   )
 import Distribution.Client.Errors
 import Distribution.Client.HttpUtils
@@ -116,14 +118,14 @@ configureCommand =
 -- For more details on how this works, see the module
 -- "Distribution.Client.ProjectOrchestration"
 configureAction :: NixStyleFlags () -> [String] -> GlobalFlags -> IO ()
-configureAction flags@NixStyleFlags{..} extraArgs globalFlags = do
+configureAction flags extraArgs globalFlags = do
   (baseCtx, projConfig) <- configureAction' flags extraArgs globalFlags
 
   if shouldNotWriteFile baseCtx
     then notice v "Config file not written due to flag(s)."
     else writeProjectLocalExtraConfig (distDirLayout baseCtx) projConfig
   where
-    v = fromFlagOrDefault normal (configVerbosity configFlags)
+    v = cfgVerbosity normal flags
 
 configureAction' :: NixStyleFlags () -> [String] -> GlobalFlags -> IO (ProjectBaseContext, ProjectConfig)
 configureAction' flags@NixStyleFlags{..} _extraArgs globalFlags = do
@@ -131,7 +133,7 @@ configureAction' flags@NixStyleFlags{..} _extraArgs globalFlags = do
 
   baseCtx <- establishProjectBaseContext v cliConfig OtherCommand
 
-  let localFile = distProjectFile (distDirLayout baseCtx) "local"
+  let localFile = distProjectFile (distDirLayout baseCtx) ProjectFileKeyLocal
   -- If cabal.project.local already exists, and the flags allow, back up to cabal.project.local~
   let backups = fromFlagOrDefault True $ configBackup configExFlags
       appends = fromFlagOrDefault False $ configAppend configExFlags
@@ -156,15 +158,19 @@ configureAction' flags@NixStyleFlags{..} _extraArgs globalFlags = do
             configureTransport
               v
               (fromNubList . projectConfigProgPathExtra $ projectConfigShared cliConfig)
-              (flagToMaybe . projectConfigHttpTransport $ projectConfigBuildOnly cliConfig)
-          (CondNode conf imps bs) <-
+              (fmap Text.unpack . flagToMaybe . projectConfigHttpTransport $ projectConfigBuildOnly cliConfig)
+          (CondNode (imps, conf) bs) <-
             runRebuild (distProjectRootDirectory . distDirLayout $ baseCtx) $
-              readProjectLocalExtraConfig v httpTransport (distDirLayout baseCtx)
-          when (not (null imps && null bs)) $ dieWithException v UnableToPerformInplaceUpdate
+              readProjectLocalExtraConfig
+                v
+                (fromFlagOrDefault defaultProjectFileParser $ projectConfigProjectFileParser $ projectConfigShared cliConfig)
+                httpTransport
+                (distDirLayout baseCtx)
+          unless (null imps && null bs) $ dieWithException v UnableToPerformInplaceUpdate
           return (baseCtx, conf <> cliConfig)
         else return (baseCtx, cliConfig)
   where
-    v = fromFlagOrDefault normal (configVerbosity configFlags)
+    v = cfgVerbosity normal flags
     cliConfig =
       commandLineFlagsToProjectConfig
         globalFlags

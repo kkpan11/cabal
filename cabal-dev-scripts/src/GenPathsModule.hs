@@ -1,6 +1,4 @@
-{-# LANGUAGE DeriveGeneric       #-}
 {-# LANGUAGE GADTs               #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell     #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 module Main (main) where
@@ -25,13 +23,12 @@ $(capture "decls" [d|
     data Z = Z
         { zPackageName                :: PackageName
         , zVersionDigits              :: String
-        , zSupportsCpp                :: Bool
-        , zSupportsNoRebindableSyntax :: Bool
         , zAbsolute                   :: Bool
         , zRelocatable                :: Bool
         , zIsWindows                  :: Bool
         , zIsI386                     :: Bool
         , zIsX8664                    :: Bool
+        , zIsAArch64                  :: Bool
 
         , zPrefix     :: FilePath
         , zBindir     :: FilePath
@@ -59,7 +56,7 @@ withIO k = do
             putStrLn $ "Exception: " ++ displayException e
             exitFailure
         _         -> do
-            putStrLn "Usage cabal run ... source.temeplate.ext target.ext"
+            putStrLn "Usage cabal run ... source.template.ext target.ext"
             exitFailure
 
 main :: IO ()

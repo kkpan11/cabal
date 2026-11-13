@@ -1,6 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-
 module Distribution.Simple.InstallDirs.Internal
   ( PathComponent (..)
   , PathTemplateVariable (..)
@@ -12,9 +9,10 @@ import Prelude ()
 data PathComponent
   = Ordinary FilePath
   | Variable PathTemplateVariable
-  deriving (Eq, Ord, Generic, Typeable)
+  deriving (Eq, Ord, Generic)
 
 instance Binary PathComponent
+instance NFData PathComponent
 instance Structured PathComponent
 
 data PathTemplateVariable
@@ -28,6 +26,8 @@ data PathTemplateVariable
     LibsubdirVar
   | -- | The @$dynlibdir@ path variable
     DynlibdirVar
+  | -- | The @$bytecodelibdir@ path variable
+    BytecodelibdirVar
   | -- | The @$datadir@ path variable
     DatadirVar
   | -- | The @$datasubdir@ path variable
@@ -65,9 +65,10 @@ data PathTemplateVariable
     TestSuiteResultVar
   | -- | The name of the benchmark being run
     BenchmarkNameVar
-  deriving (Eq, Ord, Generic, Typeable)
+  deriving (Eq, Ord, Generic)
 
 instance Binary PathTemplateVariable
+instance NFData PathTemplateVariable
 instance Structured PathTemplateVariable
 
 instance Show PathTemplateVariable where
@@ -77,6 +78,7 @@ instance Show PathTemplateVariable where
   show LibdirVar = "libdir"
   show LibsubdirVar = "libsubdir"
   show DynlibdirVar = "dynlibdir"
+  show BytecodelibdirVar = "bytecodelibdir"
   show DatadirVar = "datadir"
   show DatasubdirVar = "datasubdir"
   show DocdirVar = "docdir"
@@ -110,6 +112,7 @@ instance Read PathTemplateVariable where
         , ("libdir", LibdirVar)
         , ("libsubdir", LibsubdirVar)
         , ("dynlibdir", DynlibdirVar)
+        , ("bytecodelibdir", BytecodelibdirVar)
         , ("datadir", DatadirVar)
         , ("datasubdir", DatasubdirVar)
         , ("docdir", DocdirVar)

@@ -1,5 +1,9 @@
 # Build and safety-check requirements.txt
 
+# Remove a target if its recipe fails, so a failed `cabal run` can't leave a
+# truncated *-help/*.txt behind for `git diff` to find.
+.DELETE_ON_ERROR:
+
 # skjold needs a personal github access token.  This needs no permissions,
 # it is only required to query the GitHub GraphQL API v4.
 # See: https://pythonawesome.com/security-audit-python-project-dependencies-against-security-advisory-databases/
@@ -12,74 +16,164 @@
 #
 #
 SKJOLD_GITHUB_API_TOKEN ?= ${GITHUB_TOKEN}
-# TODO: when we have sphinx-build2 ?
-SPHINXCMD:=sphinx-build
 # Flag -n ("nitpick") warns about broken references
 # Flag -W turns warnings into errors
 # Flag --keep-going continues after errors
 SPHINX_FLAGS:=-n -W --keep-going -E
 SPHINX_HTML_OUTDIR:=../dist-newstyle/doc/users-guide
 USERGUIDE_STAMP:=$(SPHINX_HTML_OUTDIR)/index.html
-PYTHON_VIRTUALENV_ACTIVATE:=../.python-sphinx-virtualenv/bin/activate
 
-# Python virtual environment
-##############################################################################
-
-# Create a python virtual environment in the root of the cabal repository.
-$(PYTHON_VIRTUALENV_ACTIVATE):
-	python3 -m venv ../.python-sphinx-virtualenv
-	(. $(PYTHON_VIRTUALENV_ACTIVATE))
-
-# Users guide
-##############################################################################
-
-# do pip install every time so we have up to date requirements when we build
-users-guide: $(PYTHON_VIRTUALENV_ACTIVATE) $(USERGUIDE_STAMP)
+users-guide: $(USERGUIDE_STAMP) ## Build the users guide with Sphinx.
 $(USERGUIDE_STAMP) : *.rst
-	mkdir -p $(SPHINX_HTML_OUTDIR)
-	(. $(PYTHON_VIRTUALENV_ACTIVATE) && pip install -r requirements.txt && $(SPHINXCMD) $(SPHINX_FLAGS) . $(SPHINX_HTML_OUTDIR))
+	mkdir -p $(SPHINX_HTML_OUTDIR) \
+	&& uv sync \
+	&& uv run sphinx-build $(SPHINX_FLAGS) . $(SPHINX_HTML_OUTDIR)
 
-# Requirements
-##############################################################################
-
-##
-# This goal is intended for manual invocation, always rebuilds.
-.PHONY: users-guide-requirements
-users-guide-requirements: requirements.txt
-
-.PHONY: build-and-check-requirements
-build-and-check-requirements: requirements.txt check-requirements
-
-# Always rebuild requirements.txt
-.PHONY: requirements.txt
-# requirements.txt is generated from requirements.in
-# via pip-compile included in the pip-tools package.
-# See https://modelpredict.com/wht-requirements-txt-is-not-enough
-requirements.txt: requirements.in $(PYTHON_VIRTUALENV_ACTIVATE)
-	. $(PYTHON_VIRTUALENV_ACTIVATE) \
-	  && pip install --upgrade pip \
-	  && pip install pip-tools \
-	  && pip-compile requirements.in
+requirements.txt:
+	uv export --frozen --format requirements.txt > requirements.txt
 
 # Check requirements.txt for security violations via skjold,
 # configured in pyproject.toml.
 # See: https://pythonawesome.com/security-audit-python-project-dependencies-against-security-advisory-databases/
 .PHONY: check-requirements
-check-requirements:
+check-requirements: ## Audit requirements.txt for vulnerabilities with skjold.
 	@if [ -z "$${SKJOLD_GITHUB_API_TOKEN}" ] \
 	; then \
 	  echo "WARNING: Neither SKJOLD_GITHUB_API_TOKEN nor GITHUB_TOKEN is set." \
 	; echo "Vulnerability check via skjold might fail when using the GitHub GraphQL API." \
 	; fi
-	. $(PYTHON_VIRTUALENV_ACTIVATE) \
-	  && pip install skjold \
-	  && skjold audit
-# NB: For portability, we use '.' (sh etc.) instead of 'source' (bash).
+	uvx skjold -c pyproject.toml config \
+	&& uv pip list --format freeze | uvx skjold -c pyproject.toml audit
 
-# Debug print environment variables
-debug:
+debug: ## Print the GitHub token environment variables.
 	@echo "GITHUB_TOKEN = ${GITHUB_TOKEN}"
 	@echo "SKJOLD_GITHUB_API_TOKEN = $${SKJOLD_GITHUB_API_TOKEN}"
 	@echo "Is SKJOLD_GITHUB_API_TOKEN set? $${SKJOLD_GITHUB_API_TOKEN:+yes}"
 
-# EOF
+CABAL_V1_COMMANDS := \
+	bench \
+	build \
+	clean \
+	configure \
+	copy \
+	freeze \
+	gen-bounds \
+	haddock \
+	install \
+	reconfigure \
+	register \
+	repl \
+	run \
+	test
+
+CABAL_COMMANDS := \
+	bench \
+	build \
+	clean \
+	configure \
+	exec \
+	fetch \
+	freeze \
+	gen-bounds \
+	get \
+	haddock \
+	haddock-project \
+	hscolour \
+	info \
+	init \
+	install \
+	list \
+	list-bin \
+	outdated \
+	path \
+	repl \
+	report \
+	run \
+	sdist \
+	target \
+	test \
+	unpack \
+	update \
+	upload \
+	user-config
+
+CABAL_HIDDEN_COMMANDS := \
+	act-as-setup \
+	format \
+	man
+
+# Distribution.Simple.defaultMain's commands, for build-type: Simple.
+SETUP_COMMANDS := \
+	bench \
+	build \
+	clean \
+	configure \
+	copy \
+	haddock \
+	hscolour \
+	install \
+	register \
+	repl \
+	sdist \
+	test \
+	unregister
+
+# NOTE: To silence the following warning, redirect stderr to /dev/null:
+#   Warning: this is a debug build of cabal-install with assertions enabled.
+
+# Build the cabal binary before capturing any help output: with a cold
+# dependency cache, `cabal run` would otherwise interleave the configure
+# logs of freshly built dependencies (process, resolv, network, ...) into
+# the captured stdout and pollute the generated .txt files.
+.PHONY: cmd-help-build
+cmd-help-build: ## Build the cabal executable before dumping help output.
+	@cabal build -v0 cabal-install:exe:cabal > /dev/null 2>&1
+
+cmd-v1-help/%.txt: | cmd-help-build
+	@mkdir -p $(@D)
+	@cabal run -v0 cabal-install:exe:cabal -- v1-$* --help > $@ 2>/dev/null
+
+cmd-v2-help/%.txt: | cmd-help-build
+	@mkdir -p $(@D)
+	@cabal run -v0 cabal-install:exe:cabal -- $* --help > $@ 2>/dev/null
+
+# The "You can edit the cabal configuration file..." footer embeds an
+# absolute, machine-specific config path, so strip it for reproducibility.
+cmd-v2-help/help.txt: | cmd-help-build
+	@mkdir -p $(@D)
+	@cabal run -v0 cabal-install:exe:cabal -- --help 2>/dev/null \
+	  | sed '/^You can edit the cabal configuration file to set defaults:$$/,$$d' > $@
+
+cmd-v2-hidden-help/%.txt: | cmd-help-build
+	@mkdir -p $(@D)
+	@cabal run -v0 cabal-install:exe:cabal -- $* --help > $@ 2>/dev/null
+
+# act-as-setup runs Distribution.Simple.defaultMainArgs directly; the "--"
+# forwards args after it verbatim instead of being parsed by cabal itself.
+setup-help/%.txt: | cmd-help-build
+	@mkdir -p $(@D)
+	@cabal run -v0 cabal-install:exe:cabal -- act-as-setup -- $* --help > $@ 2>/dev/null
+
+setup-help/help.txt: | cmd-help-build
+	@mkdir -p $(@D)
+	@cabal run -v0 cabal-install:exe:cabal -- act-as-setup -- --help > $@ 2>/dev/null
+
+.PHONY: cmd-v1-help
+cmd-v1-help: $(addsuffix .txt,$(addprefix cmd-v1-help/,$(CABAL_V1_COMMANDS))) ## Dump v1 commands' help.
+
+.PHONY: cmd-v2-help
+cmd-v2-help: cmd-v2-help/help.txt $(addsuffix .txt,$(addprefix cmd-v2-help/,$(CABAL_COMMANDS))) ## Dump v2 commands' help.
+
+.PHONY: cmd-v2-hidden-help
+cmd-v2-hidden-help: $(addsuffix .txt,$(addprefix cmd-v2-hidden-help/,$(CABAL_HIDDEN_COMMANDS))) ## Dump hidden commands' help.
+
+.PHONY: setup-help
+setup-help: setup-help/help.txt $(addsuffix .txt,$(addprefix setup-help/,$(SETUP_COMMANDS))) ## Dump Setup commands' help.
+
+.PHONY: cmd-help
+cmd-help: cmd-v2-help cmd-v1-help cmd-v2-hidden-help setup-help ## Dump all commands' help.
+
+.PHONY: help
+help: ## Show the commented targets.
+	@grep -E '^[a-zA-Z0-9_-]+:.*## .*$$' $(MAKEFILE_LIST) | \
+	sort | awk 'BEGIN {FS = ":.*## "}; {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}'

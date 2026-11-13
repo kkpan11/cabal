@@ -1,5 +1,6 @@
-{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
 
 module Distribution.Client.ProjectFlags
   ( ProjectFlags (..)
@@ -9,9 +10,10 @@ module Distribution.Client.ProjectFlags
   ) where
 
 import Distribution.Client.Compat.Prelude
+import Distribution.Client.ProjectConfig.Types (ProjectFileParser (..), defaultProjectFileParser)
 import Prelude ()
 
-import Distribution.ReadE (succeedReadE)
+import Distribution.ReadE (ReadE (..), succeedReadE)
 import Distribution.Simple.Command
   ( MkOptDescr
   , OptionField (optionName)
@@ -20,7 +22,15 @@ import Distribution.Simple.Command
   , option
   , reqArg
   )
-import Distribution.Simple.Setup (Flag (..), flagToList, flagToMaybe, toFlag, trueArg)
+import Distribution.Simple.Setup
+  ( Flag
+  , flagToList
+  , flagToMaybe
+  , toFlag
+  , trueArg
+  , pattern Flag
+  , pattern NoFlag
+  )
 
 data ProjectFlags = ProjectFlags
   { flagProjectDir :: Flag FilePath
@@ -38,8 +48,11 @@ data ProjectFlags = ProjectFlags
   , flagIgnoreProject :: Flag Bool
   -- ^ Whether to ignore the local project (i.e. don't search for cabal.project)
   -- The exact interpretation might be slightly different per command.
+  , flagProjectFileParser :: Flag ProjectFileParser
+  -- ^ The parser to use for the project file.
   }
   deriving (Show, Generic)
+  deriving (Semigroup, Monoid) via Generically ProjectFlags
 
 defaultProjectFlags :: ProjectFlags
 defaultProjectFlags =
@@ -47,7 +60,7 @@ defaultProjectFlags =
     { flagProjectDir = mempty
     , flagProjectFile = mempty
     , flagIgnoreProject = toFlag False
-    -- Should we use 'Last' here?
+    , flagProjectFileParser = mempty
     }
 
 projectFlagsOptions :: ShowOrParseArgs -> [OptionField ProjectFlags]
@@ -79,20 +92,37 @@ projectFlagsOptions showOrParseArgs =
             }
       )
       (yesNoOpt showOrParseArgs)
+  , option
+      []
+      ["project-file-parser"]
+      "Set the parser to use for the project file"
+      flagProjectFileParser
+      (\pf flags -> flags{flagProjectFileParser = pf})
+      (reqArg "PARSER" (Flag <$> ReadE parseProjectFileParser) projectFileParserPrinter)
   ]
+
+parseProjectFileParser :: String -> Either String ProjectFileParser
+parseProjectFileParser "legacy" = pure LegacyParser
+parseProjectFileParser "fallback" = pure FallbackParser
+parseProjectFileParser "default" = pure defaultProjectFileParser
+parseProjectFileParser "parsec" = pure ParsecParser
+parseProjectFileParser "compare" = pure CompareParser
+parseProjectFileParser _ = Left "Invalid project file parser"
+
+projectFileParserPrinter :: Flag ProjectFileParser -> [String]
+projectFileParserPrinter (Flag parser) =
+  case parser of
+    LegacyParser -> ["legacy"]
+    FallbackParser -> ["fallback"]
+    ParsecParser -> ["parsec"]
+    CompareParser -> ["compare"]
+projectFileParserPrinter NoFlag = []
 
 -- | As almost all commands use 'ProjectFlags' but not all can honour
 -- "ignore-project" flag, provide this utility to remove the flag
 -- parsing from the help message.
 removeIgnoreProjectOption :: [OptionField a] -> [OptionField a]
 removeIgnoreProjectOption = filter (\o -> optionName o /= "ignore-project")
-
-instance Monoid ProjectFlags where
-  mempty = gmempty
-  mappend = (<>)
-
-instance Semigroup ProjectFlags where
-  (<>) = gmappend
 
 yesNoOpt :: ShowOrParseArgs -> MkOptDescr (b -> Flag Bool) (Flag Bool -> b -> b) b
 yesNoOpt ShowArgs sf lf = trueArg sf lf

@@ -40,10 +40,11 @@ GenericPackageDescription {
     testSuites = [],
     benchmarks = [],
     dataFiles = [],
-    dataDir = ".",
+    dataDir = SymbolicPath ".",
     extraSrcFiles = [],
     extraTmpFiles = [],
-    extraDocFiles = []},
+    extraDocFiles = [],
+    extraFiles = []},
   gpdScannedVersion = Nothing,
   genPackageFlags = [],
   condLibrary = Just
@@ -66,6 +67,7 @@ GenericPackageDescription {
           cmmOptions = [],
           ccOptions = [],
           cxxOptions = [],
+          jsppOptions = [],
           ldOptions = [],
           hsc2hsOptions = [],
           pkgconfigDepends = [],
@@ -106,6 +108,8 @@ GenericPackageDescription {
             [],
           sharedOptions =
           PerCompilerFlavor [] [],
+          profSharedOptions =
+          PerCompilerFlavor [] [],
           staticOptions =
           PerCompilerFlavor [] [],
           customFieldsBI = [],
@@ -127,23 +131,6 @@ GenericPackageDescription {
               (OrLaterVersion (mkVersion [0]))
               mainLibSet],
           mixins = []}},
-      condTreeConstraints = [
-        Dependency
-          (PackageName "base")
-          (IntersectVersionRanges
-            (OrLaterVersion
-              (mkVersion [4, 10]))
-            (EarlierVersion
-              (mkVersion [4, 11])))
-          mainLibSet,
-        Dependency
-          (PackageName "containers")
-          (OrLaterVersion (mkVersion [0]))
-          mainLibSet,
-        Dependency
-          (PackageName "ghc-prim")
-          (OrLaterVersion (mkVersion [0]))
-          mainLibSet],
       condTreeComponents = [
         CondBranch {
           condBranchCondition =
@@ -166,6 +153,7 @@ GenericPackageDescription {
                 cmmOptions = [],
                 ccOptions = [],
                 cxxOptions = [],
+                jsppOptions = [],
                 ldOptions = [],
                 hsc2hsOptions = [],
                 pkgconfigDepends = [],
@@ -205,6 +193,8 @@ GenericPackageDescription {
                   [],
                 sharedOptions =
                 PerCompilerFlavor [] [],
+                profSharedOptions =
+                PerCompilerFlavor [] [],
                 staticOptions =
                 PerCompilerFlavor [] [],
                 customFieldsBI = [],
@@ -214,11 +204,6 @@ GenericPackageDescription {
                     (OrLaterVersion (mkVersion [0]))
                     mainLibSet],
                 mixins = []}},
-            condTreeConstraints = [
-              Dependency
-                (PackageName "Win32")
-                (OrLaterVersion (mkVersion [0]))
-                mainLibSet],
             condTreeComponents = []},
           condBranchIfFalse = Nothing}]},
   condSubLibraries = [
@@ -245,6 +230,7 @@ GenericPackageDescription {
             cmmOptions = [],
             ccOptions = [],
             cxxOptions = [],
+            jsppOptions = [],
             ldOptions = [],
             hsc2hsOptions = [],
             pkgconfigDepends = [],
@@ -285,6 +271,8 @@ GenericPackageDescription {
               [],
             sharedOptions =
             PerCompilerFlavor [] [],
+            profSharedOptions =
+            PerCompilerFlavor [] [],
             staticOptions =
             PerCompilerFlavor [] [],
             customFieldsBI = [],
@@ -306,23 +294,6 @@ GenericPackageDescription {
                 (OrLaterVersion (mkVersion [0]))
                 mainLibSet],
             mixins = []}},
-        condTreeConstraints = [
-          Dependency
-            (PackageName "base")
-            (IntersectVersionRanges
-              (OrLaterVersion
-                (mkVersion [4, 10]))
-              (EarlierVersion
-                (mkVersion [4, 11])))
-            mainLibSet,
-          Dependency
-            (PackageName "containers")
-            (OrLaterVersion (mkVersion [0]))
-            mainLibSet,
-          Dependency
-            (PackageName "ghc-prim")
-            (OrLaterVersion (mkVersion [0]))
-            mainLibSet],
         condTreeComponents = [
           CondBranch {
             condBranchCondition =
@@ -347,6 +318,7 @@ GenericPackageDescription {
                   cmmOptions = [],
                   ccOptions = [],
                   cxxOptions = [],
+                  jsppOptions = [],
                   ldOptions = [],
                   hsc2hsOptions = [],
                   pkgconfigDepends = [],
@@ -386,6 +358,8 @@ GenericPackageDescription {
                     [],
                   sharedOptions =
                   PerCompilerFlavor [] [],
+                  profSharedOptions =
+                  PerCompilerFlavor [] [],
                   staticOptions =
                   PerCompilerFlavor [] [],
                   customFieldsBI = [],
@@ -395,11 +369,6 @@ GenericPackageDescription {
                       (OrLaterVersion (mkVersion [0]))
                       mainLibSet],
                   mixins = []}},
-              condTreeConstraints = [
-                Dependency
-                  (PackageName "Win32")
-                  (OrLaterVersion (mkVersion [0]))
-                  mainLibSet],
               condTreeComponents = []},
             condBranchIfFalse = Nothing}]}],
   condForeignLibs = [],
@@ -413,7 +382,7 @@ GenericPackageDescription {
             "",
           testInterface = TestSuiteExeV10
             (mkVersion [1, 0])
-            "Tests.hs",
+            (SymbolicPath "Tests.hs"),
           testBuildInfo = BuildInfo {
             buildable = True,
             buildTools = [],
@@ -423,6 +392,7 @@ GenericPackageDescription {
             cmmOptions = [],
             ccOptions = [],
             cxxOptions = [],
+            jsppOptions = [],
             ldOptions = [],
             hsc2hsOptions = [],
             pkgconfigDepends = [],
@@ -462,6 +432,8 @@ GenericPackageDescription {
               [],
             sharedOptions =
             PerCompilerFlavor [] [],
+            profSharedOptions =
+            PerCompilerFlavor [] [],
             staticOptions =
             PerCompilerFlavor [] [],
             customFieldsBI = [],
@@ -484,23 +456,6 @@ GenericPackageDescription {
                 mainLibSet],
             mixins = []},
           testCodeGenerators = []},
-        condTreeConstraints = [
-          Dependency
-            (PackageName "base")
-            (IntersectVersionRanges
-              (OrLaterVersion
-                (mkVersion [4, 10]))
-              (EarlierVersion
-                (mkVersion [4, 11])))
-            mainLibSet,
-          Dependency
-            (PackageName "containers")
-            (OrLaterVersion (mkVersion [0]))
-            mainLibSet,
-          Dependency
-            (PackageName "HUnit")
-            (OrLaterVersion (mkVersion [0]))
-            mainLibSet],
         condTreeComponents = [
           CondBranch {
             condBranchCondition =
@@ -523,6 +478,7 @@ GenericPackageDescription {
                   cmmOptions = [],
                   ccOptions = [],
                   cxxOptions = [],
+                  jsppOptions = [],
                   ldOptions = [],
                   hsc2hsOptions = [],
                   pkgconfigDepends = [],
@@ -562,6 +518,8 @@ GenericPackageDescription {
                     [],
                   sharedOptions =
                   PerCompilerFlavor [] [],
+                  profSharedOptions =
+                  PerCompilerFlavor [] [],
                   staticOptions =
                   PerCompilerFlavor [] [],
                   customFieldsBI = [],
@@ -572,11 +530,6 @@ GenericPackageDescription {
                       mainLibSet],
                   mixins = []},
                 testCodeGenerators = []},
-              condTreeConstraints = [
-                Dependency
-                  (PackageName "Win32")
-                  (OrLaterVersion (mkVersion [0]))
-                  mainLibSet],
               condTreeComponents = []},
             condBranchIfFalse = Nothing},
           CondBranch {
@@ -600,6 +553,7 @@ GenericPackageDescription {
                   cmmOptions = [],
                   ccOptions = [],
                   cxxOptions = [],
+                  jsppOptions = [],
                   ldOptions = [],
                   hsc2hsOptions = [],
                   pkgconfigDepends = [],
@@ -639,6 +593,8 @@ GenericPackageDescription {
                     [],
                   sharedOptions =
                   PerCompilerFlavor [] [],
+                  profSharedOptions =
+                  PerCompilerFlavor [] [],
                   staticOptions =
                   PerCompilerFlavor [] [],
                   customFieldsBI = [],
@@ -649,11 +605,6 @@ GenericPackageDescription {
                       mainLibSet],
                   mixins = []},
                 testCodeGenerators = []},
-              condTreeConstraints = [
-                Dependency
-                  (PackageName "Win32")
-                  (OrLaterVersion (mkVersion [0]))
-                  mainLibSet],
               condTreeComponents = []},
             condBranchIfFalse = Nothing},
           CondBranch {
@@ -677,6 +628,7 @@ GenericPackageDescription {
                   cmmOptions = [],
                   ccOptions = [],
                   cxxOptions = [],
+                  jsppOptions = [],
                   ldOptions = [],
                   hsc2hsOptions = [],
                   pkgconfigDepends = [],
@@ -716,13 +668,14 @@ GenericPackageDescription {
                     [],
                   sharedOptions =
                   PerCompilerFlavor [] [],
+                  profSharedOptions =
+                  PerCompilerFlavor [] [],
                   staticOptions =
                   PerCompilerFlavor [] [],
                   customFieldsBI = [],
                   targetBuildDepends = [],
                   mixins = []},
                 testCodeGenerators = []},
-              condTreeConstraints = [],
               condTreeComponents = []},
             condBranchIfFalse = Nothing}]}],
   condBenchmarks = []}

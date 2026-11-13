@@ -1,9 +1,4 @@
-{-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
-{-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 
 module Distribution.Parsec
   ( Parsec (..)
@@ -25,11 +20,16 @@ module Distribution.Parsec
     -- ** Warnings
   , PWarnType (..)
   , PWarning (..)
+  , PWarningWithSource (..)
+  , PSource (..)
   , showPWarning
+  , showPWarningWithSource
 
     -- ** Errors
   , PError (..)
+  , PErrorWithSource (..)
   , showPError
+  , showPErrorWithSource
 
     -- * Position
   , Position (..)
@@ -59,16 +59,18 @@ import Data.Char (digitToInt, intToDigit)
 import Data.List (transpose)
 import Distribution.CabalSpecVersion
 import Distribution.Compat.Prelude
-import Distribution.Parsec.Error (PError (..), showPError)
+import Distribution.Parsec.Error (PError (..), PErrorWithSource (..), showPError, showPErrorWithSource)
+
+import Data.Monoid (Last (..))
 import Distribution.Parsec.FieldLineStream (FieldLineStream, fieldLineStreamFromBS, fieldLineStreamFromString)
 import Distribution.Parsec.Position (Position (..), incPos, retPos, showPos, zeroPos)
-import Distribution.Parsec.Warning (PWarnType (..), PWarning (..), showPWarning)
+import Distribution.Parsec.Warning
 import Numeric (showIntAtBase)
 import Prelude ()
 
+import qualified Control.Monad.Fail as Fail
 import qualified Distribution.Compat.CharParsing as P
 import qualified Distribution.Compat.DList as DList
-import qualified Distribution.Compat.MonadFail as Fail
 import qualified Text.Parsec as Parsec
 
 -------------------------------------------------------------------------------
@@ -138,16 +140,10 @@ instance Alternative ParsecParser where
   {-# INLINE some #-}
 
 instance Monad ParsecParser where
-  return = pure
-
   m >>= k = PP $ \v -> unPP m v >>= \x -> unPP (k x) v
   {-# INLINE (>>=) #-}
   (>>) = (*>)
   {-# INLINE (>>) #-}
-
-#if !(MIN_VERSION_base(4,13,0))
-  fail = Fail.fail
-#endif
 
 instance MonadPlus ParsecParser where
   mzero = empty
@@ -250,15 +246,17 @@ instance Parsec Bool where
   parsec = P.munch1 isAlpha >>= postprocess
     where
       postprocess str
-        | str == "True" = pure True
-        | str == "False" = pure False
-        | lstr == "true" = parsecWarning PWTBoolCase caseWarning *> pure True
-        | lstr == "false" = parsecWarning PWTBoolCase caseWarning *> pure False
+        | lstr == "true" = pure True
+        | lstr == "false" = pure False
         | otherwise = fail $ "Not a boolean: " ++ str
         where
           lstr = map toLower str
-          caseWarning =
-            "Boolean values are case sensitive, use 'True' or 'False'."
+
+instance Parsec a => Parsec (Last a) where
+  parsec = parsecLast
+
+parsecLast :: (Parsec a, CabalParsing m) => m (Last a)
+parsecLast = (Last . Just <$> parsec) <|> pure mempty
 
 -- | @[^ ,]@
 parsecToken :: CabalParsing m => m String

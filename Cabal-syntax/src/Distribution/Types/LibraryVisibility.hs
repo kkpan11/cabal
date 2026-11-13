@@ -1,5 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Distribution.Types.LibraryVisibility
@@ -23,7 +21,7 @@ data LibraryVisibility
     LibraryVisibilityPublic
   | -- | Internal library, default
     LibraryVisibilityPrivate
-  deriving (Generic, Show, Read, Eq, Ord, Typeable, Data)
+  deriving (Generic, Show, Read, Eq, Ord, Data)
 
 instance Pretty LibraryVisibility where
   pretty LibraryVisibilityPublic = Disp.text "public"
@@ -39,7 +37,7 @@ instance Parsec LibraryVisibility where
 
 instance Binary LibraryVisibility
 instance Structured LibraryVisibility
-instance NFData LibraryVisibility where rnf = genericRnf
+instance NFData LibraryVisibility
 
 instance Semigroup LibraryVisibility where
   LibraryVisibilityPrivate <> LibraryVisibilityPrivate = LibraryVisibilityPrivate
@@ -47,4 +45,3 @@ instance Semigroup LibraryVisibility where
 
 instance Monoid LibraryVisibility where
   mempty = LibraryVisibilityPrivate
-  mappend = (<>)

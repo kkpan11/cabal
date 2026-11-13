@@ -1,6 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-
 module Distribution.Types.LegacyExeDependency
   ( LegacyExeDependency (..)
   ) where
@@ -26,11 +23,11 @@ data LegacyExeDependency
   = LegacyExeDependency
       String
       VersionRange
-  deriving (Generic, Read, Show, Eq, Ord, Typeable, Data)
+  deriving (Generic, Read, Show, Eq, Ord, Data)
 
 instance Binary LegacyExeDependency
 instance Structured LegacyExeDependency
-instance NFData LegacyExeDependency where rnf = genericRnf
+instance NFData LegacyExeDependency
 
 instance Pretty LegacyExeDependency where
   pretty (LegacyExeDependency name ver) =
@@ -43,7 +40,7 @@ instance Parsec LegacyExeDependency where
     verRange <- parsecMaybeQuoted parsec <|> pure anyVersion
     pure $ LegacyExeDependency name verRange
     where
-      nameP = intercalate "-" <$> toList <$> P.sepByNonEmpty component (P.char '-')
+      nameP = intercalate "-" . toList <$> P.sepByNonEmpty component (P.char '-')
       component = do
         cs <- P.munch1 (\c -> isAlphaNum c || c == '+' || c == '_')
         if all isDigit cs then fail "invalid component" else return cs

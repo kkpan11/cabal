@@ -1,8 +1,4 @@
-{-# LANGUAGE CPP #-}
-
------------------------------------------------------------------------------
-
------------------------------------------------------------------------------
+{-# LANGUAGE DataKinds #-}
 
 -- |
 -- Module      :  Distribution.Client.Configure
@@ -23,7 +19,6 @@ module Distribution.Client.Configure
     -- * Saved configure flags
   , readConfigFlagsFrom
   , readConfigFlags
-  , cabalConfigFlagsFile
   , writeConfigFlagsTo
   , writeConfigFlags
   ) where
@@ -47,7 +42,9 @@ import Distribution.Client.Setup
   , filterConfigureFlags
   )
 import Distribution.Client.SetupWrapper
-  ( SetupScriptOptions (..)
+  ( SetupDependencies (..)
+  , SetupRunnerArgs (NotInLibrary)
+  , SetupScriptOptions (..)
   , defaultSetupScriptOptions
   , setupWrapper
   )
@@ -86,8 +83,8 @@ import Distribution.PackageDescription.Configuration
 import Distribution.Simple.Compiler
   ( Compiler
   , CompilerInfo
-  , PackageDB (..)
-  , PackageDBStack
+  , PackageDBStackCWD
+  , PackageDBX (..)
   , compilerInfo
   )
 import Distribution.Simple.PackageDescription
@@ -99,20 +96,25 @@ import Distribution.Simple.PackageIndex as PackageIndex
   )
 import Distribution.Simple.Program (ProgramDb)
 import Distribution.Simple.Setup
-  ( ConfigFlags (..)
+  ( CommonSetupFlags (..)
+  , ConfigFlags (..)
   , flagToMaybe
   , fromFlagOrDefault
+  , maybeToFlag
   , toFlag
   )
 import Distribution.Simple.Utils as Utils
   ( debug
-  , defaultPackageDesc
+  , defaultPackageDescCwd
   , dieWithException
   , notice
   , warn
   )
 import Distribution.System
   ( Platform
+  )
+import Distribution.Types.DependencySatisfaction
+  ( DependencySatisfaction (..)
   )
 import Distribution.Types.GivenComponent
   ( GivenComponent (..)
@@ -121,6 +123,7 @@ import Distribution.Types.PackageVersionConstraint
   ( PackageVersionConstraint (..)
   , thisPackageVersionConstraint
   )
+import Distribution.Utils.Path
 import Distribution.Version
   ( Version
   , VersionRange
@@ -129,7 +132,7 @@ import Distribution.Version
   )
 
 import Distribution.Client.Errors
-import System.FilePath ((</>))
+import Distribution.Verbosity (verbosityFlags, verbosityLevel)
 
 -- | Choose the Cabal version such that the setup scripts compiled against this
 -- version will support the given command-line flags. Currently, it implements no
@@ -142,7 +145,7 @@ chooseCabalVersion _configExFlags maybeVersion =
 -- | Configure the package found in the local directory
 configure
   :: Verbosity
-  -> PackageDBStack
+  -> PackageDBStackCWD
   -> RepoContext
   -> Compiler
   -> Platform
@@ -200,8 +203,10 @@ configure
           (setupScriptOptions installedPkgIndex Nothing)
           Nothing
           configureCommand
-          (const configFlags)
+          configCommonFlags
+          (const (return configFlags))
           (const extraArgs)
+          NotInLibrary
       Right installPlan0 ->
         let installPlan = InstallPlan.configureInstallPlan configFlags installPlan0
          in case fst (InstallPlan.ready installPlan) of
@@ -238,26 +243,24 @@ configure
           progdb
           ( fromFlagOrDefault
               (useDistPref defaultSetupScriptOptions)
-              (configDistPref configFlags)
+              (setupDistPref $ configCommonFlags configFlags)
           )
           ( chooseCabalVersion
               configExFlags
               (flagToMaybe (configCabalVersion configExFlags))
           )
           Nothing
-          False
 
       logMsg message rest = debug verbosity message >> rest
 
 configureSetupScript
-  :: PackageDBStack
+  :: PackageDBStackCWD
   -> Compiler
   -> Platform
   -> ProgramDb
-  -> FilePath
+  -> SymbolicPath Pkg (Dir Dist)
   -> VersionRange
   -> Maybe Lock
-  -> Bool
   -> InstalledPackageIndex
   -> Maybe ReadyPackage
   -> SetupScriptOptions
@@ -269,7 +272,6 @@ configureSetupScript
   distPref
   cabalVersion
   lock
-  forceExternal
   index
   mpkg =
     SetupScriptOptions
@@ -287,17 +289,18 @@ configureSetupScript
       , useExtraEnvOverrides = []
       , setupCacheLock = lock
       , useWin32CleanHack = False
-      , forceExternalSetupMethod = forceExternal
-      , -- If we have explicit setup dependencies, list them; otherwise, we give
-        -- the empty list of dependencies; ideally, we would fix the version of
-        -- Cabal here, so that we no longer need the special case for that in
-        -- `compileSetupExecutable` in `externalSetupMethod`, but we don't yet
-        -- know the version of Cabal at this point, but only find this there.
-        -- Therefore, for now, we just leave this blank.
-        useDependencies = fromMaybe [] explicitSetupDeps
-      , useDependenciesExclusive = not defaultSetupDeps && isJust explicitSetupDeps
+      , -- If the @custom-setup@ stanza has an explicit list of dependencies,
+        -- use those exclusively. Otherwise, the list is not exhaustive, and
+        -- we have a special case in 'SetupWrapper' to go looking for a Cabal
+        -- library. We don't yet know its version, so for now we leave the list
+        -- of implicit dependencies blank.
+        useSetupDependencies =
+          case explicitSetupDeps of
+            Just deps | not defaultSetupDeps -> ExplicitSetupDeps deps
+            _ -> ImplicitSetupDeps (fromMaybe [] explicitSetupDeps)
       , useVersionMacros = not defaultSetupDeps && isJust explicitSetupDeps
       , isInteractive = False
+      , isMainLibOrExeComponent = True
       }
     where
       -- When we are compiling a legacy setup script without an explicit
@@ -305,7 +308,7 @@ configureSetupScript
       -- finding the Cabal lib when compiling any Setup.hs even if we're doing
       -- a global install. However we also allow looking in a specific package
       -- db.
-      packageDBs' :: PackageDBStack
+      packageDBs' :: PackageDBStackCWD
       index' :: Maybe InstalledPackageIndex
       (packageDBs', index') =
         case packageDBs of
@@ -387,7 +390,7 @@ planLocalPackage
   -> ConfigExFlags
   -> InstalledPackageIndex
   -> SourcePackageDb
-  -> PkgConfigDb
+  -> Maybe PkgConfigDb
   -> IO (Progress String String SolverInstallPlan)
 planLocalPackage
   verbosity
@@ -399,9 +402,9 @@ planLocalPackage
   (SourcePackageDb _ packagePrefs)
   pkgConfigDb = do
     pkg <-
-      readGenericPackageDescription verbosity
-        =<< case flagToMaybe (configCabalFilePath configFlags) of
-          Nothing -> defaultPackageDesc verbosity
+      readGenericPackageDescription verbosity Nothing
+        =<< case flagToMaybe (setupCabalFilePath $ configCommonFlags configFlags) of
+          Nothing -> relativeSymbolicPath <$> defaultPackageDescCwd verbosity
           Just fp -> return fp
 
     let
@@ -460,7 +463,7 @@ planLocalPackage
           -- package database and executables never show up in the
           -- installed package index
           . setSolveExecutables (SolveExecutables False)
-          . setSolverVerbosity verbosity
+          . setSolverVerbosity (verbosityLevel verbosity)
           $ standardInstallPolicy
             installedPkgIndex
             -- NB: We pass in an *empty* source package database,
@@ -501,8 +504,10 @@ configurePackage
       scriptOptions
       (Just pkg)
       configureCommand
-      configureFlags
+      configCommonFlags
+      (return . configureFlags)
       (const extraArgs)
+      NotInLibrary
     where
       gpkg :: PkgDesc.GenericPackageDescription
       gpkg = srcpkgDescription spkg
@@ -510,7 +515,12 @@ configurePackage
       configureFlags =
         filterConfigureFlags
           configFlags
-            { configIPID =
+            { configCommonFlags =
+                (configCommonFlags configFlags)
+                  { setupVerbosity = toFlag $ verbosityFlags verbosity
+                  , setupWorkingDir = maybeToFlag $ useWorkingDir scriptOptions
+                  }
+            , configIPID =
                 if isJust (flagToMaybe (configIPID configFlags))
                   then -- Make sure cabal configure --ipid works.
                     configIPID configFlags
@@ -531,23 +541,22 @@ configurePackage
                 ]
             , -- Use '--exact-configuration' if supported.
               configExactConfiguration = toFlag True
-            , configVerbosity = toFlag verbosity
             , -- NB: if the user explicitly specified
               -- --enable-tests/--enable-benchmarks, always respect it.
               -- (But if they didn't, let solver decide.)
               configBenchmarks =
                 toFlag (BenchStanzas `optStanzaSetMember` stanzas)
-                  `mappend` configBenchmarks configFlags
+                  <> configBenchmarks configFlags
             , configTests =
                 toFlag (TestStanzas `optStanzaSetMember` stanzas)
-                  `mappend` configTests configFlags
+                  <> configTests configFlags
             }
 
       pkg :: PkgDesc.PackageDescription
       pkg = case finalizePD
         flags
         (enableStanzas stanzas)
-        (const True)
+        (const Satisfied)
         platform
         comp
         []
@@ -570,7 +579,7 @@ readConfigFlagsFrom
 readConfigFlagsFrom flags = do
   readCommandFlags flags configureExCommand
 
--- | The path (relative to @--build-dir@) where the arguments to @configure@
+-- | The path (relative to the package root) where the arguments to @configure@
 -- should be saved.
 cabalConfigFlagsFile :: FilePath -> FilePath
 cabalConfigFlagsFile dist = dist </> "cabal-config-flags"
@@ -586,12 +595,12 @@ readConfigFlags dist =
 
 -- | Save the configure flags and environment to the specified files.
 writeConfigFlagsTo
-  :: FilePath
+  :: Verbosity
+  -> FilePath
   -- ^ path to saved flags file
-  -> Verbosity
   -> (ConfigFlags, ConfigExFlags)
   -> IO ()
-writeConfigFlagsTo file verb flags = do
+writeConfigFlagsTo verb file flags = do
   writeCommandFlags verb file configureExCommand flags
 
 -- | Save the build flags to the usual location.
@@ -602,4 +611,4 @@ writeConfigFlags
   -> (ConfigFlags, ConfigExFlags)
   -> IO ()
 writeConfigFlags verb dist =
-  writeConfigFlagsTo (cabalConfigFlagsFile dist) verb
+  writeConfigFlagsTo verb (cabalConfigFlagsFile dist)

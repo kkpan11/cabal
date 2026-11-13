@@ -1,5 +1,4 @@
-{-# LANGUAGE CPP #-}
-{-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
 
 module UnitTests.Distribution.Client.Glob (tests) where
 
@@ -46,6 +45,19 @@ testParseCases = do
   RootedGlob (FilePathRoot "Z:\\") GlobDirTrailing <- testparse "z:/"
   RootedGlob (FilePathRoot "C:\\") GlobDirTrailing <- testparse "C:\\"
   RootedGlob FilePathRelative (GlobFile [Literal "_:"]) <- testparse "_:"
+
+  RootedGlob
+    FilePathRelative
+    (GlobDirRecursive [WildCard]) <-
+    testparse "**/*"
+  RootedGlob
+    FilePathRelative
+    (GlobDir [Literal "foo"] (GlobDirRecursive [WildCard])) <-
+    testparse "foo/**/*"
+  RootedGlob
+    FilePathRelative
+    (GlobDir [Literal "foo"] (GlobDirRecursive [WildCard, Literal ".txt"])) <-
+    testparse "foo/**/*.txt"
 
   RootedGlob
     FilePathRelative
@@ -107,7 +119,7 @@ testParseCases = do
   RootedGlob
     FilePathRelative
     (GlobFile [WildCard, WildCard]) <-
-    testparse "**" -- not helpful but valid
+    testparse "**" -- not helpful, but valid (?)
   RootedGlob
     FilePathRelative
     (GlobFile [WildCard, Literal "foo", WildCard]) <-

@@ -1,5 +1,4 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DataKinds #-}
 
 module Distribution.Types.Executable
   ( Executable (..)
@@ -15,38 +14,44 @@ import Distribution.ModuleName
 import Distribution.Types.BuildInfo
 import Distribution.Types.ExecutableScope
 import Distribution.Types.UnqualComponentName
+import Distribution.Utils.Path
 
 import qualified Distribution.Types.BuildInfo.Lens as L
 
 data Executable = Executable
   { exeName :: UnqualComponentName
-  , modulePath :: FilePath
+  , modulePath :: RelativePath Source File
   , exeScope :: ExecutableScope
   , buildInfo :: BuildInfo
   }
-  deriving (Generic, Show, Read, Eq, Ord, Typeable, Data)
+  deriving (Generic, Show, Read, Eq, Ord, Data)
 
 instance L.HasBuildInfo Executable where
   buildInfo f l = (\x -> l{buildInfo = x}) <$> f (buildInfo l)
 
 instance Binary Executable
 instance Structured Executable
-instance NFData Executable where rnf = genericRnf
+instance NFData Executable
 
 instance Monoid Executable where
-  mempty = gmempty
-  mappend = (<>)
+  mempty =
+    Executable
+      { exeName = mempty
+      , modulePath = unsafeMakeSymbolicPath ""
+      , exeScope = mempty
+      , buildInfo = mempty
+      }
 
 instance Semigroup Executable where
   a <> b =
     Executable
       { exeName = combineNames a b exeName "executable"
-      , modulePath = combineNames a b modulePath "modulePath"
+      , modulePath = unsafeMakeSymbolicPath $ combineNames a b (getSymbolicPath . modulePath) "modulePath"
       , exeScope = combine exeScope
       , buildInfo = combine buildInfo
       }
     where
-      combine field = field a `mappend` field b
+      combine field = field a <> field b
 
 emptyExecutable :: Executable
 emptyExecutable = mempty

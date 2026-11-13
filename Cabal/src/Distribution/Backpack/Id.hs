@@ -1,6 +1,4 @@
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE PatternGuards #-}
-{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE PatternSynonyms #-}
 
 -- | See <https://github.com/ezyang/ghc-proposals/blob/backpack/proposals/0000-backpack.rst>
 module Distribution.Backpack.Id
@@ -13,7 +11,7 @@ import Prelude ()
 
 import Distribution.PackageDescription
 import Distribution.Simple.Compiler
-import Distribution.Simple.Flag (Flag (..))
+import Distribution.Simple.Flag (Flag, pattern Flag, pattern NoFlag)
 import qualified Distribution.Simple.InstallDirs as InstallDirs
 import Distribution.Simple.LocalBuildInfo
 import Distribution.Types.ComponentId

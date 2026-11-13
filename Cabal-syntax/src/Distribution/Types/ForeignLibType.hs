@@ -1,5 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Distribution.Types.ForeignLibType
@@ -27,7 +25,7 @@ data ForeignLibType
     ForeignLibNativeStatic
   | -- TODO: Maybe this should record a string?
     ForeignLibTypeUnknown
-  deriving (Generic, Show, Read, Eq, Ord, Typeable, Data)
+  deriving (Generic, Show, Read, Eq, Ord, Data)
 
 instance Pretty ForeignLibType where
   pretty ForeignLibNativeShared = Disp.text "native-shared"
@@ -44,7 +42,7 @@ instance Parsec ForeignLibType where
 
 instance Binary ForeignLibType
 instance Structured ForeignLibType
-instance NFData ForeignLibType where rnf = genericRnf
+instance NFData ForeignLibType
 
 instance Semigroup ForeignLibType where
   ForeignLibTypeUnknown <> b = b
@@ -53,7 +51,6 @@ instance Semigroup ForeignLibType where
 
 instance Monoid ForeignLibType where
   mempty = ForeignLibTypeUnknown
-  mappend = (<>)
 
 knownForeignLibTypes :: [ForeignLibType]
 knownForeignLibTypes =

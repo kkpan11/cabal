@@ -1,12 +1,3 @@
-{-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-
------------------------------------------------------------------------------
-
 -- |
 -- Module      :  Distribution.Utils.Generic
 -- Copyright   :  Isaac Jones, Simon Marlow 2003-2004
@@ -60,6 +51,7 @@ module Distribution.Utils.Generic
   , listUnion
   , listUnionRight
   , ordNub
+  , sortNub
   , ordNubBy
   , ordNubRight
   , safeHead
@@ -88,23 +80,31 @@ module Distribution.Utils.Generic
 import Distribution.Compat.Prelude
 import Prelude ()
 
-import Distribution.Utils.String
-
+import Control.Concurrent (threadDelay)
+import qualified Control.Exception as Exception
+import Control.Monad ((>=>))
 import Data.Bits (shiftL, (.&.), (.|.))
 import qualified Data.ByteString as SBS
 import qualified Data.ByteString.Lazy as LBS
+import Data.Char (isAsciiLower, isAsciiUpper)
 import Data.List
   ( isInfixOf
   )
 import qualified Data.Set as Set
-
-import qualified Control.Exception as Exception
+import qualified Data.Text as T
+import qualified Data.Text.Encoding as T
+import qualified Data.Text.Encoding.Error as T
+import qualified Data.Text.Lazy as TL
+import qualified Data.Text.Lazy.Encoding as TL
+import GHC.IO.Exception (IOErrorType (UnsupportedOperation))
 import System.Directory
-  ( removeFile
+  ( copyFile
+  , getTemporaryDirectory
+  , removeFile
   , renameFile
   )
 import System.FilePath
-  ( splitFileName
+  ( takeFileName
   , (<.>)
   )
 import System.IO
@@ -115,6 +115,7 @@ import System.IO
   , withBinaryFile
   , withFile
   )
+import System.IO.Error (ioeGetErrorType)
 
 -- -----------------------------------------------------------------------------
 -- Helper functions
@@ -153,33 +154,72 @@ wrapLine width = wrap 0 []
 
 -- | Gets the contents of a file, but guarantee that it gets closed.
 --
--- The file is read lazily but if it is not fully consumed by the action then
--- the remaining input is truncated and the file is closed.
+-- The file is read lazily; if it is not fully consumed by the action then an
+-- exception is thrown.
 withFileContents :: FilePath -> (String -> IO a) -> IO a
-withFileContents name action =
-  withFile
-    name
-    ReadMode
-    (\hnd -> hGetContents hnd >>= action)
+withFileContents name action = withFile name ReadMode (hGetContents >=> action)
 
 -- | Writes a file atomically.
 --
 -- The file is either written successfully or an IO exception is raised and
 -- the original file is left unchanged.
 --
--- On windows it is not possible to delete a file that is open by a process.
--- This case will give an IO exception but the atomic property is not affected.
+-- On Unix:
+--
+-- - If the temp directory (@$TMPDIR@) is in a filesystem different than the
+--   destination path, the renaming will be emulated via 'copyFile' then
+--   'deleteFile'.
+--
+-- On Windows:
+--
+-- - This operation is not guaranteed to be atomic, see 'renameFile'.
+--
+-- - It is not possible to delete a file that is open by a process. This case
+--   will give an IO exception but the atomic property is not affected.
+--
+-- - If the temp directory (@TMP@/@TEMP@/..., see haddocks on
+--   'getTemporaryDirectory') is in a different drive than the destination path,
+--   the write will be emulated via 'copyFile', then 'deleteFile'.
 writeFileAtomic :: FilePath -> LBS.ByteString -> IO ()
 writeFileAtomic targetPath content = do
-  let (targetDir, targetFile) = splitFileName targetPath
+  let targetFile = takeFileName targetPath
+  tmpDir <- getTemporaryDirectory
   Exception.bracketOnError
-    (openBinaryTempFileWithDefaultPermissions targetDir $ targetFile <.> "tmp")
+    (openBinaryTempFileWithDefaultPermissions tmpDir $ targetFile <.> "tmp")
     (\(tmpPath, handle) -> hClose handle >> removeFile tmpPath)
     ( \(tmpPath, handle) -> do
         LBS.hPut handle content
         hClose handle
-        renameFile tmpPath targetPath
+        renameFileWithRetry tmpPath targetPath
     )
+
+-- | A robust 'renameFile' which retries with delay and
+-- switches to 'copyFile' as a backup implementation.
+renameFileWithRetry :: FilePath -> FilePath -> IO ()
+renameFileWithRetry srcPath targetPath =
+  renameFile srcPath targetPath `Exception.catch` retryRename 3
+  where
+    retryRename :: Word -> IOException -> IO ()
+    -- If no retries left then throw whatever exception we ended up with.
+    retryRename 0 exception = throwIO exception
+    retryRename retriesLeft exception
+      -- UnsupportedOperation means EXDEV from rename(2) with source and target
+      -- on different devices. In such case we resort to copying instead of renaming.
+      | ioeGetErrorType exception == UnsupportedOperation =
+          retryCopy retriesLeft exception
+      | otherwise = do
+          -- Wait 1ms between retries: maybe device is busy, maybe antivirus locked srcPath.
+          threadDelay 1000
+          renameFile srcPath targetPath `Exception.catch` retryRename (retriesLeft - 1)
+
+    retryCopy :: Word -> IOException -> IO ()
+    retryCopy 0 exception = throwIO exception
+    retryCopy retriesLeft _ = do
+      -- Wait 1ms between retries: maybe device is busy, maybe antivirus locked srcPath.
+      threadDelay 1000
+      copyFile srcPath targetPath `Exception.catch` retryCopy (retriesLeft - 1)
+      -- It's nice to clean up, but not critical, so ignoring any exceptions.
+      removeFile srcPath `Exception.catch` (\(_ :: IOException) -> pure ())
 
 -- ------------------------------------------------------------
 
@@ -192,22 +232,22 @@ writeFileAtomic targetPath content = do
 -- Invalid data in the UTF8 stream (this includes code-points @U+D800@
 -- through @U+DFFF@) will be decoded as the replacement character (@U+FFFD@).
 fromUTF8BS :: SBS.ByteString -> String
-fromUTF8BS = decodeStringUtf8 . SBS.unpack
+fromUTF8BS = T.unpack . T.decodeUtf8With T.lenientDecode
 
 -- | Variant of 'fromUTF8BS' for lazy 'BS.ByteString's
 fromUTF8LBS :: LBS.ByteString -> String
-fromUTF8LBS = decodeStringUtf8 . LBS.unpack
+fromUTF8LBS = TL.unpack . TL.decodeUtf8With T.lenientDecode
 
 -- | Encode 'String' to UTF8-encoded 'SBS.ByteString'
 --
 -- Code-points in the @U+D800@-@U+DFFF@ range will be encoded
 -- as the replacement character (i.e. @U+FFFD@).
 toUTF8BS :: String -> SBS.ByteString
-toUTF8BS = SBS.pack . encodeStringUtf8
+toUTF8BS = T.encodeUtf8 . T.pack
 
 -- | Variant of 'toUTF8BS' for lazy 'BS.ByteString's
 toUTF8LBS :: String -> LBS.ByteString
-toUTF8LBS = LBS.pack . encodeStringUtf8
+toUTF8LBS = TL.encodeUtf8 . TL.pack
 
 -- | Check that strict 'ByteString' is valid UTF8. Returns 'Just offset' if it's not.
 validateUTF8 :: SBS.ByteString -> Maybe Int
@@ -259,7 +299,7 @@ ignoreBOM string = string
 --
 -- Reads lazily using ordinary 'readFile'.
 readUTF8File :: FilePath -> IO String
-readUTF8File f = (ignoreBOM . fromUTF8LBS) <$> LBS.readFile f
+readUTF8File f = ignoreBOM . fromUTF8LBS <$> LBS.readFile f
 
 -- | Reads a UTF8 encoded text file as a Unicode String
 --
@@ -269,7 +309,7 @@ withUTF8FileContents name action =
   withBinaryFile
     name
     ReadMode
-    (\hnd -> LBS.hGetContents hnd >>= action . ignoreBOM . fromUTF8LBS)
+    (LBS.hGetContents >=> action . ignoreBOM . fromUTF8LBS)
 
 -- | Writes a Unicode String as a UTF8 encoded text file.
 --
@@ -367,6 +407,10 @@ ordNubRight = fst . foldr go ([], Set.empty)
         then p
         else (x : l, Set.insert x s)
 
+-- | Sort and nub a list
+sortNub :: Ord a => [a] -> [a]
+sortNub = Set.toList . Set.fromList
+
 -- | A right-biased version of 'listUnion'.
 --
 -- Example:
@@ -426,9 +470,7 @@ isAscii c = fromEnum c < 0x80
 
 -- | Ascii letters.
 isAsciiAlpha :: Char -> Bool
-isAsciiAlpha c =
-  ('a' <= c && c <= 'z')
-    || ('A' <= c && c <= 'Z')
+isAsciiAlpha c = isAsciiLower c || isAsciiUpper c
 
 -- | Ascii letters and digits.
 --
@@ -494,7 +536,7 @@ unfoldrM f = go
       m <- f b
       case m of
         Nothing -> return []
-        Just (a, b') -> liftM (a :) (go b')
+        Just (a, b') -> (a :) <$> go b'
 
 -- | The opposite of 'snoc', which is the reverse of 'cons'
 --

@@ -35,6 +35,7 @@ import Prelude ()
 import Distribution.CabalSpecVersion
 import Distribution.Compat.Lens
 import Distribution.FieldGrammar (PrettyFieldGrammar', prettyFieldGrammar)
+import Distribution.FieldGrammar.Newtypes (MQuoted (..), RelativePathNT (..), SymbolicPathNT (..), TestedWith (..), Token (..), Token' (..))
 import Distribution.Fields.Pretty
 import Distribution.PackageDescription
 import Distribution.PackageDescription.Configuration (transformAllBuildInfos)
@@ -121,11 +122,11 @@ ppFlag v flag@(MkPackageFlag name _ _ _) =
   PrettySection () "flag" [ppFlagName name] $
     prettyFieldGrammar v (flagFieldGrammar name) flag
 
-ppCondTree2 :: CabalSpecVersion -> PrettyFieldGrammar' s -> CondTree ConfVar [Dependency] s -> [PrettyField ()]
+ppCondTree2 :: CabalSpecVersion -> PrettyFieldGrammar' s -> CondTree ConfVar s -> [PrettyField ()]
 ppCondTree2 v grammar = go
   where
     -- TODO: recognise elif opportunities
-    go (CondNode it _ ifs) =
+    go (CondNode it ifs) =
       prettyFieldGrammar v grammar it
         ++ concatMap ppIf ifs
 
@@ -140,42 +141,42 @@ ppCondTree2 v grammar = go
       , PrettySection () "else" [] (go elseTree)
       ]
 
-ppCondLibrary :: CabalSpecVersion -> Maybe (CondTree ConfVar [Dependency] Library) -> [PrettyField ()]
+ppCondLibrary :: CabalSpecVersion -> Maybe (CondTree ConfVar Library) -> [PrettyField ()]
 ppCondLibrary _ Nothing = mempty
 ppCondLibrary v (Just condTree) =
   pure $
     PrettySection () "library" [] $
       ppCondTree2 v (libraryFieldGrammar LMainLibName) condTree
 
-ppCondSubLibraries :: CabalSpecVersion -> [(UnqualComponentName, CondTree ConfVar [Dependency] Library)] -> [PrettyField ()]
+ppCondSubLibraries :: CabalSpecVersion -> [(UnqualComponentName, CondTree ConfVar Library)] -> [PrettyField ()]
 ppCondSubLibraries v libs =
   [ PrettySection () "library" [pretty n] $
     ppCondTree2 v (libraryFieldGrammar $ LSubLibName n) condTree
   | (n, condTree) <- libs
   ]
 
-ppCondForeignLibs :: CabalSpecVersion -> [(UnqualComponentName, CondTree ConfVar [Dependency] ForeignLib)] -> [PrettyField ()]
+ppCondForeignLibs :: CabalSpecVersion -> [(UnqualComponentName, CondTree ConfVar ForeignLib)] -> [PrettyField ()]
 ppCondForeignLibs v flibs =
   [ PrettySection () "foreign-library" [pretty n] $
     ppCondTree2 v (foreignLibFieldGrammar n) condTree
   | (n, condTree) <- flibs
   ]
 
-ppCondExecutables :: CabalSpecVersion -> [(UnqualComponentName, CondTree ConfVar [Dependency] Executable)] -> [PrettyField ()]
+ppCondExecutables :: CabalSpecVersion -> [(UnqualComponentName, CondTree ConfVar Executable)] -> [PrettyField ()]
 ppCondExecutables v exes =
   [ PrettySection () "executable" [pretty n] $
     ppCondTree2 v (executableFieldGrammar n) condTree
   | (n, condTree) <- exes
   ]
 
-ppCondTestSuites :: CabalSpecVersion -> [(UnqualComponentName, CondTree ConfVar [Dependency] TestSuite)] -> [PrettyField ()]
+ppCondTestSuites :: CabalSpecVersion -> [(UnqualComponentName, CondTree ConfVar TestSuite)] -> [PrettyField ()]
 ppCondTestSuites v suites =
   [ PrettySection () "test-suite" [pretty n] $
     ppCondTree2 v testSuiteFieldGrammar (fmap FG.unvalidateTestSuite condTree)
   | (n, condTree) <- suites
   ]
 
-ppCondBenchmarks :: CabalSpecVersion -> [(UnqualComponentName, CondTree ConfVar [Dependency] Benchmark)] -> [PrettyField ()]
+ppCondBenchmarks :: CabalSpecVersion -> [(UnqualComponentName, CondTree ConfVar Benchmark)] -> [PrettyField ()]
 ppCondBenchmarks v suites =
   [ PrettySection () "benchmark" [pretty n] $
     ppCondTree2 v benchmarkFieldGrammar (fmap FG.unvalidateBenchmark condTree)
@@ -185,7 +186,7 @@ ppCondBenchmarks v suites =
 ppCondition :: Condition ConfVar -> Doc
 ppCondition (Var x) = ppConfVar x
 ppCondition (Lit b) = text (show b)
-ppCondition (CNot c) = char '!' <<>> (ppCondition c)
+ppCondition (CNot c) = char '!' <<>> ppCondition c
 ppCondition (COr c1 c2) =
   parens
     ( hsep
@@ -241,14 +242,14 @@ pdToGpd pd =
   where
     -- We set CondTree's [Dependency] to an empty list, as it
     -- is not pretty printed anyway.
-    mkCondTree x = CondNode x [] []
-    mkCondTreeL l = (fromMaybe (mkUnqualComponentName "") (libraryNameString (libName l)), CondNode l [] [])
+    mkCondTree x = CondNode x []
+    mkCondTreeL l = (fromMaybe (mkUnqualComponentName "") (libraryNameString (libName l)), CondNode l [])
 
     mkCondTree'
       :: (a -> UnqualComponentName)
       -> a
-      -> (UnqualComponentName, CondTree ConfVar [Dependency] a)
-    mkCondTree' f x = (f x, CondNode x [] [])
+      -> (UnqualComponentName, CondTree ConfVar a)
+    mkCondTree' f x = (f x, CondNode x [])
 
 -------------------------------------------------------------------------------
 -- Internal libs
@@ -271,7 +272,7 @@ preProcessInternalDeps specVer gpd
 
     transformD :: Dependency -> [Dependency]
     transformD (Dependency pn vr ln)
-      | pn == thisPn =
+      | pn == thisPn && specVer < CabalSpecV3_0 =
           if LMainLibName `NES.member` ln
             then Dependency thisPn vr mainLibSet : sublibs
             else sublibs
@@ -282,9 +283,12 @@ preProcessInternalDeps specVer gpd
           ]
     transformD d = [d]
 
+    -- Always perform transformation for mixins as syntax was only introduced in 3.4
+    -- This guard is unnecessary as no transformations take place when cabalSpec >= CabalSpecV3_4 but
+    -- it more clearly signifies the intent. (See the specVer >= CabalSpecV3_4 line above).
     transformM :: Mixin -> Mixin
     transformM (Mixin pn (LSubLibName uqn) inc)
-      | pn == thisPn =
+      | pn == thisPn && specVer < CabalSpecV3_4 =
           mkMixin (unqualComponentNameToPackageName uqn) LMainLibName inc
     transformM m = m
 

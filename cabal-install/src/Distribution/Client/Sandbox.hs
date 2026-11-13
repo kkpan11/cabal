@@ -1,10 +1,4 @@
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE RankNTypes #-}
-
------------------------------------------------------------------------------
-
------------------------------------------------------------------------------
+{-# LANGUAGE DataKinds #-}
 
 -- |
 -- Module      :  Distribution.Client.Sandbox
@@ -28,7 +22,8 @@ import Distribution.Client.Config
   , loadConfig
   )
 import Distribution.Client.Setup
-  ( ConfigFlags (..)
+  ( CommonSetupFlags (..)
+  , ConfigFlags (..)
   , GlobalFlags (..)
   , configCompilerAux'
   )
@@ -51,13 +46,19 @@ import Distribution.Simple.Configure
 import qualified Distribution.Simple.LocalBuildInfo as LocalBuildInfo
 import Distribution.Simple.Program (ProgramDb)
 import Distribution.Simple.Setup
-  ( Flag (..)
+  ( Flag
   , flagToMaybe
   , fromFlagOrDefault
   )
 import Distribution.System (Platform)
+import Distribution.Utils.Path hiding
+  ( (<.>)
+  , (</>)
+  )
 
-import System.Directory (getCurrentDirectory)
+import System.Directory
+  ( getCurrentDirectory
+  )
 
 -- * Basic sandbox functions.
 
@@ -81,7 +82,7 @@ updateInstallDirs userInstallFlag savedConfig =
     userInstall =
       fromFlagOrDefault
         defaultUserInstall
-        (configUserInstall configureFlags `mappend` userInstallFlag)
+        (configUserInstall configureFlags <> userInstallFlag)
 
 -- | Check which type of package environment we're in and return a
 -- correctly-initialised @SavedConfig@ and a @UseSandbox@ value that indicates
@@ -102,7 +103,7 @@ loadConfigOrSandboxConfig verbosity globalFlags = do
     UserPackageEnvironment -> do
       config <- loadConfig verbosity configFileFlag
       userConfig <- loadUserConfig verbosity pkgEnvDir Nothing
-      let config' = config `mappend` userConfig
+      let config' = config <> userConfig
       return config'
 
     -- Neither @cabal.sandbox.config@ nor @cabal.config@ are present.
@@ -112,16 +113,16 @@ loadConfigOrSandboxConfig verbosity globalFlags = do
             flagToMaybe . globalConstraintsFile . savedGlobalFlags $ config
       globalConstraintConfig <-
         loadUserConfig verbosity pkgEnvDir globalConstraintsOpt
-      let config' = config `mappend` globalConstraintConfig
+      let config' = config <> globalConstraintConfig
       return config'
 
 -- | Return the saved \"dist/\" prefix, or the default prefix.
-findSavedDistPref :: SavedConfig -> Flag FilePath -> IO FilePath
+findSavedDistPref :: SavedConfig -> Flag (SymbolicPath Pkg (Dir Dist)) -> IO (SymbolicPath Pkg (Dir Dist))
 findSavedDistPref config flagDistPref = do
   let defDistPref = useDistPref defaultSetupScriptOptions
       flagDistPref' =
-        configDistPref (savedConfigureFlags config)
-          `mappend` flagDistPref
+        setupDistPref (configCommonFlags $ savedConfigureFlags config)
+          <> flagDistPref
   findDistPref defDistPref flagDistPref'
 
 -- Utils (transitionary)
@@ -134,8 +135,9 @@ getPersistOrConfigCompiler
   :: ConfigFlags
   -> IO (Compiler, Platform, ProgramDb)
 getPersistOrConfigCompiler configFlags = do
-  distPref <- findDistPrefOrDefault (configDistPref configFlags)
-  mlbi <- maybeGetPersistBuildConfig distPref
+  let common = configCommonFlags configFlags
+  distPref <- findDistPrefOrDefault (setupDistPref common)
+  mlbi <- maybeGetPersistBuildConfig (flagToMaybe $ setupWorkingDir common) distPref
   case mlbi of
     Nothing -> do configCompilerAux' configFlags
     Just lbi ->

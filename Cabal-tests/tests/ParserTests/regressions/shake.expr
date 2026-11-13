@@ -56,7 +56,7 @@ GenericPackageDescription {
     synopsis =
     "Build system library, like Make, but more accurate dependencies.",
     description =
-    concat
+    T.concat
       [
         "Shake is a Haskell library for writing build systems - designed as a\n",
         "replacement for @make@. See \"Development.Shake\" for an introduction,\n",
@@ -88,42 +88,69 @@ GenericPackageDescription {
     testSuites = [],
     benchmarks = [],
     dataFiles = [
-      "html/viz.js",
-      "html/profile.html",
-      "html/progress.html",
-      "html/shake.js",
-      "docs/manual/build.bat",
-      "docs/manual/Build.hs",
-      "docs/manual/build.sh",
-      "docs/manual/constants.c",
-      "docs/manual/constants.h",
-      "docs/manual/main.c"],
-    dataDir = ".",
+      SymbolicPath "html/viz.js",
+      SymbolicPath
+        "html/profile.html",
+      SymbolicPath
+        "html/progress.html",
+      SymbolicPath "html/shake.js",
+      SymbolicPath
+        "docs/manual/build.bat",
+      SymbolicPath
+        "docs/manual/Build.hs",
+      SymbolicPath
+        "docs/manual/build.sh",
+      SymbolicPath
+        "docs/manual/constants.c",
+      SymbolicPath
+        "docs/manual/constants.h",
+      SymbolicPath
+        "docs/manual/main.c"],
+    dataDir = SymbolicPath ".",
     extraSrcFiles = [
-      "src/Test/C/constants.c",
-      "src/Test/C/constants.h",
-      "src/Test/C/main.c",
-      "src/Test/MakeTutor/Makefile",
-      "src/Test/MakeTutor/hellofunc.c",
-      "src/Test/MakeTutor/hellomake.c",
-      "src/Test/MakeTutor/hellomake.h",
-      "src/Test/Tar/list.txt",
-      "src/Test/Ninja/*.ninja",
-      "src/Test/Ninja/subdir/*.ninja",
-      "src/Test/Ninja/*.output",
-      "src/Test/Progress/*.prog",
-      "src/Test/Tup/hello.c",
-      "src/Test/Tup/root.cfg",
-      "src/Test/Tup/newmath/root.cfg",
-      "src/Test/Tup/newmath/square.c",
-      "src/Test/Tup/newmath/square.h",
-      "src/Paths.hs",
-      "docs/Manual.md",
-      "docs/shake-progress.png"],
+      SymbolicPath
+        "src/Test/C/constants.c",
+      SymbolicPath
+        "src/Test/C/constants.h",
+      SymbolicPath
+        "src/Test/C/main.c",
+      SymbolicPath
+        "src/Test/MakeTutor/Makefile",
+      SymbolicPath
+        "src/Test/MakeTutor/hellofunc.c",
+      SymbolicPath
+        "src/Test/MakeTutor/hellomake.c",
+      SymbolicPath
+        "src/Test/MakeTutor/hellomake.h",
+      SymbolicPath
+        "src/Test/Tar/list.txt",
+      SymbolicPath
+        "src/Test/Ninja/*.ninja",
+      SymbolicPath
+        "src/Test/Ninja/subdir/*.ninja",
+      SymbolicPath
+        "src/Test/Ninja/*.output",
+      SymbolicPath
+        "src/Test/Progress/*.prog",
+      SymbolicPath
+        "src/Test/Tup/hello.c",
+      SymbolicPath
+        "src/Test/Tup/root.cfg",
+      SymbolicPath
+        "src/Test/Tup/newmath/root.cfg",
+      SymbolicPath
+        "src/Test/Tup/newmath/square.c",
+      SymbolicPath
+        "src/Test/Tup/newmath/square.h",
+      SymbolicPath "src/Paths.hs",
+      SymbolicPath "docs/Manual.md",
+      SymbolicPath
+        "docs/shake-progress.png"],
     extraTmpFiles = [],
     extraDocFiles = [
-      "CHANGES.txt",
-      "README.md"]},
+      SymbolicPath "CHANGES.txt",
+      SymbolicPath "README.md"],
+    extraFiles = []},
   gpdScannedVersion = Nothing,
   genPackageFlags = [
     MkPackageFlag {
@@ -166,6 +193,7 @@ GenericPackageDescription {
           cmmOptions = [],
           ccOptions = [],
           cxxOptions = [],
+          jsppOptions = [],
           ldOptions = [],
           hsc2hsOptions = [],
           pkgconfigDepends = [],
@@ -280,6 +308,8 @@ GenericPackageDescription {
             [],
           sharedOptions =
           PerCompilerFlavor [] [],
+          profSharedOptions =
+          PerCompilerFlavor [] [],
           staticOptions =
           PerCompilerFlavor [] [],
           customFieldsBI = [],
@@ -358,80 +388,6 @@ GenericPackageDescription {
                 (mkVersion [1, 1]))
               mainLibSet],
           mixins = []}},
-      condTreeConstraints = [
-        Dependency
-          (PackageName "base")
-          (OrLaterVersion
-            (mkVersion [4, 5]))
-          mainLibSet,
-        Dependency
-          (PackageName "directory")
-          (OrLaterVersion (mkVersion [0]))
-          mainLibSet,
-        Dependency
-          (PackageName "hashable")
-          (OrLaterVersion
-            (mkVersion [1, 1, 2, 3]))
-          mainLibSet,
-        Dependency
-          (PackageName "binary")
-          (OrLaterVersion (mkVersion [0]))
-          mainLibSet,
-        Dependency
-          (PackageName "filepath")
-          (OrLaterVersion (mkVersion [0]))
-          mainLibSet,
-        Dependency
-          (PackageName "process")
-          (OrLaterVersion
-            (mkVersion [1, 1]))
-          mainLibSet,
-        Dependency
-          (PackageName
-            "unordered-containers")
-          (OrLaterVersion
-            (mkVersion [0, 2, 1]))
-          mainLibSet,
-        Dependency
-          (PackageName "bytestring")
-          (OrLaterVersion (mkVersion [0]))
-          mainLibSet,
-        Dependency
-          (PackageName "utf8-string")
-          (OrLaterVersion
-            (mkVersion [0, 3]))
-          mainLibSet,
-        Dependency
-          (PackageName "time")
-          (OrLaterVersion (mkVersion [0]))
-          mainLibSet,
-        Dependency
-          (PackageName "random")
-          (OrLaterVersion (mkVersion [0]))
-          mainLibSet,
-        Dependency
-          (PackageName "js-jquery")
-          (OrLaterVersion (mkVersion [0]))
-          mainLibSet,
-        Dependency
-          (PackageName "js-flot")
-          (OrLaterVersion (mkVersion [0]))
-          mainLibSet,
-        Dependency
-          (PackageName "transformers")
-          (OrLaterVersion
-            (mkVersion [0, 2]))
-          mainLibSet,
-        Dependency
-          (PackageName "extra")
-          (OrLaterVersion
-            (mkVersion [1, 4, 8]))
-          mainLibSet,
-        Dependency
-          (PackageName "deepseq")
-          (OrLaterVersion
-            (mkVersion [1, 1]))
-          mainLibSet],
       condTreeComponents = [
         CondBranch {
           condBranchCondition =
@@ -454,6 +410,7 @@ GenericPackageDescription {
                 cmmOptions = [],
                 ccOptions = [],
                 cxxOptions = [],
+                jsppOptions = [],
                 ldOptions = [],
                 hsc2hsOptions = [],
                 pkgconfigDepends = [],
@@ -493,12 +450,13 @@ GenericPackageDescription {
                   [],
                 sharedOptions =
                 PerCompilerFlavor [] [],
+                profSharedOptions =
+                PerCompilerFlavor [] [],
                 staticOptions =
                 PerCompilerFlavor [] [],
                 customFieldsBI = [],
                 targetBuildDepends = [],
                 mixins = []}},
-            condTreeConstraints = [],
             condTreeComponents = [
               CondBranch {
                 condBranchCondition =
@@ -521,6 +479,7 @@ GenericPackageDescription {
                       cmmOptions = [],
                       ccOptions = [],
                       cxxOptions = [],
+                      jsppOptions = [],
                       ldOptions = [],
                       hsc2hsOptions = [],
                       pkgconfigDepends = [],
@@ -560,6 +519,8 @@ GenericPackageDescription {
                         [],
                       sharedOptions =
                       PerCompilerFlavor [] [],
+                      profSharedOptions =
+                      PerCompilerFlavor [] [],
                       staticOptions =
                       PerCompilerFlavor [] [],
                       customFieldsBI = [],
@@ -569,11 +530,6 @@ GenericPackageDescription {
                           (OrLaterVersion (mkVersion [0]))
                           mainLibSet],
                       mixins = []}},
-                  condTreeConstraints = [
-                    Dependency
-                      (PackageName "old-time")
-                      (OrLaterVersion (mkVersion [0]))
-                      mainLibSet],
                   condTreeComponents = []},
                 condBranchIfFalse = Nothing}]},
           condBranchIfFalse = Just
@@ -595,6 +551,7 @@ GenericPackageDescription {
                   cmmOptions = [],
                   ccOptions = [],
                   cxxOptions = [],
+                  jsppOptions = [],
                   ldOptions = [],
                   hsc2hsOptions = [],
                   pkgconfigDepends = [],
@@ -634,12 +591,13 @@ GenericPackageDescription {
                     [],
                   sharedOptions =
                   PerCompilerFlavor [] [],
+                  profSharedOptions =
+                  PerCompilerFlavor [] [],
                   staticOptions =
                   PerCompilerFlavor [] [],
                   customFieldsBI = [],
                   targetBuildDepends = [],
                   mixins = []}},
-              condTreeConstraints = [],
               condTreeComponents = [
                 CondBranch {
                   condBranchCondition =
@@ -662,6 +620,7 @@ GenericPackageDescription {
                         cmmOptions = [],
                         ccOptions = [],
                         cxxOptions = [],
+                        jsppOptions = [],
                         ldOptions = [],
                         hsc2hsOptions = [],
                         pkgconfigDepends = [],
@@ -701,6 +660,8 @@ GenericPackageDescription {
                           [],
                         sharedOptions =
                         PerCompilerFlavor [] [],
+                        profSharedOptions =
+                        PerCompilerFlavor [] [],
                         staticOptions =
                         PerCompilerFlavor [] [],
                         customFieldsBI = [],
@@ -711,12 +672,6 @@ GenericPackageDescription {
                               (mkVersion [2, 5, 1]))
                             mainLibSet],
                         mixins = []}},
-                    condTreeConstraints = [
-                      Dependency
-                        (PackageName "unix")
-                        (OrLaterVersion
-                          (mkVersion [2, 5, 1]))
-                        mainLibSet],
                     condTreeComponents = []},
                   condBranchIfFalse = Nothing}]}},
         CondBranch {
@@ -740,6 +695,7 @@ GenericPackageDescription {
                 cmmOptions = [],
                 ccOptions = [],
                 cxxOptions = [],
+                jsppOptions = [],
                 ldOptions = [],
                 hsc2hsOptions = [],
                 pkgconfigDepends = [],
@@ -779,6 +735,8 @@ GenericPackageDescription {
                   [],
                 sharedOptions =
                 PerCompilerFlavor [] [],
+                profSharedOptions =
+                PerCompilerFlavor [] [],
                 staticOptions =
                 PerCompilerFlavor [] [],
                 customFieldsBI = [],
@@ -788,11 +746,6 @@ GenericPackageDescription {
                     (OrLaterVersion (mkVersion [0]))
                     mainLibSet],
                 mixins = []}},
-            condTreeConstraints = [
-              Dependency
-                (PackageName "unix")
-                (OrLaterVersion (mkVersion [0]))
-                mainLibSet],
             condTreeComponents = []},
           condBranchIfFalse = Nothing}]},
   condSubLibraries = [],
@@ -804,7 +757,8 @@ GenericPackageDescription {
         condTreeData = Executable {
           exeName = UnqualComponentName
             "shake",
-          modulePath = "Run.hs",
+          modulePath = SymbolicPath
+            "Run.hs",
           exeScope = ExecutablePublic,
           buildInfo = BuildInfo {
             buildable = True,
@@ -815,6 +769,7 @@ GenericPackageDescription {
             cmmOptions = [],
             ccOptions = [],
             cxxOptions = [],
+            jsppOptions = [],
             ldOptions = [],
             hsc2hsOptions = [],
             pkgconfigDepends = [],
@@ -955,6 +910,8 @@ GenericPackageDescription {
               [],
             sharedOptions =
             PerCompilerFlavor [] [],
+            profSharedOptions =
+            PerCompilerFlavor [] [],
             staticOptions =
             PerCompilerFlavor [] [],
             customFieldsBI = [],
@@ -1039,86 +996,6 @@ GenericPackageDescription {
                 (OrLaterVersion (mkVersion [0]))
                 mainLibSet],
             mixins = []}},
-        condTreeConstraints = [
-          Dependency
-            (PackageName "base")
-            (IntersectVersionRanges
-              (OrLaterVersion (mkVersion [4]))
-              (EarlierVersion
-                (mkVersion [5])))
-            mainLibSet,
-          Dependency
-            (PackageName "directory")
-            (OrLaterVersion (mkVersion [0]))
-            mainLibSet,
-          Dependency
-            (PackageName "hashable")
-            (OrLaterVersion
-              (mkVersion [1, 1, 2, 3]))
-            mainLibSet,
-          Dependency
-            (PackageName "binary")
-            (OrLaterVersion (mkVersion [0]))
-            mainLibSet,
-          Dependency
-            (PackageName "filepath")
-            (OrLaterVersion (mkVersion [0]))
-            mainLibSet,
-          Dependency
-            (PackageName "process")
-            (OrLaterVersion
-              (mkVersion [1, 1]))
-            mainLibSet,
-          Dependency
-            (PackageName
-              "unordered-containers")
-            (OrLaterVersion
-              (mkVersion [0, 2, 1]))
-            mainLibSet,
-          Dependency
-            (PackageName "bytestring")
-            (OrLaterVersion (mkVersion [0]))
-            mainLibSet,
-          Dependency
-            (PackageName "utf8-string")
-            (OrLaterVersion
-              (mkVersion [0, 3]))
-            mainLibSet,
-          Dependency
-            (PackageName "time")
-            (OrLaterVersion (mkVersion [0]))
-            mainLibSet,
-          Dependency
-            (PackageName "random")
-            (OrLaterVersion (mkVersion [0]))
-            mainLibSet,
-          Dependency
-            (PackageName "js-jquery")
-            (OrLaterVersion (mkVersion [0]))
-            mainLibSet,
-          Dependency
-            (PackageName "js-flot")
-            (OrLaterVersion (mkVersion [0]))
-            mainLibSet,
-          Dependency
-            (PackageName "transformers")
-            (OrLaterVersion
-              (mkVersion [0, 2]))
-            mainLibSet,
-          Dependency
-            (PackageName "extra")
-            (OrLaterVersion
-              (mkVersion [1, 4, 8]))
-            mainLibSet,
-          Dependency
-            (PackageName "deepseq")
-            (OrLaterVersion
-              (mkVersion [1, 1]))
-            mainLibSet,
-          Dependency
-            (PackageName "primitive")
-            (OrLaterVersion (mkVersion [0]))
-            mainLibSet],
         condTreeComponents = [
           CondBranch {
             condBranchCondition =
@@ -1127,7 +1004,7 @@ GenericPackageDescription {
               condTreeData = Executable {
                 exeName = UnqualComponentName
                   "shake",
-                modulePath = "",
+                modulePath = SymbolicPath "",
                 exeScope = ExecutablePublic,
                 buildInfo = BuildInfo {
                   buildable = True,
@@ -1138,6 +1015,7 @@ GenericPackageDescription {
                   cmmOptions = [],
                   ccOptions = [],
                   cxxOptions = [],
+                  jsppOptions = [],
                   ldOptions = [],
                   hsc2hsOptions = [],
                   pkgconfigDepends = [],
@@ -1179,12 +1057,13 @@ GenericPackageDescription {
                     [],
                   sharedOptions =
                   PerCompilerFlavor [] [],
+                  profSharedOptions =
+                  PerCompilerFlavor [] [],
                   staticOptions =
                   PerCompilerFlavor [] [],
                   customFieldsBI = [],
                   targetBuildDepends = [],
                   mixins = []}},
-              condTreeConstraints = [],
               condTreeComponents = []},
             condBranchIfFalse = Nothing},
           CondBranch {
@@ -1194,7 +1073,7 @@ GenericPackageDescription {
               condTreeData = Executable {
                 exeName = UnqualComponentName
                   "shake",
-                modulePath = "",
+                modulePath = SymbolicPath "",
                 exeScope = ExecutablePublic,
                 buildInfo = BuildInfo {
                   buildable = True,
@@ -1205,6 +1084,7 @@ GenericPackageDescription {
                   cmmOptions = [],
                   ccOptions = [],
                   cxxOptions = [],
+                  jsppOptions = [],
                   ldOptions = [],
                   hsc2hsOptions = [],
                   pkgconfigDepends = [],
@@ -1244,12 +1124,13 @@ GenericPackageDescription {
                     [],
                   sharedOptions =
                   PerCompilerFlavor [] [],
+                  profSharedOptions =
+                  PerCompilerFlavor [] [],
                   staticOptions =
                   PerCompilerFlavor [] [],
                   customFieldsBI = [],
                   targetBuildDepends = [],
                   mixins = []}},
-              condTreeConstraints = [],
               condTreeComponents = [
                 CondBranch {
                   condBranchCondition =
@@ -1258,7 +1139,7 @@ GenericPackageDescription {
                     condTreeData = Executable {
                       exeName = UnqualComponentName
                         "shake",
-                      modulePath = "",
+                      modulePath = SymbolicPath "",
                       exeScope = ExecutablePublic,
                       buildInfo = BuildInfo {
                         buildable = True,
@@ -1269,6 +1150,7 @@ GenericPackageDescription {
                         cmmOptions = [],
                         ccOptions = [],
                         cxxOptions = [],
+                        jsppOptions = [],
                         ldOptions = [],
                         hsc2hsOptions = [],
                         pkgconfigDepends = [],
@@ -1308,6 +1190,8 @@ GenericPackageDescription {
                           [],
                         sharedOptions =
                         PerCompilerFlavor [] [],
+                        profSharedOptions =
+                        PerCompilerFlavor [] [],
                         staticOptions =
                         PerCompilerFlavor [] [],
                         customFieldsBI = [],
@@ -1317,11 +1201,6 @@ GenericPackageDescription {
                             (OrLaterVersion (mkVersion [0]))
                             mainLibSet],
                         mixins = []}},
-                    condTreeConstraints = [
-                      Dependency
-                        (PackageName "old-time")
-                        (OrLaterVersion (mkVersion [0]))
-                        mainLibSet],
                     condTreeComponents = []},
                   condBranchIfFalse = Nothing}]},
             condBranchIfFalse = Just
@@ -1329,7 +1208,7 @@ GenericPackageDescription {
                 condTreeData = Executable {
                   exeName = UnqualComponentName
                     "shake",
-                  modulePath = "",
+                  modulePath = SymbolicPath "",
                   exeScope = ExecutablePublic,
                   buildInfo = BuildInfo {
                     buildable = True,
@@ -1340,6 +1219,7 @@ GenericPackageDescription {
                     cmmOptions = [],
                     ccOptions = [],
                     cxxOptions = [],
+                    jsppOptions = [],
                     ldOptions = [],
                     hsc2hsOptions = [],
                     pkgconfigDepends = [],
@@ -1379,12 +1259,13 @@ GenericPackageDescription {
                       [],
                     sharedOptions =
                     PerCompilerFlavor [] [],
+                    profSharedOptions =
+                    PerCompilerFlavor [] [],
                     staticOptions =
                     PerCompilerFlavor [] [],
                     customFieldsBI = [],
                     targetBuildDepends = [],
                     mixins = []}},
-                condTreeConstraints = [],
                 condTreeComponents = [
                   CondBranch {
                     condBranchCondition =
@@ -1393,7 +1274,7 @@ GenericPackageDescription {
                       condTreeData = Executable {
                         exeName = UnqualComponentName
                           "shake",
-                        modulePath = "",
+                        modulePath = SymbolicPath "",
                         exeScope = ExecutablePublic,
                         buildInfo = BuildInfo {
                           buildable = True,
@@ -1404,6 +1285,7 @@ GenericPackageDescription {
                           cmmOptions = [],
                           ccOptions = [],
                           cxxOptions = [],
+                          jsppOptions = [],
                           ldOptions = [],
                           hsc2hsOptions = [],
                           pkgconfigDepends = [],
@@ -1443,6 +1325,8 @@ GenericPackageDescription {
                             [],
                           sharedOptions =
                           PerCompilerFlavor [] [],
+                          profSharedOptions =
+                          PerCompilerFlavor [] [],
                           staticOptions =
                           PerCompilerFlavor [] [],
                           customFieldsBI = [],
@@ -1453,12 +1337,6 @@ GenericPackageDescription {
                                 (mkVersion [2, 5, 1]))
                               mainLibSet],
                           mixins = []}},
-                      condTreeConstraints = [
-                        Dependency
-                          (PackageName "unix")
-                          (OrLaterVersion
-                            (mkVersion [2, 5, 1]))
-                          mainLibSet],
                       condTreeComponents = []},
                     condBranchIfFalse = Nothing}]}},
           CondBranch {
@@ -1468,7 +1346,7 @@ GenericPackageDescription {
               condTreeData = Executable {
                 exeName = UnqualComponentName
                   "shake",
-                modulePath = "",
+                modulePath = SymbolicPath "",
                 exeScope = ExecutablePublic,
                 buildInfo = BuildInfo {
                   buildable = True,
@@ -1479,6 +1357,7 @@ GenericPackageDescription {
                   cmmOptions = [],
                   ccOptions = [],
                   cxxOptions = [],
+                  jsppOptions = [],
                   ldOptions = [],
                   hsc2hsOptions = [],
                   pkgconfigDepends = [],
@@ -1518,6 +1397,8 @@ GenericPackageDescription {
                     [],
                   sharedOptions =
                   PerCompilerFlavor [] [],
+                  profSharedOptions =
+                  PerCompilerFlavor [] [],
                   staticOptions =
                   PerCompilerFlavor [] [],
                   customFieldsBI = [],
@@ -1527,11 +1408,6 @@ GenericPackageDescription {
                       (OrLaterVersion (mkVersion [0]))
                       mainLibSet],
                   mixins = []}},
-              condTreeConstraints = [
-                Dependency
-                  (PackageName "unix")
-                  (OrLaterVersion (mkVersion [0]))
-                  mainLibSet],
               condTreeComponents = []},
             condBranchIfFalse = Nothing}]}],
   condTestSuites = [
@@ -1544,7 +1420,7 @@ GenericPackageDescription {
             "",
           testInterface = TestSuiteExeV10
             (mkVersion [1, 0])
-            "Test.hs",
+            (SymbolicPath "Test.hs"),
           testBuildInfo = BuildInfo {
             buildable = True,
             buildTools = [],
@@ -1554,6 +1430,7 @@ GenericPackageDescription {
             cmmOptions = [],
             ccOptions = [],
             cxxOptions = [],
+            jsppOptions = [],
             ldOptions = [],
             hsc2hsOptions = [],
             pkgconfigDepends = [],
@@ -1737,6 +1614,8 @@ GenericPackageDescription {
               [],
             sharedOptions =
             PerCompilerFlavor [] [],
+            profSharedOptions =
+            PerCompilerFlavor [] [],
             staticOptions =
             PerCompilerFlavor [] [],
             customFieldsBI = [],
@@ -1823,87 +1702,6 @@ GenericPackageDescription {
                 mainLibSet],
             mixins = []},
           testCodeGenerators = []},
-        condTreeConstraints = [
-          Dependency
-            (PackageName "base")
-            (IntersectVersionRanges
-              (OrLaterVersion (mkVersion [4]))
-              (EarlierVersion
-                (mkVersion [5])))
-            mainLibSet,
-          Dependency
-            (PackageName "directory")
-            (OrLaterVersion (mkVersion [0]))
-            mainLibSet,
-          Dependency
-            (PackageName "hashable")
-            (OrLaterVersion
-              (mkVersion [1, 1, 2, 3]))
-            mainLibSet,
-          Dependency
-            (PackageName "binary")
-            (OrLaterVersion (mkVersion [0]))
-            mainLibSet,
-          Dependency
-            (PackageName "filepath")
-            (OrLaterVersion (mkVersion [0]))
-            mainLibSet,
-          Dependency
-            (PackageName "process")
-            (OrLaterVersion
-              (mkVersion [1, 1]))
-            mainLibSet,
-          Dependency
-            (PackageName
-              "unordered-containers")
-            (OrLaterVersion
-              (mkVersion [0, 2, 1]))
-            mainLibSet,
-          Dependency
-            (PackageName "bytestring")
-            (OrLaterVersion (mkVersion [0]))
-            mainLibSet,
-          Dependency
-            (PackageName "utf8-string")
-            (OrLaterVersion
-              (mkVersion [0, 3]))
-            mainLibSet,
-          Dependency
-            (PackageName "time")
-            (OrLaterVersion (mkVersion [0]))
-            mainLibSet,
-          Dependency
-            (PackageName "random")
-            (OrLaterVersion (mkVersion [0]))
-            mainLibSet,
-          Dependency
-            (PackageName "js-jquery")
-            (OrLaterVersion (mkVersion [0]))
-            mainLibSet,
-          Dependency
-            (PackageName "js-flot")
-            (OrLaterVersion (mkVersion [0]))
-            mainLibSet,
-          Dependency
-            (PackageName "transformers")
-            (OrLaterVersion
-              (mkVersion [0, 2]))
-            mainLibSet,
-          Dependency
-            (PackageName "deepseq")
-            (OrLaterVersion
-              (mkVersion [1, 1]))
-            mainLibSet,
-          Dependency
-            (PackageName "extra")
-            (OrLaterVersion
-              (mkVersion [1, 4, 8]))
-            mainLibSet,
-          Dependency
-            (PackageName "QuickCheck")
-            (OrLaterVersion
-              (mkVersion [2, 0]))
-            mainLibSet],
         condTreeComponents = [
           CondBranch {
             condBranchCondition =
@@ -1926,6 +1724,7 @@ GenericPackageDescription {
                   cmmOptions = [],
                   ccOptions = [],
                   cxxOptions = [],
+                  jsppOptions = [],
                   ldOptions = [],
                   hsc2hsOptions = [],
                   pkgconfigDepends = [],
@@ -1965,13 +1764,14 @@ GenericPackageDescription {
                     [],
                   sharedOptions =
                   PerCompilerFlavor [] [],
+                  profSharedOptions =
+                  PerCompilerFlavor [] [],
                   staticOptions =
                   PerCompilerFlavor [] [],
                   customFieldsBI = [],
                   targetBuildDepends = [],
                   mixins = []},
                 testCodeGenerators = []},
-              condTreeConstraints = [],
               condTreeComponents = []},
             condBranchIfFalse = Nothing},
           CondBranch {
@@ -1995,6 +1795,7 @@ GenericPackageDescription {
                   cmmOptions = [],
                   ccOptions = [],
                   cxxOptions = [],
+                  jsppOptions = [],
                   ldOptions = [],
                   hsc2hsOptions = [],
                   pkgconfigDepends = [],
@@ -2034,13 +1835,14 @@ GenericPackageDescription {
                     [],
                   sharedOptions =
                   PerCompilerFlavor [] [],
+                  profSharedOptions =
+                  PerCompilerFlavor [] [],
                   staticOptions =
                   PerCompilerFlavor [] [],
                   customFieldsBI = [],
                   targetBuildDepends = [],
                   mixins = []},
                 testCodeGenerators = []},
-              condTreeConstraints = [],
               condTreeComponents = []},
             condBranchIfFalse = Nothing},
           CondBranch {
@@ -2064,6 +1866,7 @@ GenericPackageDescription {
                   cmmOptions = [],
                   ccOptions = [],
                   cxxOptions = [],
+                  jsppOptions = [],
                   ldOptions = [],
                   hsc2hsOptions = [],
                   pkgconfigDepends = [],
@@ -2103,13 +1906,14 @@ GenericPackageDescription {
                     [],
                   sharedOptions =
                   PerCompilerFlavor [] [],
+                  profSharedOptions =
+                  PerCompilerFlavor [] [],
                   staticOptions =
                   PerCompilerFlavor [] [],
                   customFieldsBI = [],
                   targetBuildDepends = [],
                   mixins = []},
                 testCodeGenerators = []},
-              condTreeConstraints = [],
               condTreeComponents = [
                 CondBranch {
                   condBranchCondition =
@@ -2132,6 +1936,7 @@ GenericPackageDescription {
                         cmmOptions = [],
                         ccOptions = [],
                         cxxOptions = [],
+                        jsppOptions = [],
                         ldOptions = [],
                         hsc2hsOptions = [],
                         pkgconfigDepends = [],
@@ -2171,6 +1976,8 @@ GenericPackageDescription {
                           [],
                         sharedOptions =
                         PerCompilerFlavor [] [],
+                        profSharedOptions =
+                        PerCompilerFlavor [] [],
                         staticOptions =
                         PerCompilerFlavor [] [],
                         customFieldsBI = [],
@@ -2181,11 +1988,6 @@ GenericPackageDescription {
                             mainLibSet],
                         mixins = []},
                       testCodeGenerators = []},
-                    condTreeConstraints = [
-                      Dependency
-                        (PackageName "old-time")
-                        (OrLaterVersion (mkVersion [0]))
-                        mainLibSet],
                     condTreeComponents = []},
                   condBranchIfFalse = Nothing}]},
             condBranchIfFalse = Just
@@ -2207,6 +2009,7 @@ GenericPackageDescription {
                     cmmOptions = [],
                     ccOptions = [],
                     cxxOptions = [],
+                    jsppOptions = [],
                     ldOptions = [],
                     hsc2hsOptions = [],
                     pkgconfigDepends = [],
@@ -2246,13 +2049,14 @@ GenericPackageDescription {
                       [],
                     sharedOptions =
                     PerCompilerFlavor [] [],
+                    profSharedOptions =
+                    PerCompilerFlavor [] [],
                     staticOptions =
                     PerCompilerFlavor [] [],
                     customFieldsBI = [],
                     targetBuildDepends = [],
                     mixins = []},
                   testCodeGenerators = []},
-                condTreeConstraints = [],
                 condTreeComponents = [
                   CondBranch {
                     condBranchCondition =
@@ -2275,6 +2079,7 @@ GenericPackageDescription {
                           cmmOptions = [],
                           ccOptions = [],
                           cxxOptions = [],
+                          jsppOptions = [],
                           ldOptions = [],
                           hsc2hsOptions = [],
                           pkgconfigDepends = [],
@@ -2314,6 +2119,8 @@ GenericPackageDescription {
                             [],
                           sharedOptions =
                           PerCompilerFlavor [] [],
+                          profSharedOptions =
+                          PerCompilerFlavor [] [],
                           staticOptions =
                           PerCompilerFlavor [] [],
                           customFieldsBI = [],
@@ -2325,12 +2132,6 @@ GenericPackageDescription {
                               mainLibSet],
                           mixins = []},
                         testCodeGenerators = []},
-                      condTreeConstraints = [
-                        Dependency
-                          (PackageName "unix")
-                          (OrLaterVersion
-                            (mkVersion [2, 5, 1]))
-                          mainLibSet],
                       condTreeComponents = []},
                     condBranchIfFalse = Nothing}]}},
           CondBranch {
@@ -2354,6 +2155,7 @@ GenericPackageDescription {
                   cmmOptions = [],
                   ccOptions = [],
                   cxxOptions = [],
+                  jsppOptions = [],
                   ldOptions = [],
                   hsc2hsOptions = [],
                   pkgconfigDepends = [],
@@ -2393,6 +2195,8 @@ GenericPackageDescription {
                     [],
                   sharedOptions =
                   PerCompilerFlavor [] [],
+                  profSharedOptions =
+                  PerCompilerFlavor [] [],
                   staticOptions =
                   PerCompilerFlavor [] [],
                   customFieldsBI = [],
@@ -2403,11 +2207,6 @@ GenericPackageDescription {
                       mainLibSet],
                   mixins = []},
                 testCodeGenerators = []},
-              condTreeConstraints = [
-                Dependency
-                  (PackageName "unix")
-                  (OrLaterVersion (mkVersion [0]))
-                  mainLibSet],
               condTreeComponents = []},
             condBranchIfFalse = Nothing}]}],
   condBenchmarks = []}

@@ -1,7 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE RankNTypes #-}
-
 module Distribution.Types.ModuleRenaming
   ( ModuleRenaming (..)
   , interpModuleRenaming
@@ -40,7 +36,7 @@ data ModuleRenaming
   | -- | Hiding renaming, e.g., @hiding (A, B)@, bringing all
     -- exported modules into scope except the hidden ones.
     HidingRenaming [ModuleName]
-  deriving (Show, Read, Eq, Ord, Typeable, Data, Generic)
+  deriving (Show, Read, Eq, Ord, Data, Generic)
 
 -- | Interpret a 'ModuleRenaming' as a partial map from 'ModuleName'
 -- to 'ModuleName'.  For efficiency, you should partially apply it
@@ -49,7 +45,7 @@ interpModuleRenaming :: ModuleRenaming -> ModuleName -> Maybe ModuleName
 interpModuleRenaming DefaultRenaming = Just
 interpModuleRenaming (ModuleRenaming rns) =
   let m = Map.fromList rns
-   in \k -> Map.lookup k m
+   in (`Map.lookup` m)
 interpModuleRenaming (HidingRenaming hs) =
   let s = Set.fromList hs
    in \k -> if k `Set.member` s then Nothing else Just k
@@ -68,7 +64,7 @@ isDefaultRenaming _ = False
 instance Binary ModuleRenaming
 instance Structured ModuleRenaming
 
-instance NFData ModuleRenaming where rnf = genericRnf
+instance NFData ModuleRenaming
 
 -- NB: parentheses are mandatory, because later we may extend this syntax
 -- to allow "hiding (A, B)" or other modifier words.

@@ -1,11 +1,5 @@
-{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 {-# OPTIONS_GHC -fspec-constr -fspec-constr-count=8 #-}
-
------------------------------------------------------------------------------
-
------------------------------------------------------------------------------
 
 -- |
 -- Module      :  Distribution.Compat.CharParsing
@@ -73,7 +67,7 @@ import Distribution.Compat.Parsing
 --
 -- >   vowel  = oneOf "aeiou"
 oneOf :: CharParsing m => [Char] -> m Char
-oneOf xs = satisfy (\c -> c `elem` xs)
+oneOf xs = satisfy (`elem` xs)
 {-# INLINE oneOf #-}
 
 -- | As the dual of 'oneOf', @noneOf cs@ succeeds if the current
@@ -82,7 +76,7 @@ oneOf xs = satisfy (\c -> c `elem` xs)
 --
 -- >  consonant = noneOf "aeiou"
 noneOf :: CharParsing m => [Char] -> m Char
-noneOf xs = satisfy (\c -> c `notElem` xs)
+noneOf xs = satisfy (`notElem` xs)
 {-# INLINE noneOf #-}
 
 -- | Skips /zero/ or more white space characters. See also 'skipMany'.

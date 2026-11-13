@@ -1,6 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-
 module Distribution.SPDX.LicenseExpression
   ( LicenseExpression (..)
   , SimpleLicenseExpression (..)
@@ -43,7 +40,7 @@ data LicenseExpression
   = ELicense !SimpleLicenseExpression !(Maybe LicenseExceptionId)
   | EAnd !LicenseExpression !LicenseExpression
   | EOr !LicenseExpression !LicenseExpression
-  deriving (Show, Read, Eq, Ord, Typeable, Data, Generic)
+  deriving (Show, Read, Eq, Ord, Data, Generic)
 
 -- | Simple License Expressions.
 data SimpleLicenseExpression
@@ -53,7 +50,7 @@ data SimpleLicenseExpression
     ELicenseIdPlus LicenseId
   | -- | A SPDX user defined license reference: For example: @LicenseRef-23@, @LicenseRef-MIT-Style-1@, or @DocumentRef-spdx-tool-1.2:LicenseRef-MIT-Style-2@
     ELicenseRef LicenseRef
-  deriving (Show, Read, Eq, Ord, Typeable, Data, Generic)
+  deriving (Show, Read, Eq, Ord, Data, Generic)
 
 simpleLicenseExpression :: LicenseId -> LicenseExpression
 simpleLicenseExpression i = ELicense (ELicenseId i) Nothing
@@ -115,10 +112,7 @@ instance Parsec LicenseExpression where
     where
       expr = compoundOr
 
-      simple = do
-        s <- parsec
-        exc <- exception
-        return $ ELicense s exc
+      simple = ELicense <$> parsec <*> exception
 
       exception = P.optional $ P.try (spaces1 *> P.string "WITH" *> spaces1) *> parsec
 

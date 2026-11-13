@@ -1,9 +1,4 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE RankNTypes #-}
-
------------------------------------------------------------------------------
+{-# LANGUAGE DataKinds #-}
 
 -- |
 -- Module      :  Distribution.Types.PackageDescription
@@ -108,7 +103,7 @@ data PackageDescription = PackageDescription
   -- ^ The version of the Cabal spec that this package description uses.
   , package :: PackageIdentifier
   , licenseRaw :: Either SPDX.License License
-  , licenseFiles :: [SymbolicPath PackageDir LicenseFile]
+  , licenseFiles :: [RelativePath Pkg File]
   , copyright :: !ShortText
   , maintainer :: !ShortText
   , author :: !ShortText
@@ -141,18 +136,21 @@ data PackageDescription = PackageDescription
   , testSuites :: [TestSuite]
   , benchmarks :: [Benchmark]
   , -- files
-    dataFiles :: [FilePath]
-  , dataDir :: FilePath
-  , extraSrcFiles :: [FilePath]
-  , extraTmpFiles :: [FilePath]
-  , extraDocFiles :: [FilePath]
+    dataFiles :: [RelativePath DataDir File]
+  -- ^ data file globs, relative to data directory
+  , dataDir :: SymbolicPath Pkg (Dir DataDir)
+  -- ^ data directory (may be absolute, or relative to package)
+  , extraSrcFiles :: [RelativePath Pkg File]
+  , extraTmpFiles :: [RelativePath Pkg File]
+  , extraDocFiles :: [RelativePath Pkg File]
+  , extraFiles :: [RelativePath Pkg File]
   }
-  deriving (Generic, Show, Read, Eq, Ord, Typeable, Data)
+  deriving (Generic, Show, Read, Eq, Ord, Data)
 
 instance Binary PackageDescription
 instance Structured PackageDescription
 
-instance NFData PackageDescription where rnf = genericRnf
+instance NFData PackageDescription
 
 instance Package PackageDescription where
   packageId = package
@@ -228,10 +226,11 @@ emptyPackageDescription =
     , testSuites = []
     , benchmarks = []
     , dataFiles = []
-    , dataDir = "."
+    , dataDir = sameDirectory
     , extraSrcFiles = []
     , extraTmpFiles = []
     , extraDocFiles = []
+    , extraFiles = []
     }
 
 -- ---------------------------------------------------------------------------
@@ -375,7 +374,7 @@ updatePackageDescription (mb_lib_bi, exe_bi) p =
     }
   where
     updateLibrary :: Maybe BuildInfo -> Maybe Library -> Maybe Library
-    updateLibrary (Just bi) (Just lib) = Just (lib{libBuildInfo = bi `mappend` libBuildInfo lib})
+    updateLibrary (Just bi) (Just lib) = Just (lib{libBuildInfo = bi <> libBuildInfo lib})
     updateLibrary Nothing mb_lib = mb_lib
     updateLibrary (Just _) Nothing = Nothing
 
@@ -397,7 +396,7 @@ updatePackageDescription (mb_lib_bi, exe_bi) p =
     -- \^list with exeName updated
     updateExecutable _ [] = []
     updateExecutable exe_bi'@(name, bi) (exe : exes)
-      | exeName exe == name = exe{buildInfo = bi `mappend` buildInfo exe} : exes
+      | exeName exe == name = exe{buildInfo = bi <> buildInfo exe} : exes
       | otherwise = exe : updateExecutable exe_bi' exes
 
 -- -----------------------------------------------------------------------------
@@ -429,21 +428,18 @@ enabledComponents pkg enabled = filter (componentEnabled enabled) $ pkgBuildable
 
 lookupComponent :: PackageDescription -> ComponentName -> Maybe Component
 lookupComponent pkg (CLibName name) =
-  fmap CLib $ find ((name ==) . libName) (allLibraries pkg)
+  CLib <$> find ((name ==) . libName) (allLibraries pkg)
 lookupComponent pkg (CFLibName name) =
-  fmap CFLib $ find ((name ==) . foreignLibName) (foreignLibs pkg)
+  CFLib <$> find ((name ==) . foreignLibName) (foreignLibs pkg)
 lookupComponent pkg (CExeName name) =
-  fmap CExe $ find ((name ==) . exeName) (executables pkg)
+  CExe <$> find ((name ==) . exeName) (executables pkg)
 lookupComponent pkg (CTestName name) =
-  fmap CTest $ find ((name ==) . testName) (testSuites pkg)
+  CTest <$> find ((name ==) . testName) (testSuites pkg)
 lookupComponent pkg (CBenchName name) =
-  fmap CBench $ find ((name ==) . benchmarkName) (benchmarks pkg)
+  CBench <$> find ((name ==) . benchmarkName) (benchmarks pkg)
 
 getComponent :: PackageDescription -> ComponentName -> Component
-getComponent pkg cname =
-  case lookupComponent pkg cname of
-    Just cpnt -> cpnt
-    Nothing -> missingComponent
+getComponent pkg cname = fromMaybe missingComponent (lookupComponent pkg cname)
   where
     missingComponent =
       error $
@@ -488,6 +484,7 @@ instance L.HasBuildInfos PackageDescription where
         a22
         a23
         a24
+        a25
       ) =
       PackageDescription a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19
         <$> (traverse . L.buildInfo) f x1 -- library
@@ -501,3 +498,4 @@ instance L.HasBuildInfos PackageDescription where
         <*> pure a22 -- extra src files
         <*> pure a23 -- extra temp files
         <*> pure a24 -- extra doc files
+        <*> pure a25 -- extra files

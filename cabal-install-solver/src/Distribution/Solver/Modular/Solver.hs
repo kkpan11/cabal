@@ -1,7 +1,7 @@
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE ViewPatterns #-}
 #ifdef DEBUG_TRACETREE
-{-# LANGUAGE FlexibleInstances #-}
-{-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
 #endif
 module Distribution.Solver.Modular.Solver
     ( SolverConfig(..)
@@ -19,6 +19,7 @@ import Distribution.Verbosity
 
 import Distribution.Compiler (CompilerInfo)
 
+import Distribution.Version
 import Distribution.Solver.Types.PackagePath
 import Distribution.Solver.Types.PackagePreferences
 import Distribution.Solver.Types.PkgConfigDb (PkgConfigDb)
@@ -42,6 +43,7 @@ import Distribution.Solver.Modular.PSQ (PSQ)
 import Distribution.Solver.Modular.RetryLog
 import Distribution.Solver.Modular.Tree
 import qualified Distribution.Solver.Modular.PSQ as PSQ
+import Distribution.Solver.Types.PackageConstraint
 
 import Distribution.Simple.Setup (BooleanFlag(..))
 
@@ -71,7 +73,7 @@ data SolverConfig = SolverConfig {
   enableBackjumping      :: EnableBackjumping,
   solveExecutables       :: SolveExecutables,
   goalOrder              :: Maybe (Variable QPN -> Variable QPN -> Ordering),
-  solverVerbosity        :: Verbosity,
+  solverVerbosity        :: VerbosityLevel,
   pruneAfterFirstSuccess :: PruneAfterFirstSuccess
 }
 
@@ -91,7 +93,7 @@ newtype PruneAfterFirstSuccess = PruneAfterFirstSuccess Bool
 solve :: SolverConfig                         -- ^ solver parameters
       -> CompilerInfo
       -> Index                                -- ^ all available packages as an index
-      -> PkgConfigDb                          -- ^ available pkg-config pkgs
+      -> Maybe PkgConfigDb                    -- ^ available pkg-config pkgs
       -> (PN -> PackagePreferences)           -- ^ preferences
       -> M.Map PN [LabeledPackageConstraint]  -- ^ global constraints
       -> S.Set PN                             -- ^ global goals
@@ -141,15 +143,13 @@ solve sc cinfo idx pkgConfigDB userPrefs userConstraints userGoals =
     prunePhase       = (if asBool (avoidReinstalls sc) then P.avoidReinstalls (const True) else id) .
                        (case onlyConstrained sc of
                           OnlyConstrainedAll ->
-                            P.onlyConstrained pkgIsExplicit
+                            P.onlyConstrained (`S.member` versionConstrainedOrGoals)
                           OnlyConstrainedNone ->
                             id)
     buildPhase       = buildTree idx (independentGoals sc) (S.toList userGoals)
 
-    allExplicit = M.keysSet userConstraints `S.union` userGoals
-
-    pkgIsExplicit :: PN -> Bool
-    pkgIsExplicit pn = S.member pn allExplicit
+    versionConstrained = filterVersion isVersionConstrained userConstraints
+    versionConstrainedOrGoals = versionConstrained `S.union` userGoals
 
     -- When --reorder-goals is set, we use preferReallyEasyGoalChoices, which
     -- prefers (keeps) goals only if the have 0 or 1 enabled choice.
@@ -167,10 +167,30 @@ solve sc cinfo idx pkgConfigDB userPrefs userConstraints userGoals =
       | asBool (reorderGoals sc) = P.preferReallyEasyGoalChoices
       | otherwise                = id {- P.firstGoal -}
 
+-- | Keep package names of constraints that satisfy the predicate.
+filterVersion :: (LabeledPackageConstraint -> Bool) -> M.Map PN [LabeledPackageConstraint] -> Set PN
+filterVersion versionFilter = M.keysSet . M.filter (not . null) . M.map (filter versionFilter)
+
+normalise :: VersionRange -> VersionRange
+normalise = fromVersionIntervals . toVersionIntervals
+
+-- | Unconstrained with a version range @>=0@ or @<0@ or their flag equivalents
+-- and constrained by other versions ranges.
+--
+-- Both the @-any@ and @-none@ flags are considered unconstrained, because they
+-- don't actually constrain the version of the package. The @-any@ flag allows
+-- any version, and the @-none@ flag effectively excludes a package.
+isVersionConstrained :: LabeledPackageConstraint -> Bool
+isVersionConstrained (LabeledPackageConstraint (PackageConstraint _ c) _) = case c of
+    PackagePropertyVersion (normalise -> vr) -> not (isAnyVersion vr || isNoVersion vr)
+    -- `PackagePropertyFlags` @-any@ and @-none@ are covered below.
+    _ -> False
+
 -- | Dump solver tree to a file (in debugging mode)
 --
 -- This only does something if the @debug-tracetree@ configure argument was
 -- given; otherwise this is just the identity function.
+{- FOURMOLU_DISABLE -}
 traceTree ::
 #ifdef DEBUG_TRACETREE
   GSimpleTree a =>
@@ -183,6 +203,7 @@ traceTree = gtraceJson
 #else
 traceTree _ _ = id
 #endif
+{- FOURMOLU_ENABLE -}
 
 #ifdef DEBUG_TRACETREE
 instance GSimpleTree (Tree d c) where

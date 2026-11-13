@@ -1,7 +1,3 @@
------------------------------------------------------------------------------
-
------------------------------------------------------------------------------
-
 -- |
 -- Module      :  Distribution.Client.Run
 -- Maintainer  :  cabal-devel@haskell.org
@@ -26,31 +22,37 @@ import Distribution.PackageDescription
   , PackageDescription (..)
   , TestSuite (..)
   )
-import Distribution.Simple.Build.PathsModule (pkgPathEnvVar)
+import Distribution.Simple (PackageDBX (..))
+import Distribution.Simple.Build (addInternalBuildTools)
 import Distribution.Simple.BuildPaths (exeExtension)
-import Distribution.Simple.Compiler (CompilerFlavor (..), compilerFlavor)
+import Distribution.Simple.Flag (fromFlag)
 import Distribution.Simple.LocalBuildInfo
   ( ComponentName (..)
   , LocalBuildInfo (..)
+  , absoluteWorkingDirLBI
   , buildDir
   , depLibraryPaths
+  , interpretSymbolicPathLBI
+  , mbWorkDirLBI
   )
+import Distribution.Simple.Program.Db
+import Distribution.Simple.Program.Find
+import Distribution.Simple.Program.Run
+import Distribution.Simple.Register (internalPackageDBPath)
+
+import Distribution.Simple.Setup (ConfigFlags (..))
 import Distribution.Simple.Utils
   ( addLibraryPath
   , dieWithException
   , notice
-  , rawSystemExitWithEnv
+  , rawSystemExitWithEnvCwd
   , warn
   )
 import Distribution.System (Platform (..))
 import Distribution.Types.UnqualComponentName
 
-import qualified Distribution.Simple.GHCJS as GHCJS
-
 import Distribution.Client.Errors
-import Distribution.Compat.Environment (getEnvironment)
-import System.Directory (getCurrentDirectory)
-import System.FilePath ((<.>), (</>))
+import Distribution.Utils.Path
 
 -- | Return the executable to run and any extra arguments that should be
 -- forwarded to it. Die in case of error.
@@ -70,7 +72,7 @@ splitRunArgs verbosity lbi args =
             " Interpreting all parameters to `run` as a parameter to"
               ++ " the default executable."
       -- If there is a warning, print it together with the addition.
-      warn verbosity `traverse_` fmap (++ addition) maybeWarning
+      traverse_ (warn verbosity . (++ addition)) maybeWarning
       return (exe, xs)
   where
     pkg_descr = localPkgDescr lbi
@@ -84,7 +86,7 @@ splitRunArgs verbosity lbi args =
     whichExecutable = case (enabledExes, args) of
       ([], _) -> Left "Couldn't find any enabled executables."
       ([exe], []) -> return (False, exe, [])
-      ([exe], (x : xs))
+      ([exe], x : xs)
         | x == unUnqualComponentName (exeName exe) -> return (True, exe, xs)
         | otherwise -> return (False, exe, args)
       (_, []) ->
@@ -92,7 +94,7 @@ splitRunArgs verbosity lbi args =
           "This package contains multiple executables. "
             ++ "You must pass the executable name as the first argument "
             ++ "to 'cabal run'."
-      (_, (x : xs)) ->
+      (_, x : xs) ->
         case find (\exe -> unUnqualComponentName (exeName exe) == x) enabledExes of
           Nothing -> Left $ "No executable named '" ++ x ++ "'."
           Just exe -> return (True, exe, xs)
@@ -132,43 +134,51 @@ splitRunArgs verbosity lbi args =
 
 -- | Run a given executable.
 run :: Verbosity -> LocalBuildInfo -> Executable -> [String] -> IO ()
-run verbosity lbi exe exeArgs = do
-  curDir <- getCurrentDirectory
-  let buildPref = buildDir lbi
+run verbosity lbi exe@Executable{exeName} exeArgs = do
+  let exeName' = prettyShow exeName
+  curDir <- absoluteWorkingDirLBI lbi
+  let distPref = fromFlag $ configDistPref $ configFlags lbi
+      buildPref = buildDir lbi
       pkg_descr = localPkgDescr lbi
-      dataDirEnvVar =
-        ( pkgPathEnvVar pkg_descr "datadir"
-        , curDir </> dataDir pkg_descr
-        )
+      i = interpretSymbolicPathLBI lbi -- See Note [Symbolic paths] in Distribution.Utils.Path
+      mbWorkDir = mbWorkDirLBI lbi
+      internalPkgDb = internalPackageDBPath lbi distPref
+      lbiForExe =
+        lbi
+          { withPackageDB = withPackageDB lbi ++ [SpecificPackageDB internalPkgDb]
+          , -- Include any build-tool-depends on build tools internal to the current package.
+            withPrograms =
+              addInternalBuildTools
+                curDir
+                pkg_descr
+                lbi
+                (buildInfo exe)
+                (withPrograms lbi)
+          }
 
-  (path, runArgs) <-
-    let exeName' = prettyShow $ exeName exe
-     in case compilerFlavor (compiler lbi) of
-          GHCJS -> do
-            let (script, cmd, cmdArgs) =
-                  GHCJS.runCmd
-                    (withPrograms lbi)
-                    (buildPref </> exeName' </> exeName')
-            script' <- tryCanonicalizePath script
-            return (cmd, cmdArgs ++ [script'])
-          _ -> do
-            p <-
-              tryCanonicalizePath $
-                buildPref </> exeName' </> (exeName' <.> exeExtension (hostPlatform lbi))
-            return (p, [])
+  exePath <-
+    tryCanonicalizePath $
+      i buildPref </> exeName' </> (exeName' <.> exeExtension (hostPlatform lbiForExe))
 
-  env <- (dataDirEnvVar :) <$> getEnvironment
+  -- Compute the appropriate environment for running the executable
+  let progDb = withPrograms lbiForExe
+      pathVar = progSearchPath progDb
+      envOverrides = progOverrideEnv progDb
+  newPath <- programSearchPathAsPATHVar pathVar
+  env <- getFullEnvironment ([("PATH", Just newPath)] ++ envOverrides)
+
   -- Add (DY)LD_LIBRARY_PATH if needed
   env' <-
-    if withDynExe lbi
+    if withDynExe lbiForExe
       then do
-        let (Platform _ os) = hostPlatform lbi
-        clbi <- case componentNameTargets' pkg_descr lbi (CExeName (exeName exe)) of
+        let (Platform _ os) = hostPlatform lbiForExe
+        clbi <- case componentNameTargets' pkg_descr lbiForExe (CExeName exeName) of
           [target] -> return (targetCLBI target)
           [] -> dieWithException verbosity CouldNotFindExecutable
           _ -> dieWithException verbosity FoundMultipleMatchingExes
-        paths <- depLibraryPaths True False lbi clbi
+        paths <- depLibraryPaths True False lbiForExe clbi
         return (addLibraryPath os paths env)
       else return env
-  notice verbosity $ "Running " ++ prettyShow (exeName exe) ++ "..."
-  rawSystemExitWithEnv verbosity path (runArgs ++ exeArgs) env'
+
+  notice verbosity $ "Running " ++ exeName' ++ "..."
+  rawSystemExitWithEnvCwd verbosity mbWorkDir exePath exeArgs env'

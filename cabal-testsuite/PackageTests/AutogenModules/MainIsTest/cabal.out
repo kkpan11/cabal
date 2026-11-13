@@ -1,0 +1,14 @@
+# cabal build
+Resolving dependencies...
+Build profile: -w ghc-<GHCVER> -O1
+In order, the following will be built:
+ - MainIsTest-0.1 (test:Test) (first run)
+Configuring test suite 'Test' for MainIsTest-0.1...
+Preprocessing test suite 'Test' for MainIsTest-0.1...
+Building test suite 'Test' for MainIsTest-0.1...
+Error: [Cabal-7125]
+Failed to build MainIsTest-0.1-inplace-Test. The exception was:
+  -----BEGIN CABAL OUTPUT-----
+Error: [Cabal-2115]
+Could not find Haskell source file MyDummy.hs in any of the search dirs: <ROOT>/cabal.dist/work/./dist/build/<ARCH>/ghc-<GHCVER>/MainIsTest-0.1/t/Test/build/Test/Test-tmp, <ROOT>/cabal.dist/work/./dist/build/<ARCH>/ghc-<GHCVER>/MainIsTest-0.1/t/Test/build/Test/Test-gen, <ROOT>/.
+CallStack (from HasCallStack): <SNIPPED>

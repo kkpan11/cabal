@@ -1,3 +1,4 @@
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RecordWildCards #-}
 
 -- |
@@ -8,6 +9,7 @@ module Distribution.Client.DistDirLayout
   ( -- * 'DistDirLayout'
     DistDirLayout (..)
   , DistDirParams (..)
+  , ProjectFileKey (..)
   , defaultDistDirLayout
 
     -- * 'ProjectRoot'
@@ -43,8 +45,9 @@ import Distribution.Package
 import Distribution.Simple.Compiler
   ( Compiler (..)
   , OptimisationLevel (..)
-  , PackageDB (..)
-  , PackageDBStack
+  , PackageDBCWD
+  , PackageDBStackCWD
+  , PackageDBX (..)
   )
 import Distribution.Simple.Configure (interpretPackageDbFlags)
 import Distribution.System
@@ -69,16 +72,32 @@ data DistDirParams = DistDirParams
   --  Optimization
   }
 
+-- | The principal project file is read and parsed. Its file name was either
+-- provided with the @--project-file@ option, or it had the default name of
+-- @cabal.project@.
+--
+-- Related ``.local`` and ``.freeze`` files are read and parsed separately.
+--
+-- This key datatype distinguishes between the different project files, so that
+-- we can give better error messages, such as encountering an unexpected
+-- extension to the principal project file or when a ``.local`` or ``.freeze``
+-- is itself passed as the principal project file or when either are explicitly
+-- imported. They should only ever be implicitly imported.
+data ProjectFileKey
+  = ProjectFileKeyMain
+  | ProjectFileKeyLocal
+  | ProjectFileKeyFreeze
+  deriving (Eq, Ord, Show)
+
 -- | The layout of the project state directory. Traditionally this has been
 -- called the @dist@ directory.
 data DistDirLayout = DistDirLayout
   { distProjectRootDirectory :: FilePath
   -- ^ The root directory of the project. Many other files are relative to
   -- this location (e.g. the @cabal.project@ file).
-  , distProjectFile :: String -> FilePath
-  -- ^ The @cabal.project@ file and related like @cabal.project.freeze@.
-  -- The parameter is for the extension, like \"freeze\", or \"\" for the
-  -- main file.
+  , distProjectFile :: ProjectFileKey -> FilePath
+  -- ^ Files that are project parsing roots, the main @cabal.project@ file and
+  -- its related freeze file and local file.
   , distDirectory :: FilePath
   -- ^ The \"dist\" directory, which is the root of where cabal keeps all
   -- its state including the build artifacts from each package we build.
@@ -111,7 +130,7 @@ data DistDirLayout = DistDirLayout
   , distSdistDirectory :: FilePath
   , distTempDirectory :: FilePath
   , distBinDirectory :: FilePath
-  , distPackageDB :: CompilerId -> PackageDB
+  , distPackageDB :: CompilerId -> PackageDBCWD
   , distHaddockOutputDir :: Maybe FilePath
   -- ^ Is needed when `--haddock-output-dir` flag is used.
   }
@@ -121,8 +140,8 @@ data StoreDirLayout = StoreDirLayout
   { storeDirectory :: Compiler -> FilePath
   , storePackageDirectory :: Compiler -> UnitId -> FilePath
   , storePackageDBPath :: Compiler -> FilePath
-  , storePackageDB :: Compiler -> PackageDB
-  , storePackageDBStack :: Compiler -> [Maybe PackageDB] -> PackageDBStack
+  , storePackageDB :: Compiler -> PackageDBCWD
+  , storePackageDBStack :: Compiler -> [Maybe PackageDBCWD] -> PackageDBStackCWD
   , storeIncomingDirectory :: Compiler -> FilePath
   , storeIncomingLock :: Compiler -> UnitId -> FilePath
   }
@@ -144,7 +163,7 @@ data CabalDirLayout = CabalDirLayout
 --
 -- It can either be an implicit project root in the current dir if no
 -- @cabal.project@ file is found, or an explicit root if either
--- the file is found or the project root directory was specicied.
+-- the file is found or the project root directory was specified.
 data ProjectRoot
   = -- | An implicit project root. It contains the absolute project
     -- root dir.
@@ -167,8 +186,7 @@ defaultDistDirLayout
   :: ProjectRoot
   -- ^ the project root
   -> Maybe FilePath
-  -- ^ the @dist@ directory or default
-  -- (absolute or relative to the root)
+  -- ^ the @dist@ directory (relative to package root)
   -> Maybe FilePath
   -- ^ the documentation directory
   -> DistDirLayout
@@ -183,8 +201,11 @@ defaultDistDirLayout projectRoot mdistDirectory haddockOutputDir =
     distProjectRootDirectory :: FilePath
     distProjectRootDirectory = projectRootDir
 
-    distProjectFile :: String -> FilePath
-    distProjectFile ext = projectFile <.> ext
+    distProjectFile :: ProjectFileKey -> FilePath
+    distProjectFile = \case
+      ProjectFileKeyMain -> projectFile
+      ProjectFileKeyLocal -> projectFile <.> "local"
+      ProjectFileKeyFreeze -> projectFile <.> "freeze"
 
     distDirectory :: FilePath
     distDirectory =
@@ -259,7 +280,7 @@ defaultDistDirLayout projectRoot mdistDirectory haddockOutputDir =
     distPackageDBPath :: CompilerId -> FilePath
     distPackageDBPath compid = distDirectory </> "packagedb" </> prettyShow compid
 
-    distPackageDB :: CompilerId -> PackageDB
+    distPackageDB :: CompilerId -> PackageDBCWD
     distPackageDB = SpecificPackageDB . distPackageDBPath
 
     distHaddockOutputDir :: Maybe FilePath
@@ -283,13 +304,13 @@ defaultStoreDirLayout storeRoot =
     storePackageDBPath compiler =
       storeDirectory compiler </> "package.db"
 
-    storePackageDB :: Compiler -> PackageDB
+    storePackageDB :: Compiler -> PackageDBCWD
     storePackageDB compiler =
       SpecificPackageDB (storePackageDBPath compiler)
 
-    storePackageDBStack :: Compiler -> [Maybe PackageDB] -> PackageDBStack
+    storePackageDBStack :: Compiler -> [Maybe PackageDBCWD] -> PackageDBStackCWD
     storePackageDBStack compiler extraPackageDB =
-      (interpretPackageDbFlags False extraPackageDB)
+      interpretPackageDbFlags False extraPackageDB
         ++ [storePackageDB compiler]
 
     storeIncomingDirectory :: Compiler -> FilePath
@@ -315,4 +336,4 @@ mkCabalDirLayout mstoreDir mlogDir = do
     defaultStoreDirLayout <$> maybe defaultStoreDir pure mstoreDir
   cabalLogsDirectory <-
     maybe defaultLogsDir pure mlogDir
-  pure $ CabalDirLayout{..}
+  pure CabalDirLayout{..}

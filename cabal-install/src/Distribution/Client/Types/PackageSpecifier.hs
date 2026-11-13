@@ -1,6 +1,3 @@
-{-# LANGUAGE DeriveFunctor #-}
-{-# LANGUAGE DeriveGeneric #-}
-
 module Distribution.Client.Types.PackageSpecifier
   ( PackageSpecifier (..)
   , pkgSpecifierTarget
@@ -59,7 +56,4 @@ mkNamedPackage :: PackageIdentifier -> PackageSpecifier pkg
 mkNamedPackage pkgId =
   NamedPackage
     (pkgName pkgId)
-    ( if pkgVersion pkgId == nullVersion
-        then []
-        else [PackagePropertyVersion (thisVersion (pkgVersion pkgId))]
-    )
+    [PackagePropertyVersion (thisVersion $ pkgVersion pkgId) | pkgVersion pkgId /= nullVersion]

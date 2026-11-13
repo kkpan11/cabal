@@ -1,9 +1,8 @@
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE MultiWayIf #-}
-{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE TupleSections #-}
-{-# LANGUAGE ViewPatterns #-}
 
 module Distribution.Client.CmdSdist
   ( sdistCommand
@@ -26,6 +25,7 @@ import Distribution.Client.DistDirLayout
 import Distribution.Client.NixStyleOptions
   ( NixStyleFlags (..)
   , defaultNixStyleFlags
+  , updNixStyleCommonSetupFlags
   )
 import Distribution.Client.ProjectConfig
   ( ProjectConfig
@@ -47,7 +47,8 @@ import Distribution.Client.ProjectOrchestration
   , establishProjectBaseContextWithRoot
   )
 import Distribution.Client.Setup
-  ( GlobalFlags (..)
+  ( CommonSetupFlags (..)
+  , GlobalFlags (..)
   )
 import Distribution.Client.TargetSelector
   ( ComponentKind
@@ -62,6 +63,10 @@ import Distribution.Client.Types
   )
 import Distribution.Solver.Types.SourcePackage
   ( SourcePackage (..)
+  )
+import Distribution.Utils.Path hiding
+  ( (<.>)
+  , (</>)
   )
 
 import Distribution.Client.Errors
@@ -93,9 +98,7 @@ import Distribution.Simple.PreProcess
   ( knownSuffixHandlers
   )
 import Distribution.Simple.Setup
-  ( Flag (..)
-  , configDistPref
-  , configVerbosity
+  ( Flag
   , flagToList
   , flagToMaybe
   , fromFlagOrDefault
@@ -103,6 +106,7 @@ import Distribution.Simple.Setup
   , optionVerbosity
   , toFlag
   , trueArg
+  , pattern Flag
   )
 import Distribution.Simple.SrcDist
   ( listPackageSourcesWithDie
@@ -110,6 +114,7 @@ import Distribution.Simple.SrcDist
 import Distribution.Simple.Utils
   ( dieWithException
   , notice
+  , ordNub
   , withOutputMarker
   , wrapText
   )
@@ -123,7 +128,11 @@ import Distribution.Types.PackageName
   , unPackageName
   )
 import Distribution.Verbosity
-  ( normal
+  ( VerbosityFlags
+  , defaultVerbosityHandles
+  , mkVerbosity
+  , normal
+  , verbosityFlags
   )
 
 import qualified Data.ByteString.Lazy.Char8 as BSL
@@ -165,8 +174,8 @@ sdistCommand =
 -------------------------------------------------------------------------------
 
 data SdistFlags = SdistFlags
-  { sdistVerbosity :: Flag Verbosity
-  , sdistDistDir :: Flag FilePath
+  { sdistVerbosity :: Flag VerbosityFlags
+  , sdistDistDir :: Flag (SymbolicPath Pkg (Dir Dist))
   , sdistListSources :: Flag Bool
   , sdistNulSeparated :: Flag Bool
   , sdistOutputPath :: Flag FilePath
@@ -270,9 +279,17 @@ sdistAction (pf@ProjectFlags{..}, SdistFlags{..}) targetStrings globalFlags = do
       , Just "-" <- mOutputPath' ->
           dieWithException verbosity Can'tWriteMultipleTarballs
       | otherwise ->
-          traverse_ (\pkg -> packageToSdist verbosity (distProjectRootDirectory distDirLayout) format (outputPath pkg) pkg) pkgs
+          for_ pkgs $ \pkg ->
+            packageToSdist
+              verbosity
+              (distProjectRootDirectory distDirLayout)
+              format
+              (outputPath pkg)
+              pkg
   where
-    verbosity = fromFlagOrDefault normal sdistVerbosity
+    verbosity =
+      mkVerbosity defaultVerbosityHandles $
+        fromFlagOrDefault normal sdistVerbosity
     listSources = fromFlagOrDefault False sdistListSources
     nulSeparated = fromFlagOrDefault False sdistNulSeparated
     mOutputPath = flagToMaybe sdistOutputPath
@@ -281,15 +298,15 @@ sdistAction (pf@ProjectFlags{..}, SdistFlags{..}) targetStrings globalFlags = do
     prjConfig =
       commandLineFlagsToProjectConfig
         globalFlags
-        (defaultNixStyleFlags ())
-          { configFlags =
-              (configFlags $ defaultNixStyleFlags ())
-                { configVerbosity = sdistVerbosity
-                , configDistPref = sdistDistDir
-                }
-          , projectFlags = pf
+        (updNixStyleCommonSetupFlags (const commonFlags) $ defaultNixStyleFlags ())
+          { projectFlags = pf
           }
         mempty
+    commonFlags =
+      mempty
+        { setupVerbosity = sdistVerbosity
+        , setupDistPref = sdistDistDir
+        }
 
     globalConfigFlag = projectConfigConfigFile (projectConfigShared prjConfig)
 
@@ -324,7 +341,7 @@ packageToSdist verbosity projectRootDir format outputFile pkg = do
   let
     -- Write String to stdout or file, using the default TextEncoding.
     write str
-      | outputFile == "-" = putStr (withOutputMarker verbosity str)
+      | outputFile == "-" = putStr (withOutputMarker (verbosityFlags verbosity) str)
       | otherwise = do
           writeFile outputFile str
           notice verbosity $ "Wrote source list to " ++ outputFile ++ "\n"
@@ -341,17 +358,18 @@ packageToSdist verbosity projectRootDir format outputFile pkg = do
         TarGzArchive -> do
           writeLBS =<< BSL.readFile tgz
         _ -> dieWithException verbosity $ CannotConvertTarballPackage (show format)
-    Right dir -> case format of
-      SourceList nulSep -> do
-        let gpd :: GenericPackageDescription
-            gpd = srcpkgDescription pkg
+    Right dir -> do
+      case format of
+        SourceList nulSep -> do
+          let gpd :: GenericPackageDescription
+              gpd = srcpkgDescription pkg
 
-        files' <- listPackageSourcesWithDie verbosity dieWithException dir (flattenPackageDescription gpd) knownSuffixHandlers
-        let files = nub $ sort $ map normalise files'
-        let prefix = makeRelative projectRootDir dir
-        write $ concat [prefix </> i ++ [nulSep] | i <- files]
-      TarGzArchive -> do
-        packageDirToSdist verbosity (srcpkgDescription pkg) dir >>= writeLBS
+          files' <- listPackageSourcesWithDie verbosity dieWithException (Just $ makeSymbolicPath dir) (flattenPackageDescription gpd) knownSuffixHandlers
+          let files = ordNub $ sort $ map (normalise . getSymbolicPath) files'
+          let prefix = makeRelative (normalise projectRootDir) dir
+          write $ concat [prefix </> i ++ [nulSep] | i <- files]
+        TarGzArchive -> do
+          packageDirToSdist verbosity (srcpkgDescription pkg) dir >>= writeLBS
 
 --
 

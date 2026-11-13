@@ -1,7 +1,5 @@
 -----------------------------------------------------------------------------
 
------------------------------------------------------------------------------
-
 -- |
 -- Module      :  Distribution.Client.Dependency
 -- Copyright   :  (c) David Himmelstrup 2005,
@@ -64,6 +62,8 @@ module Distribution.Client.Dependency
   , addDefaultSetupDependencies
   , addSetupCabalMinVersionConstraint
   , addSetupCabalMaxVersionConstraint
+  , addSetupCabalProfiledDynamic
+  , setImplicitSetupInfo
   ) where
 
 import Distribution.Client.Compat.Prelude
@@ -122,15 +122,25 @@ import Distribution.Solver.Modular
   , SolverConfig (..)
   , modularResolver
   )
+import Distribution.Solver.Modular.Message
+  ( renderSummarizedMessage
+  )
+import Distribution.Solver.Types.SummarizedMessage
+  ( SummarizedMessage (..)
+  )
 import Distribution.System
   ( Platform
   )
 import Distribution.Types.Dependency
+import Distribution.Types.DependencySatisfaction
+  ( DependencySatisfaction (..)
+  )
 import Distribution.Verbosity
-  ( normal
+  ( VerbosityLevel (..)
   )
 import Distribution.Version
 
+import Distribution.Simple.Utils (ordNub)
 import Distribution.Solver.Types.ComponentDeps (ComponentDeps)
 import qualified Distribution.Solver.Types.ComponentDeps as CD
 import Distribution.Solver.Types.ConstraintSource
@@ -148,12 +158,15 @@ import Distribution.Solver.Types.ResolverPackage
 import Distribution.Solver.Types.Settings
 import Distribution.Solver.Types.SolverId
 import Distribution.Solver.Types.SolverPackage
+  ( SolverPackage (SolverPackage)
+  )
 import Distribution.Solver.Types.SourcePackage
 import Distribution.Solver.Types.Variable
 
 import Control.Exception
   ( assert
   )
+import Data.Foldable (fold)
 import Data.List
   ( maximumBy
   )
@@ -198,7 +211,7 @@ data DepResolverParams = DepResolverParams
   -- so we shouldn't solve for them.  See #3875.
   , depResolverGoalOrder :: Maybe (Variable QPN -> Variable QPN -> Ordering)
   -- ^ Function to override the solver's goal-ordering heuristics.
-  , depResolverVerbosity :: Verbosity
+  , depResolverVerbosity :: VerbosityLevel
   }
 
 showDepResolverParams :: DepResolverParams -> String
@@ -295,7 +308,7 @@ basicDepResolverParams installedPkgIndex sourcePkgIndex =
     , depResolverEnableBackjumping = EnableBackjumping True
     , depResolverSolveExecutables = SolveExecutables True
     , depResolverGoalOrder = Nothing
-    , depResolverVerbosity = normal
+    , depResolverVerbosity = Normal
     }
 
 addTargets
@@ -425,11 +438,32 @@ setGoalOrder order params =
     { depResolverGoalOrder = order
     }
 
-setSolverVerbosity :: Verbosity -> DepResolverParams -> DepResolverParams
+setSolverVerbosity :: VerbosityLevel -> DepResolverParams -> DepResolverParams
 setSolverVerbosity verbosity params =
   params
     { depResolverVerbosity = verbosity
     }
+
+dependOnWiredIns :: CompilerInfo -> DepResolverParams -> DepResolverParams
+dependOnWiredIns compiler params =
+  case compilerInfoWiredInUnitIds compiler of
+    Nothing -> params
+    Just wiredInUnitIds -> addConstraints (extraConstraints wiredInUnitIds) params
+  where
+    extraConstraints wiredInUnitIds =
+      [ LabeledPackageConstraint
+        (PackageConstraint (ScopeAnyQualifier pkgName) (PackagePropertyInstalledSpecificUnitId unitId))
+        ConstraintSourceNonReinstallablePackage
+      | (pkgName, unitId) <- wiredInUnitIds
+      ]
+        ++
+        -- Old versions of `base` must be excluded from build plans still as they do not depend on any version of a wired-in unit.
+        -- If we do not do this then we will get confusing error messages about old versions of `base` being unbuildable.
+        -- Newer versions of `base` will be handled gracefully as they were designed to be reinstallable.
+        [ LabeledPackageConstraint
+            (PackageConstraint (ScopeAnyQualifier $ mkPackageName "base") (PackagePropertyVersion (orLaterVersion (mkVersion [4, 22]))))
+            ConstraintSourceNonReinstallablePackage
+        ]
 
 -- | Some packages are specific to a given compiler version and should never be
 -- reinstalled.
@@ -463,6 +497,7 @@ nonReinstallablePackages :: [PackageName]
 nonReinstallablePackages =
   [ mkPackageName "base"
   , mkPackageName "ghc-bignum"
+  , mkPackageName "ghc-internal"
   , mkPackageName "ghc-prim"
   , mkPackageName "ghc"
   , mkPackageName "integer-gmp"
@@ -591,48 +626,95 @@ removeBound RelaxUpper RelaxDepModNone = removeUpperBound
 removeBound RelaxLower RelaxDepModCaret = transformCaretLower
 removeBound RelaxUpper RelaxDepModCaret = transformCaretUpper
 
--- | Supply defaults for packages without explicit Setup dependencies
+-- | Supply defaults for packages without explicit Setup dependencies.
+-- It also serves to add the implicit dependency on @hooks-exe@ needed to
+-- compile the @Setup.hs@ executable produced from 'SetupHooks' when
+-- @build-type: Hooks@. The first argument function determines which implicit
+-- dependencies are needed (including the one on @hooks-exe@).
 --
 -- Note: It's important to apply 'addDefaultSetupDepends' after
 -- 'addSourcePackages'. Otherwise, the packages inserted by
 -- 'addSourcePackages' won't have upper bounds in dependencies relaxed.
 addDefaultSetupDependencies
-  :: (UnresolvedSourcePackage -> Maybe [Dependency])
+  :: (Maybe [Dependency] -> PD.BuildType -> Maybe PD.SetupBuildInfo -> Maybe PD.SetupBuildInfo)
+  -- ^ Function to update the SetupBuildInfo of the package using those dependencies
+  -> (UnresolvedSourcePackage -> Maybe [Dependency])
+  -- ^ Function to determine extra setup dependencies
   -> DepResolverParams
   -> DepResolverParams
-addDefaultSetupDependencies defaultSetupDeps params =
+addDefaultSetupDependencies applyDefaultSetupDeps defaultSetupDeps params =
   params
     { depResolverSourcePkgIndex =
-        fmap applyDefaultSetupDeps (depResolverSourcePkgIndex params)
+        fmap go (depResolverSourcePkgIndex params)
     }
   where
-    applyDefaultSetupDeps :: UnresolvedSourcePackage -> UnresolvedSourcePackage
-    applyDefaultSetupDeps srcpkg =
+    go :: UnresolvedSourcePackage -> UnresolvedSourcePackage
+    go srcpkg =
       srcpkg
         { srcpkgDescription =
             gpkgdesc
               { PD.packageDescription =
                   pkgdesc
                     { PD.setupBuildInfo =
-                        case PD.setupBuildInfo pkgdesc of
-                          Just sbi -> Just sbi
-                          Nothing -> case defaultSetupDeps srcpkg of
-                            Nothing -> Nothing
-                            Just deps
-                              | isCustom ->
-                                  Just
-                                    PD.SetupBuildInfo
-                                      { PD.defaultSetupDepends = True
-                                      , PD.setupDepends = deps
-                                      }
-                              | otherwise -> Nothing
+                        addCabalDepForHooks (PD.buildType pkgdesc) $
+                          applyDefaultSetupDeps
+                            (defaultSetupDeps srcpkg)
+                            (PD.buildType pkgdesc)
+                            (PD.setupBuildInfo pkgdesc)
                     }
               }
         }
       where
-        isCustom = PD.buildType pkgdesc == PD.Custom
         gpkgdesc = srcpkgDescription srcpkg
         pkgdesc = PD.packageDescription gpkgdesc
+
+-- | Add an implicit dependency on @Cabal@ for a @build-type: Hooks@ package
+-- that doesn't explicitly depend on @Cabal@. Rationale: we need the @Cabal@
+-- library in order to compile @main = defaultMainWithSetupHooks setupHooks@.
+--
+-- This ensures the solver picks a consistent version of @Cabal@ when other
+-- packages in the @setup-depends@ stanza depend on @Cabal@.
+-- See https://github.com/haskell/cabal/issues/11331.
+--
+-- NB: don't do this for @build-type: Custom@, as it is possible for such
+-- packages to not depend on @Cabal@ at all (although basically unheard of
+-- in practice).
+addCabalDepForHooks :: PD.BuildType -> Maybe PD.SetupBuildInfo -> Maybe PD.SetupBuildInfo
+addCabalDepForHooks PD.Hooks = fmap addDep
+  where
+    addDep sbi@(PD.SetupBuildInfo{PD.setupDepends = deps})
+      | any ((== cabalPkgName) . depPkgName) deps =
+          sbi
+      | otherwise =
+          sbi{PD.setupDepends = Dependency cabalPkgName anyVersion mainLibSet : deps}
+    cabalPkgName = mkPackageName "Cabal"
+addCabalDepForHooks _ = id
+
+-- | Provides the fallback default "setup-depends", when:
+--
+--  1. There is no 'SetupBuildInfo' to start with,
+--  2. The passed-in optional default dependencies are not @Nothing@.
+setImplicitSetupInfo
+  :: Maybe [Dependency]
+  -- ^ optional default dependencies
+  -> PD.BuildType
+  -> Maybe PD.SetupBuildInfo
+  -> Maybe PD.SetupBuildInfo
+setImplicitSetupInfo mdeps buildty msetupinfo =
+  case msetupinfo of
+    Just sbi -> Just sbi
+    Nothing -> case mdeps of
+      Nothing -> Nothing
+      Just deps
+        | hasSetupStanza ->
+            Just
+              PD.SetupBuildInfo
+                { PD.defaultSetupDepends = True
+                , PD.setupDepends = deps
+                }
+        | otherwise -> Nothing
+  where
+    hasSetupStanza = buildty == PD.Custom || buildty == PD.Hooks
 
 -- | If a package has a custom setup then we need to add a setup-depends
 -- on Cabal.
@@ -666,6 +748,22 @@ addSetupCabalMaxVersionConstraint maxVersion =
             (PackagePropertyVersion $ earlierVersion maxVersion)
         )
         ConstraintSetupCabalMaxVersion
+    ]
+  where
+    cabalPkgname = mkPackageName "Cabal"
+
+-- | Add an a lower bound @setup.Cabal >= 3.13@ labeled with 'ConstraintSourceProfiledDynamic'
+addSetupCabalProfiledDynamic
+  :: DepResolverParams
+  -> DepResolverParams
+addSetupCabalProfiledDynamic =
+  addConstraints
+    [ LabeledPackageConstraint
+        ( PackageConstraint
+            (ScopeAnySetupQualifier cabalPkgname)
+            (PackagePropertyVersion $ orLaterVersion (mkVersion [3, 13, 0]))
+        )
+        ConstraintSourceProfiledDynamic
     ]
   where
     cabalPkgname = mkPackageName "Cabal"
@@ -713,7 +811,7 @@ standardInstallPolicy
   -> [PackageSpecifier UnresolvedSourcePackage]
   -> DepResolverParams
 standardInstallPolicy installedPkgIndex sourcePkgDb pkgSpecifiers =
-  addDefaultSetupDependencies mkDefaultSetupDeps $
+  addDefaultSetupDependencies setImplicitSetupInfo mkDefaultSetupDeps $
     basicInstallPolicy
       installedPkgIndex
       sourcePkgDb
@@ -729,7 +827,7 @@ standardInstallPolicy installedPkgIndex sourcePkgDb pkgSpecifiers =
         gpkgdesc = srcpkgDescription srcpkg
         pkgdesc = PD.packageDescription gpkgdesc
         bt = PD.buildType pkgdesc
-        affected = bt == PD.Custom && hasBuildableFalse gpkgdesc
+        affected = (bt == PD.Custom || bt == PD.Hooks) && hasBuildableFalse gpkgdesc
 
     -- Does this package contain any components with non-empty 'build-depends'
     -- and a 'buildable' field that could potentially be set to 'False'? False
@@ -763,12 +861,13 @@ runSolver = modularResolver
 resolveDependencies
   :: Platform
   -> CompilerInfo
-  -> PkgConfigDb
+  -> Maybe PkgConfigDb
   -> DepResolverParams
   -> Progress String String SolverInstallPlan
-resolveDependencies platform comp pkgConfigDB params =
-  Step (showDepResolverParams finalparams) $
-    fmap (validateSolverResult platform comp indGoals) $
+resolveDependencies platform comp pkgConfigDB params = do
+  step (showDepResolverParams finalparams)
+  pkgs <-
+    formatProgress $
       runSolver
         ( SolverConfig
             reordGoals
@@ -795,6 +894,7 @@ resolveDependencies platform comp pkgConfigDB params =
         preferences
         constraints
         targets
+  validateSolverResult platform comp indGoals pkgs
   where
     finalparams@( DepResolverParams
                     targets
@@ -819,9 +919,12 @@ resolveDependencies platform comp pkgConfigDB params =
                     order
                     verbosity
                   ) =
-        if asBool (depResolverAllowBootLibInstalls params)
-          then params
+        if isJust (compilerInfoWiredInUnitIds comp) || asBool (depResolverAllowBootLibInstalls params)
+          then dependOnWiredIns comp params
           else dontInstallNonReinstallablePackages params
+
+    formatProgress :: Progress SummarizedMessage String a -> Progress String String a
+    formatProgress p = foldProgress (\x xs -> Step (renderSummarizedMessage x) xs) Fail Done p
 
     preferences :: PackageName -> PackagePreferences
     preferences = interpretPackagesPreference targets defpref prefs
@@ -842,7 +945,7 @@ interpretPackagesPreference selected defaultPref prefs =
   where
     versionPref :: PackageName -> [VersionRange]
     versionPref pkgname =
-      fromMaybe [anyVersion] (Map.lookup pkgname versionPrefs)
+      Map.findWithDefault [anyVersion] pkgname versionPrefs
     versionPrefs =
       Map.fromListWith
         (++)
@@ -852,7 +955,7 @@ interpretPackagesPreference selected defaultPref prefs =
 
     installPref :: PackageName -> InstalledPreference
     installPref pkgname =
-      fromMaybe (installPrefDefault pkgname) (Map.lookup pkgname installPrefs)
+      Map.findWithDefault (installPrefDefault pkgname) pkgname installPrefs
     installPrefs =
       Map.fromList
         [ (pkgname, pref)
@@ -871,10 +974,10 @@ interpretPackagesPreference selected defaultPref prefs =
 
     stanzasPref :: PackageName -> [OptionalStanza]
     stanzasPref pkgname =
-      fromMaybe [] (Map.lookup pkgname stanzasPrefs)
+      Map.findWithDefault [] pkgname stanzasPrefs
     stanzasPrefs =
       Map.fromListWith
-        (\a b -> nub (a ++ b))
+        (\a b -> ordNub (a ++ b))
         [ (pkgname, pref)
         | PackageStanzasPreference pkgname pref <- prefs
         ]
@@ -892,13 +995,13 @@ validateSolverResult
   -> CompilerInfo
   -> IndependentGoals
   -> [ResolverPackage UnresolvedPkgLoc]
-  -> SolverInstallPlan
+  -> Progress String String SolverInstallPlan
 validateSolverResult platform comp indepGoals pkgs =
   case planPackagesProblems platform comp pkgs of
     [] -> case SolverInstallPlan.new indepGoals graph of
-      Right plan -> plan
-      Left problems -> error (formatPlanProblems problems)
-    problems -> error (formatPkgProblems problems)
+      Right plan -> return plan
+      Left problems -> fail (formatPlanProblems problems)
+    problems -> fail (formatPkgProblems problems)
   where
     graph :: Graph.Graph (ResolverPackage UnresolvedPkgLoc)
     graph = Graph.fromDistinctList pkgs
@@ -950,7 +1053,7 @@ planPackagesProblems platform cinfo pkgs =
   , not (null packageProblems)
   ]
     ++ [ DuplicatePackageSolverId (Graph.nodeKey aDup) dups
-       | dups <- duplicatesBy (comparing Graph.nodeKey) pkgs
+       | dups <- toList <$> duplicatesBy (comparing Graph.nodeKey) pkgs
        , aDup <- case dups of
           [] -> []
           (ad : _) -> [ad]
@@ -1012,7 +1115,7 @@ configuredPackageProblems
          | pkgs <-
             CD.nonSetupDeps
               ( fmap
-                  (duplicatesBy (comparing packageName))
+                  (fmap toList . duplicatesBy (comparing packageName))
                   specifiedDeps1
               )
          ]
@@ -1028,9 +1131,6 @@ configuredPackageProblems
 
       specifiedDeps1 :: ComponentDeps [PackageId]
       specifiedDeps1 = fmap (map solverSrcId) specifiedDeps0
-
-      specifiedDeps :: [PackageId]
-      specifiedDeps = CD.flatDeps specifiedDeps1
 
       mergedFlags :: [MergeResult PD.FlagName PD.FlagName]
       mergedFlags =
@@ -1048,7 +1148,7 @@ configuredPackageProblems
       dependencyName (Dependency name _ _) = name
 
       mergedDeps :: [MergeResult Dependency PackageId]
-      mergedDeps = mergeDeps requiredDeps specifiedDeps
+      mergedDeps = mergeDeps requiredDeps (fold specifiedDeps1)
 
       mergeDeps
         :: [Dependency]
@@ -1074,7 +1174,7 @@ configuredPackageProblems
         case finalizePD
           specifiedFlags
           compSpec
-          (const True)
+          (const Satisfied)
           platform
           cinfo
           []

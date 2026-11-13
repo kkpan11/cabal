@@ -1,6 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-
 module Distribution.Types.Dependency
   ( Dependency (..)
   , mkDependency
@@ -33,10 +30,6 @@ import qualified Text.PrettyPrint as PP
 --
 -- /Invariant:/ package name does not appear as 'LSubLibName' in
 -- set of library names.
---
--- /Note:/ 'Dependency' is not an instance of 'Ord', and so it cannot be used
--- in 'Set' or as the key to a 'Map'.  For these and similar use cases see
--- 'DependencyMap'.
 data Dependency
   = -- | The set of libraries required from the package.
     -- Only the selected libraries will be built.
@@ -45,7 +38,7 @@ data Dependency
       PackageName
       VersionRange
       (NonEmptySet LibraryName)
-  deriving (Generic, Read, Show, Eq, Ord, Typeable, Data)
+  deriving (Generic, Read, Show, Eq, Ord, Data)
 
 depPkgName :: Dependency -> PackageName
 depPkgName (Dependency pn _ _) = pn
@@ -74,7 +67,7 @@ mkDependency pn vr lb = Dependency pn vr (NES.map conv lb)
 
 instance Binary Dependency
 instance Structured Dependency
-instance NFData Dependency where rnf = genericRnf
+instance NFData Dependency
 
 -- |
 --
@@ -82,30 +75,20 @@ instance NFData Dependency where rnf = genericRnf
 -- "pkg"
 --
 -- >>> prettyShow $ Dependency (mkPackageName "pkg") anyVersion $ NES.insert (LSubLibName $ mkUnqualComponentName "sublib") mainLibSet
--- "pkg:{pkg, sublib}"
+-- "pkg:{pkg,sublib}"
 --
 -- >>> prettyShow $ Dependency (mkPackageName "pkg") anyVersion $ NES.singleton (LSubLibName $ mkUnqualComponentName "sublib")
 -- "pkg:sublib"
 --
 -- >>> prettyShow $ Dependency (mkPackageName "pkg") anyVersion $ NES.insert (LSubLibName $ mkUnqualComponentName "sublib-b") $ NES.singleton (LSubLibName $ mkUnqualComponentName "sublib-a")
--- "pkg:{sublib-a, sublib-b}"
+-- "pkg:{sublib-a,sublib-b}"
 instance Pretty Dependency where
-  pretty (Dependency name ver sublibs) = withSubLibs (pretty name) <+> pver
+  pretty (Dependency name ver sublibs) = prettyLibraryNames name (NES.toNonEmpty sublibs) <+> pver
     where
       -- TODO: change to isAnyVersion after #6736
       pver
         | isAnyVersionLight ver = PP.empty
         | otherwise = pretty ver
-
-      withSubLibs doc = case NES.toList sublibs of
-        [LMainLibName] -> doc
-        [LSubLibName uq] -> doc <<>> PP.colon <<>> pretty uq
-        _ -> doc <<>> PP.colon <<>> PP.braces prettySublibs
-
-      prettySublibs = PP.hsep $ PP.punctuate PP.comma $ prettySublib <$> NES.toList sublibs
-
-      prettySublib LMainLibName = PP.text $ unPackageName name
-      prettySublib (LSubLibName un) = PP.text $ unUnqualComponentName un
 
 -- |
 --

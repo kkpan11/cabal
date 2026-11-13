@@ -1,4 +1,3 @@
-{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE CPP #-}
 
 import Control.Exception
@@ -27,11 +26,8 @@ import Test.Cabal.Prelude
 main = setupAndCabalTest . recordMode DoNotRecord $ do
   -- Foreign libraries don't work with GHC 7.6 and earlier
   skipUnlessGhcVersion ">= 7.8"
-  win <- isWindows
   ghc94 <- isGhcVersion ">= 9.4.1"
-  ghc844 <- isGhcVersion "== 8.4.4"
-  expectBrokenIf (ghc844 || (win && ghc94)) 8451 $
-    withPackageDb $ do
+  withPackageDb $ do
         setup_install []
         setup "copy" [] -- regression test #4156
         dist_dir <- fmap testDistDir getTestEnv
@@ -67,7 +63,8 @@ main = setupAndCabalTest . recordMode DoNotRecord $ do
                 let libraryName = "libversionedlib.so.5.4.3"
                     libdir = flibdir installDirs
                     objdumpProgram = simpleProgram "objdump"
-                (objdump, _) <- liftIO $ requireProgram normal objdumpProgram (withPrograms lbi)
+                    verbosity = mkVerbosity defaultVerbosityHandles normal
+                (objdump, _) <- liftIO $ requireProgram verbosity objdumpProgram (withPrograms lbi)
                 path1 <- liftIO $ readSymbolicLink $ libdir </> "libversionedlib.so"
                 path2 <- liftIO $ readSymbolicLink $ libdir </> "libversionedlib.so.5"
                 assertEqual "Symbolic link 'libversionedlib.so' incorrect"

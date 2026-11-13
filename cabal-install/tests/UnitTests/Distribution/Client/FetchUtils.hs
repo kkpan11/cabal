@@ -1,5 +1,3 @@
-{-# LANGUAGE ScopedTypeVariables #-}
-
 module UnitTests.Distribution.Client.FetchUtils
   ( tests
   )
@@ -30,15 +28,15 @@ tests =
       [ testCase "handles an empty package list" testEmpty
       , testCase "passes an unpacked local package through" testPassLocalPackage
       , testCase "handles http" testHttp
-      , testCase "aborts on interrupt in GET" $ testGetInterrupt
-      , testCase "aborts on other exception in GET" $ testGetException
-      , testCase "aborts on interrupt in GET (uncollected download)" $ testUncollectedInterrupt
-      , testCase "continues on other exception in GET (uncollected download)" $ testUncollectedException
+      , testCase "aborts on interrupt in GET" testGetInterrupt
+      , testCase "aborts on other exception in GET" testGetException
+      , testCase "aborts on interrupt in GET (uncollected download)" testUncollectedInterrupt
+      , testCase "continues on other exception in GET (uncollected download)" testUncollectedException
       ]
   ]
 
 verbosity :: Verbosity.Verbosity
-verbosity = Verbosity.silent
+verbosity = Verbosity.mkVerbosity Verbosity.defaultVerbosityHandles Verbosity.silent
 
 -- | An interval that we use to assert that something happens "immediately".
 -- Must be shorter than 'longSleep' to ensure those are interrupted.
@@ -78,7 +76,7 @@ testHttp = withFakeRepoCtxt get200 $ \repoCtxt repo -> do
       pkgId' @?= pkgId
     _ -> assertFailure $ "expected RepoTarballPackage, got " ++ show res
   where
-    get200 = \_uri -> return 200
+    get200 _uri = return 200
 
 testGetInterrupt :: Assertion
 testGetInterrupt = testGetAny UserInterrupt

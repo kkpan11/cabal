@@ -1,7 +1,5 @@
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE DisambiguateRecordFields #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 
 -- | DSL for testing the modular solver
 module UnitTests.Distribution.Solver.Modular.DSL
@@ -77,11 +75,15 @@ import qualified Distribution.Verbosity as C
 import qualified Distribution.Version as C
 import Language.Haskell.Extension (Extension (..), Language (..))
 
+import qualified Distribution.Compat.Lens as L
+import qualified Distribution.Types.BuildInfo.Lens as L
+
 -- cabal-install
 import Distribution.Client.Dependency
 import qualified Distribution.Client.SolverInstallPlan as CI.SolverInstallPlan
 import Distribution.Client.Types
 
+import Data.Foldable (fold)
 import Distribution.Solver.Types.ComponentDeps (ComponentDeps)
 import qualified Distribution.Solver.Types.ComponentDeps as CD
 import Distribution.Solver.Types.ConstraintSource
@@ -96,6 +98,7 @@ import Distribution.Solver.Types.Settings
 import Distribution.Solver.Types.SolverPackage
 import Distribution.Solver.Types.SourcePackage
 import Distribution.Solver.Types.Variable
+import Distribution.Types.UnitId (UnitId)
 
 {-------------------------------------------------------------------------------
   Example package database DSL
@@ -170,7 +173,6 @@ instance Monoid Dependencies where
       , depsIsBuildable = True
       , depsExampleDependencies = []
       }
-  mappend = (<>)
 
 dependencies :: [ExampleDependency] -> Dependencies
 dependencies deps = mempty{depsExampleDependencies = deps}
@@ -390,9 +392,9 @@ exInst pn v hash deps = ExInst pn v hash (map exInstHash deps)
 -- these packages.
 type ExampleDb = [Either ExampleInstalled ExampleAvailable]
 
-type DependencyTree a = C.CondTree C.ConfVar [C.Dependency] a
+type DependencyTree a = C.CondTree C.ConfVar a
 
-type DependencyComponent a = C.CondBranch C.ConfVar [C.Dependency] a
+type DependencyComponent a = C.CondBranch C.ConfVar a
 
 exDbPkgs :: ExampleDb -> [ExamplePkgName]
 exDbPkgs = map (either exInstName exAvName)
@@ -412,7 +414,7 @@ exAvSrcPkg ex =
             usedFlags :: Map ExampleFlagName C.PackageFlag
             usedFlags = Map.fromList [(fn, mkDefaultFlag fn) | fn <- names]
               where
-                names = extractFlags $ CD.flatDeps (exAvDeps ex)
+                names = extractFlags $ fold (exAvDeps ex)
          in -- 'declaredFlags' overrides 'usedFlags' to give flags non-default settings:
             Map.elems $ declaredFlags `Map.union` usedFlags
 
@@ -449,7 +451,7 @@ exAvSrcPkg ex =
                       , C.maintainer = "maintainer"
                       , C.description = "description"
                       , C.synopsis = "synopsis"
-                      , C.licenseFiles = [C.unsafeMakeSymbolicPath "LICENSE"]
+                      , C.licenseFiles = [C.makeRelativePathEx "LICENSE"]
                       , -- Version 2.0 is required for internal libraries.
                         C.specVersion = C.CabalSpecV2_0
                       }
@@ -524,21 +526,25 @@ exAvSrcPkg ex =
     defaultExe =
       mempty
         { C.buildInfo = defaultTopLevelBuildInfo
-        , C.modulePath = "Main.hs"
+        , C.modulePath = C.makeRelativePathEx "Main.hs"
         }
 
     defaultTest :: C.TestSuite
     defaultTest =
       mempty
         { C.testBuildInfo = defaultTopLevelBuildInfo
-        , C.testInterface = C.TestSuiteExeV10 (C.mkVersion [1, 0]) "Test.hs"
+        , C.testInterface =
+            C.TestSuiteExeV10 (C.mkVersion [1, 0]) $
+              C.makeRelativePathEx "Test.hs"
         }
 
     defaultBenchmark :: C.Benchmark
     defaultBenchmark =
       mempty
         { C.benchmarkBuildInfo = defaultTopLevelBuildInfo
-        , C.benchmarkInterface = C.BenchmarkExeV10 (C.mkVersion [1, 0]) "Benchmark.hs"
+        , C.benchmarkInterface =
+            C.BenchmarkExeV10 (C.mkVersion [1, 0]) $
+              C.makeRelativePathEx "Benchmark.hs"
         }
 
     -- Split the set of dependencies into the set of dependencies of the library,
@@ -585,37 +591,38 @@ exAvSrcPkg ex =
     extractFlags deps = concatMap go (depsExampleDependencies deps)
       where
         go :: ExampleDependency -> [ExampleFlagName]
-        go (ExAny _) = []
-        go (ExFix _ _) = []
-        go (ExRange _ _ _) = []
-        go (ExSubLibAny _ _) = []
-        go (ExSubLibFix _ _ _) = []
-        go (ExBuildToolAny _ _) = []
-        go (ExBuildToolFix _ _ _) = []
-        go (ExLegacyBuildToolAny _) = []
-        go (ExLegacyBuildToolFix _ _) = []
+        go ExAny{} = []
+        go ExFix{} = []
+        go ExRange{} = []
+        go ExSubLibAny{} = []
+        go ExSubLibFix{} = []
+        go ExBuildToolAny{} = []
+        go ExBuildToolFix{} = []
+        go ExLegacyBuildToolAny{} = []
+        go ExLegacyBuildToolFix{} = []
         go (ExFlagged f a b) = f : extractFlags a ++ extractFlags b
-        go (ExExt _) = []
-        go (ExLang _) = []
-        go (ExPkg _) = []
+        go ExExt{} = []
+        go ExLang{} = []
+        go ExPkg{} = []
 
     -- Convert 'Dependencies' into a tree of a specific component type, using
     -- the given top level component and function for creating a component at
     -- any level.
     mkTopLevelCondTree
       :: forall a
-       . Semigroup a
+       . (Semigroup a, L.HasBuildInfo a)
       => a
       -> (C.LibraryVisibility -> C.BuildInfo -> a)
       -> Dependencies
       -> DependencyTree a
     mkTopLevelCondTree defaultTopLevel mkComponent deps =
-      let condNode = mkCondTree mkComponent deps
+      let condNode :: DependencyTree a
+          condNode = mkCondTree mkComponent deps
        in condNode{C.condTreeData = defaultTopLevel <> C.condTreeData condNode}
 
     -- Convert 'Dependencies' into a tree of a specific component type, using
     -- the given function to generate each component.
-    mkCondTree :: (C.LibraryVisibility -> C.BuildInfo -> a) -> Dependencies -> DependencyTree a
+    mkCondTree :: forall a. L.HasBuildInfo a => (C.LibraryVisibility -> C.BuildInfo -> a) -> Dependencies -> DependencyTree a
     mkCondTree mkComponent deps =
       let (libraryDeps, exts, mlang, pcpkgs, buildTools, legacyBuildTools) = splitTopLevel (depsExampleDependencies deps)
           (directDeps, flaggedDeps) = splitDeps libraryDeps
@@ -641,11 +648,7 @@ exAvSrcPkg ex =
               , C.buildable = depsIsBuildable deps
               }
        in C.CondNode
-            { C.condTreeData = component
-            , -- TODO: Arguably, build-tools dependencies should also
-              -- effect constraints on conditional tree. But no way to
-              -- distinguish between them
-              C.condTreeConstraints = map mkDirect directDeps
+            { C.condTreeData = L.set L.targetBuildDepends (map mkDirect directDeps) component
             , C.condTreeComponents = map (mkFlagged mkComponent) flaggedDeps
             }
 
@@ -653,7 +656,9 @@ exAvSrcPkg ex =
     mkDirect (dep, name, vr) = C.Dependency (C.mkPackageName dep) vr (NonEmptySet.singleton name)
 
     mkFlagged
-      :: (C.LibraryVisibility -> C.BuildInfo -> a)
+      :: forall a
+       . L.HasBuildInfo a
+      => (C.LibraryVisibility -> C.BuildInfo -> a)
       -> (ExampleFlagName, Dependencies, Dependencies)
       -> DependencyComponent a
     mkFlagged mkComponent (f, a, b) =
@@ -713,7 +718,7 @@ exAvSrcPkg ex =
       _ -> False
 
 mkSimpleVersion :: ExamplePkgVersion -> C.Version
-mkSimpleVersion n = C.mkVersion [n, 0, 0]
+mkSimpleVersion n = C.mkVersion [n]
 
 mkSimplePkgconfigVersion :: ExamplePkgVersion -> C.PkgconfigVersion
 mkSimplePkgconfigVersion = C.versionToPkgconfigVersion . mkSimpleVersion
@@ -749,7 +754,7 @@ exAvPkgId :: ExampleAvailable -> C.PackageIdentifier
 exAvPkgId ex =
   C.PackageIdentifier
     { pkgName = C.mkPackageName (exAvName ex)
-    , pkgVersion = C.mkVersion [exAvVersion ex, 0, 0]
+    , pkgVersion = C.mkVersion [exAvVersion ex]
     }
 
 exInstInfo :: ExampleInstalled -> IPI.InstalledPackageInfo
@@ -764,7 +769,7 @@ exInstPkgId :: ExampleInstalled -> C.PackageIdentifier
 exInstPkgId ex =
   C.PackageIdentifier
     { pkgName = C.mkPackageName (exInstName ex)
-    , pkgVersion = C.mkVersion [exInstVersion ex, 0, 0]
+    , pkgVersion = C.mkVersion [exInstVersion ex]
     }
 
 exAvIdx :: [ExampleAvailable] -> CI.PackageIndex.PackageIndex UnresolvedSourcePackage
@@ -779,14 +784,16 @@ exResolve
   -> Maybe [Extension]
   -- List of languages supported by the compiler, or Nothing if unknown.
   -> Maybe [Language]
-  -> PC.PkgConfigDb
+  -> Maybe [(C.PackageName, UnitId)]
+  -- ^ List of units that are wired in to the compiler
+  -> Maybe PC.PkgConfigDb
   -> [ExamplePkgName]
   -> Maybe Int
   -> CountConflicts
   -> FineGrainedConflicts
   -> MinimizeConflictSet
   -> IndependentGoals
-  -> PreferOldest
+  -> PreferVersion
   -> ReorderGoals
   -> AllowBootLibInstalls
   -> OnlyConstrained
@@ -802,6 +809,7 @@ exResolve
   db
   exts
   langs
+  wiredInUnitIds
   pkgConfigDb
   targets
   mbj
@@ -809,7 +817,7 @@ exResolve
   fineGrainedConflicts
   minimizeConflictSet
   indepGoals
-  prefOldest
+  prefVersion
   reorder
   allowBootLibInstalls
   onlyConstrained
@@ -827,6 +835,7 @@ exResolve
         defaultCompiler
           { C.compilerInfoExtensions = exts
           , C.compilerInfoLanguages = langs
+          , C.compilerInfoWiredInUnitIds = wiredInUnitIds
           }
       (inst, avai) = partitionEithers db
       instIdx = exInstIdx inst
@@ -847,23 +856,27 @@ exResolve
         | otherwise = []
       targets' = fmap (\p -> NamedPackage (C.mkPackageName p) []) targets
       params =
-        addConstraints (fmap toConstraint constraints) $
-          addConstraints (fmap toLpc enableTests) $
-            addPreferences (fmap toPref prefs) $
-              setCountConflicts countConflicts $
-                setFineGrainedConflicts fineGrainedConflicts $
-                  setMinimizeConflictSet minimizeConflictSet $
-                    setIndependentGoals indepGoals $
-                      (if asBool prefOldest then setPreferenceDefault PreferAllOldest else id) $
-                        setReorderGoals reorder $
-                          setMaxBackjumps mbj $
-                            setAllowBootLibInstalls allowBootLibInstalls $
-                              setOnlyConstrained onlyConstrained $
-                                setEnableBackjumping enableBj $
-                                  setSolveExecutables solveExes $
-                                    setGoalOrder goalOrder $
-                                      setSolverVerbosity verbosity $
-                                        standardInstallPolicy instIdx avaiIdx targets'
+        addConstraints (fmap toConstraint constraints)
+          $ addConstraints (fmap toLpc enableTests)
+          $ addPreferences (fmap toPref prefs)
+          $ setCountConflicts countConflicts
+          $ setFineGrainedConflicts fineGrainedConflicts
+          $ setMinimizeConflictSet minimizeConflictSet
+          $ setIndependentGoals indepGoals
+          $ ( case prefVersion of
+                PreferOldest -> setPreferenceDefault PreferAllOldest
+                PreferLatest -> setPreferenceDefault PreferAllLatest
+                PreferInstalledOrLatest -> setPreferenceDefault PreferLatestForSelected
+            )
+          $ setReorderGoals reorder
+          $ setMaxBackjumps mbj
+          $ setAllowBootLibInstalls allowBootLibInstalls
+          $ setOnlyConstrained onlyConstrained
+          $ setEnableBackjumping enableBj
+          $ setSolveExecutables solveExes
+          $ setGoalOrder goalOrder
+          $ setSolverVerbosity (C.verbosityLevel verbosity)
+          $ standardInstallPolicy instIdx avaiIdx targets'
       toLpc pc = LabeledPackageConstraint pc ConstraintSourceUnknown
 
       toConstraint (ExVersionConstraint scope v) =
@@ -879,7 +892,7 @@ exResolve
 extractInstallPlan
   :: CI.SolverInstallPlan.SolverInstallPlan
   -> [(ExamplePkgName, ExamplePkgVersion)]
-extractInstallPlan = catMaybes . map confPkg . CI.SolverInstallPlan.toList
+extractInstallPlan = mapMaybe confPkg . CI.SolverInstallPlan.toList
   where
     confPkg :: CI.SolverInstallPlan.SolverPlanPackage -> Maybe (String, Int)
     confPkg (CI.SolverInstallPlan.Configured pkg) = srcPkg pkg
@@ -888,7 +901,7 @@ extractInstallPlan = catMaybes . map confPkg . CI.SolverInstallPlan.toList
     srcPkg :: SolverPackage UnresolvedPkgLoc -> Maybe (String, Int)
     srcPkg cpkg =
       let C.PackageIdentifier pn ver = C.packageId (solverPkgSource cpkg)
-       in (\vn -> (C.unPackageName pn, vn)) <$> safeHead (C.versionNumbers ver)
+       in (C.unPackageName pn,) <$> safeHead (C.versionNumbers ver)
 
 {-------------------------------------------------------------------------------
   Auxiliary

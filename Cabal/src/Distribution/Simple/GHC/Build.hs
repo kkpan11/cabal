@@ -1,30 +1,37 @@
+{-# LANGUAGE DataKinds #-}
+
 module Distribution.Simple.GHC.Build where
 
 import Distribution.Compat.Prelude
 import Prelude ()
 
-import Control.Monad.IO.Class
-import qualified Data.Set as Set
+import qualified Distribution.Compat.Graph as Graph
+
 import Distribution.PackageDescription as PD hiding (buildInfo)
 import Distribution.Simple.Build.Inputs
 import Distribution.Simple.Flag (Flag)
 import Distribution.Simple.GHC.Build.ExtraSources
 import Distribution.Simple.GHC.Build.Link
 import Distribution.Simple.GHC.Build.Modules
-import Distribution.Simple.GHC.Build.Utils (withDynFLib)
+import Distribution.Simple.GHC.Build.Utils (compilerBuildWay, isHaskell, withDynFLib)
 import Distribution.Simple.LocalBuildInfo
-import Distribution.Simple.Program
+import Distribution.Simple.Program.Builtin (ghcProgram)
+import Distribution.Simple.Program.Db (requireProgram)
 import Distribution.Simple.Utils
-import Distribution.Types.ComponentLocalBuildInfo (componentIsIndefinite)
+
+import Distribution.Types.ComponentLocalBuildInfo
+import Distribution.Types.PackageName.Magic (fakePackageId)
 import Distribution.Types.ParStrat
 import Distribution.Utils.NubList (fromNubListR)
-import System.Directory hiding (exeExtension)
-import System.FilePath
+import Distribution.Utils.Path
 
-{-
-Note [Build Target Dir vs Target Dir]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+import Distribution.Verbosity (VerbosityHandles, mkVerbosity, verbosityHandles)
 
+import Control.Monad.IO.Class
+import System.FilePath (splitDirectories)
+
+{- Note [Build Target Dir vs Target Dir]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Where to place the build result (targetDir) and the build artifacts (buildTargetDir).
 
 \* For libraries, targetDir == buildTargetDir, where both the library and
@@ -47,7 +54,7 @@ Furthermore, we need to account for the limit of characters in ghc
 invocations that different OSes constrain us to. Cabal invocations can
 rapidly reach this limit, in part, due to the long length of cabal v2
 prefixes. To minimize the likelihood, we use
-`makeRelativeToCurrentDirectory` to shorten the paths used in invocations
+`tryMakeRelativeToWorkingDir` to shorten the paths used in invocations
 (see da6321bb).
 
 However, in executables, we don't do this. It seems that we don't need to do it
@@ -61,80 +68,120 @@ for linking libraries too (2024-01) (TODO)
 -- Includes building Haskell modules, extra build sources, and linking.
 build
   :: Flag ParStrat
+  -> VerbosityHandles
   -> PackageDescription
   -> PreBuildComponentInputs
   -- ^ The context and component being built in it.
   -> IO ()
-build numJobs pkg_descr pbci = do
+build numJobs verbHandles pkg_descr pbci = do
   let
-    verbosity = buildVerbosity pbci
-    component = buildComponent pbci
+    verbosity = mkVerbosity verbHandles $ buildVerbosity pbci
     isLib = buildIsLib pbci
     lbi = localBuildInfo pbci
+    comp = buildComponent pbci
     clbi = buildCLBI pbci
+    isIndef = componentIsIndefinite clbi
+    mbWorkDir = mbWorkDirLBI lbi
+    i = interpretSymbolicPathLBI lbi -- See Note [Symbolic paths] in Distribution.Utils.Path
 
   -- Create a few directories for building the component
   -- See Note [Build Target Dir vs Target Dir]
-  let targetDir_absolute = componentBuildDir lbi clbi
-      buildTargetDir_absolute
+  let targetDir0 :: SymbolicPath Pkg ('Dir Build)
+      targetDir0 = componentBuildDir lbi clbi
+      buildTargetDir0 :: SymbolicPath Pkg ('Dir Artifacts)
+      buildTargetDir0
         -- Libraries use the target dir for building (see above)
-        | isLib = targetDir_absolute
+        | isLib = coerceSymbolicPath targetDir0
         -- In other cases, use targetDir/<name-of-target-dir>-tmp
-        | targetDirName : _ <- reverse $ splitDirectories targetDir_absolute =
-            targetDir_absolute </> (targetDirName ++ "-tmp")
+        | targetDirName : _ <- reverse $ splitDirectories $ getSymbolicPath targetDir0 =
+            coerceSymbolicPath targetDir0 </> makeRelativePathEx (targetDirName ++ "-tmp")
         | otherwise = error "GHC.build: targetDir is empty"
 
   liftIO $ do
-    createDirectoryIfMissingVerbose verbosity True targetDir_absolute
-    createDirectoryIfMissingVerbose verbosity True buildTargetDir_absolute
+    createDirectoryIfMissingVerbose verbosity True $ i targetDir0
+    createDirectoryIfMissingVerbose verbosity True $ i buildTargetDir0
 
   -- See Note [Build Target Dir vs Target Dir] as well
-  _targetDir <- liftIO $ makeRelativeToCurrentDirectory targetDir_absolute
+  let targetDir = targetDir0 -- NB: no 'makeRelative'
   buildTargetDir <-
-    -- To preserve the previous behaviour, we don't use relative dirs for
-    -- executables. Historically, this isn't needed to reduce the CLI limit
-    -- (unlike for libraries) because we link executables with the module names
-    -- instead of passing the path to object file -- that's something else we
-    -- can now fix after the refactor lands.
     if isLib
-      then liftIO $ makeRelativeToCurrentDirectory buildTargetDir_absolute
-      else return buildTargetDir_absolute
+      then -- NB: this might fail to make the buildTargetDir relative,
+      -- as noted in #9776. Oh well.
+        tryMakeRelative mbWorkDir buildTargetDir0
+      else return buildTargetDir0
+  -- To preserve the previous behaviour, we don't use relative dirs for
+  -- executables. Historically, this isn't needed to reduce the CLI limit
+  -- (unlike for libraries) because we link executables with the module names
+  -- instead of passing the path to object file -- that's something else we
+  -- can now fix after the refactor lands.
 
   (ghcProg, _) <- liftIO $ requireProgram verbosity ghcProgram (withPrograms lbi)
 
-  -- Determine in which ways we want to build the component
-  let
-    wantVanilla = if isLib then withVanillaLib lbi else False
-    -- Arguably, wantStatic should be "withFullyStaticExe lbi" for executables,
-    -- but it was not before the refactor.
-    wantStatic = if isLib then withStaticLib lbi else not (wantDynamic || wantProf)
-    wantDynamic = case component of
-      CLib{} -> withSharedLib lbi
-      CFLib flib -> withDynFLib flib
-      CExe{} -> withDynExe lbi
-      CTest{} -> withDynExe lbi
-      CBench{} -> withDynExe lbi
-    wantProf = if isLib then withProfLib lbi else withProfExe lbi
+  -- Ways which are wanted from configuration flags
+  let wantedWays@(wantedLibWays, wantedFLibWay, wantedExeWay) = buildWays lbi
 
-    -- See also Note [Building Haskell Modules accounting for TH] in Distribution.Simple.GHC.Build.Modules
-    -- We build static by default if no other way is wanted.
-    -- For executables and foreign libraries, there should only be one wanted way.
-    wantedWays =
-      Set.fromList $
-        -- If building a library, we accumulate all the ways,
-        -- otherwise, we take just one.
-        (if isLib then id else take 1) $
-          [ProfWay | wantProf]
-            -- I don't see why we shouldn't build with dynamic
-            -- indefinite components.
-            <> [DynWay | wantDynamic && not (componentIsIndefinite clbi)]
-            <> [StaticWay | wantStatic || wantVanilla || not (wantDynamic || wantProf)]
+  -- Ways which are needed due to the compiler configuration
+  let doingTH =
+        -- Does this component, or another component that (transitively) depends
+        -- on this component, use TemplateHaskell or QuasiQuotes?
+        --
+        -- Ticket #7684 showed that we need to take into account intra-package
+        -- dependencies.
+        any usesTemplateHaskellOrQQ thisCompAndReverseDepsBuildInfos
 
-  liftIO $ info verbosity ("Wanted build ways: " ++ show (Set.toList wantedWays))
+      -- The BuildInfos for this component and all of the components that
+      -- transitively depend on it (its reverse dependencies).
+      thisCompAndReverseDepsBuildInfos =
+        [ componentBuildInfo revDepComp
+        | let compUnitId = componentUnitId clbi
+        , -- 'revClosure' retrieves components that depend on this component.
+        revDepCLBI <- fromMaybe [clbi] $ Graph.revClosure (componentGraph lbi) [compUnitId]
+        , -- Use 'lookupComponent' here; don't use any function that goes via
+        -- 'getComponent' (e.g. mkTargetInfo or unitIdTarget'), as that will
+        -- tiresomely cause an error for 'detailed-0.9' test-suites because
+        -- 'testSuiteLibV09AsLibAndExe' creates a stub PackageDescription with
+        -- most components zeroed out.
+        --
+        -- The implementation below means we will get 'Nothing' when the
+        -- current component is a 'detailed-0.9' test-suite, which is fine
+        -- as nothing can depend on a test-suite.
+        Just revDepComp <- [lookupComponent pkg_descr $ componentLocalName revDepCLBI]
+        ]
 
+      defaultGhcWay = compilerBuildWay (buildCompiler pbci)
+      wantedModBuildWays = case comp of
+        CLib _ -> wantedLibWays isIndef
+        CFLib fl -> [wantedFLibWay (withDynFLib fl)]
+        CExe _ -> [wantedExeWay]
+        CTest _ -> [wantedExeWay]
+        CBench _ -> [wantedExeWay]
+      finalModBuildWays =
+        wantedModBuildWays
+          ++ [defaultGhcWay | doingTH && defaultGhcWay `notElem` wantedModBuildWays]
+      compNameStr = showComponentName $ componentName comp
+
+  liftIO $ info verbosity ("Wanted module build ways(" ++ compNameStr ++ "): " ++ show wantedModBuildWays)
+  liftIO $ info verbosity ("Final module build ways(" ++ compNameStr ++ "): " ++ show finalModBuildWays)
   -- We need a separate build and link phase, and C sources must be compiled
   -- after Haskell modules, because C sources may depend on stub headers
   -- generated from compiling Haskell modules (#842, #3294).
-  buildOpts <- buildHaskellModules numJobs ghcProg pkg_descr buildTargetDir_absolute wantedWays pbci
-  extraSources <- buildAllExtraSources ghcProg buildTargetDir pbci
-  linkOrLoadComponent ghcProg pkg_descr (fromNubListR extraSources) (buildTargetDir, targetDir_absolute) (wantedWays, buildOpts) pbci
+  (mbMainFile, inputModules) <- componentInputs buildTargetDir verbHandles pkg_descr pbci
+  let (hsMainFile, nonHsMainFile) =
+        case mbMainFile of
+          Just mainFile
+            | PD.package pkg_descr == fakePackageId
+                || isHaskell (getSymbolicPath mainFile) ->
+                (Just mainFile, Nothing)
+            | otherwise ->
+                (Nothing, Just mainFile)
+          Nothing -> (Nothing, Nothing)
+  buildOpts <- buildHaskellModules numJobs ghcProg hsMainFile inputModules buildTargetDir finalModBuildWays verbHandles pbci
+  extraSources <- buildAllExtraSources nonHsMainFile ghcProg buildTargetDir wantedWays verbHandles pbci
+  linkOrLoadComponent
+    ghcProg
+    (verbosityHandles verbosity)
+    pkg_descr
+    (fromNubListR extraSources)
+    (buildTargetDir, targetDir)
+    (wantedWays, buildOpts)
+    pbci

@@ -1,6 +1,3 @@
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE Rank2Types #-}
------------------------------------------------------------------------------
 -- This module is meant to be local-only to Distribution...
 {-# OPTIONS_HADDOCK hide #-}
 
@@ -45,6 +42,7 @@ module Distribution.Deprecated.ParseUtils
   , showFreeText
   , field
   , simpleField
+  , monoidField
   , listField
   , listFieldWithSep
   , spaceListField
@@ -53,6 +51,7 @@ module Distribution.Deprecated.ParseUtils
   , readPToMaybe
   , fieldParsec
   , simpleFieldParsec
+  , monoidFieldParsec
   , listFieldParsec
   , commaListFieldParsec
   , commaNewLineListFieldParsec
@@ -91,6 +90,7 @@ data PError
   = AmbiguousParse String LineNo
   | NoParse String LineNo
   | TabsError LineNo
+  | FieldShouldBeStanza String LineNo
   | FromString String (Maybe LineNo)
   deriving (Eq, Show)
 
@@ -121,19 +121,11 @@ instance Applicative ParseResult where
   pure = ParseOk []
   (<*>) = ap
 
-{- FOURMOLU_DISABLE -}
 instance Monad ParseResult where
-  return = pure
   ParseFailed err >>= _ = ParseFailed err
   ParseOk ws x >>= f = case f x of
     ParseFailed err -> ParseFailed err
     ParseOk ws' x' -> ParseOk (ws' ++ ws) x'
-#if !(MIN_VERSION_base(4,9,0))
-  fail = parseResultFail
-#elif !(MIN_VERSION_base(4,13,0))
-  fail = Fail.fail
-#endif
-{- FOURMOLU_ENABLE -}
 
 instance Foldable ParseResult where
   foldMap _ (ParseFailed _) = mempty
@@ -152,7 +144,7 @@ parseResultFail s = parseFail (FromString s Nothing)
 parseFail :: PError -> ParseResult a
 parseFail = ParseFailed
 
-runP :: LineNo -> String -> ReadP a a -> String -> ParseResult a
+runP :: LineNo -> String -> ReadP a -> String -> ParseResult a
 runP line fieldname p s =
   case [x | (x, "") <- results] of
     [a] -> ParseOk (utf8Warnings line fieldname s) a
@@ -193,6 +185,10 @@ locatedErrorMsg (NoParse f n) =
   , "Parse of field '" ++ f ++ "' failed."
   )
 locatedErrorMsg (TabsError n) = (Just n, "Tab used as indentation.")
+locatedErrorMsg (FieldShouldBeStanza name lineNumber) =
+  ( Just lineNumber
+  , "'" ++ name ++ "' is a stanza, not a field. Remove the trailing ':' to parse a stanza."
+  )
 locatedErrorMsg (FromString s n) = (n, s)
 
 syntaxError :: LineNo -> String -> ParseResult a
@@ -212,7 +208,7 @@ data FieldDescr a = FieldDescr
   -- successful.  Otherwise, reports an error on line number @n@.
   }
 
-field :: String -> (a -> Doc) -> ReadP a a -> FieldDescr a
+field :: String -> (a -> Doc) -> ReadP a -> FieldDescr a
 field name showF readF =
   FieldDescr name showF (\line val _st -> runP line name readF val)
 
@@ -240,7 +236,7 @@ liftField get set (FieldDescr name showF parseF) =
 simpleField
   :: String
   -> (a -> Doc)
-  -> ReadP a a
+  -> ReadP a
   -> (b -> a)
   -> (a -> b -> b)
   -> FieldDescr b
@@ -256,6 +252,32 @@ simpleFieldParsec
   -> FieldDescr b
 simpleFieldParsec name showF readF get set =
   liftField get set $ fieldParsec name showF readF
+
+monoidField
+  :: Semigroup a
+  => String
+  -> (a -> Doc)
+  -> ReadP a
+  -> (b -> a)
+  -> (a -> b -> b)
+  -> FieldDescr b
+monoidField name showF readF get set =
+  liftField get set' $ field name showF readF
+  where
+    set' xs b = set (get b <> xs) b
+
+monoidFieldParsec
+  :: Semigroup a
+  => String
+  -> (a -> Doc)
+  -> ParsecParser a
+  -> (b -> a)
+  -> (a -> b -> b)
+  -> FieldDescr b
+monoidFieldParsec name showF readF get set =
+  liftField get set' $ fieldParsec name showF readF
+  where
+    set' xs b = set (get b <> xs) b
 
 commaListFieldWithSepParsec
   :: Separator
@@ -293,7 +315,7 @@ commaNewLineListFieldParsec = commaListFieldWithSepParsec sep
 spaceListField
   :: String
   -> (a -> Doc)
-  -> ReadP [a] a
+  -> ReadP a
   -> (b -> [a])
   -> ([a] -> b -> b)
   -> FieldDescr b
@@ -309,7 +331,7 @@ spaceListField name showF readF get set =
 newLineListField
   :: String
   -> (a -> Doc)
-  -> ReadP [a] a
+  -> ReadP a
   -> (b -> [a])
   -> ([a] -> b -> b)
   -> FieldDescr b
@@ -319,7 +341,7 @@ listFieldWithSep
   :: Separator
   -> String
   -> (a -> Doc)
-  -> ReadP [a] a
+  -> ReadP a
   -> (b -> [a])
   -> ([a] -> b -> b)
   -> FieldDescr b
@@ -348,7 +370,7 @@ listFieldWithSepParsec separator name showF readF get set =
 listField
   :: String
   -> (a -> Doc)
-  -> ReadP [a] a
+  -> ReadP a
   -> (b -> [a])
   -> ([a] -> b -> b)
   -> FieldDescr b
@@ -437,23 +459,23 @@ posToLineNo (Parsec.Position row _) = row
 -- Different than the naive version. it turns out Read instance for String accepts
 -- the ['a', 'b'] syntax, which we do not want. In particular it messes
 -- up any token starting with [].
-parseHaskellString :: ReadP r String
+parseHaskellString :: ReadP String
 parseHaskellString =
   readS_to_P $
     Read.readPrec_to_S (do Read.String s <- Read.lexP; return s) 0
 
-parseTokenQ :: ReadP r String
+parseTokenQ :: ReadP String
 parseTokenQ = parseHaskellString <++ munch1 (\x -> not (isSpace x) && x /= ',')
 
 parseSpaceList
-  :: ReadP r a
+  :: ReadP a
   -- ^ The parser for the stuff between commas
-  -> ReadP r [a]
+  -> ReadP [a]
 parseSpaceList p = sepBy p skipSpaces
 
 -- This version avoid parse ambiguity for list element parsers
 -- that have multiple valid parses of prefixes.
-parseOptCommaList :: ReadP r a -> ReadP r [a]
+parseOptCommaList :: ReadP a -> ReadP [a]
 parseOptCommaList p = sepBy p localSep
   where
     -- The separator must not be empty or it introduces ambiguity
@@ -461,7 +483,7 @@ parseOptCommaList p = sepBy p localSep
       (skipSpaces >> char ',' >> skipSpaces)
         +++ (satisfy isSpace >> skipSpaces)
 
-readPToMaybe :: ReadP a a -> String -> Maybe a
+readPToMaybe :: ReadP a -> String -> Maybe a
 readPToMaybe p str =
   listToMaybe
     [ r | (r, s) <- readP_to_S p str, all isSpace s

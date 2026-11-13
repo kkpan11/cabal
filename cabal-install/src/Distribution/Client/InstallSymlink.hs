@@ -1,11 +1,4 @@
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE RecordWildCards #-}
-
------------------------------------------------------------------------------
-
------------------------------------------------------------------------------
 
 -- |
 -- Module      :  Distribution.Client.InstallSymlink
@@ -67,23 +60,28 @@ import qualified Distribution.Simple.InstallDirs as InstallDirs
 import Distribution.Simple.Setup
   ( ConfigFlags (..)
   , flagToMaybe
-  , fromFlag
   , fromFlagOrDefault
   )
-import Distribution.Simple.Utils (info, withTempDirectory)
+import Distribution.Simple.Utils (info, removeFileForcibly, withTempDirectory)
 import Distribution.System
   ( Platform
+  )
+import Distribution.Types.DependencySatisfaction
+  ( DependencySatisfaction (..)
   )
 import Distribution.Types.UnqualComponentName
 
 import System.Directory
   ( canonicalizePath
+  , createFileLink
+  , getSymbolicLinkTarget
   , getTemporaryDirectory
-  , removeFile
+  , pathIsSymbolicLink
   )
 import System.FilePath
   ( isAbsolute
   , joinPath
+  , normalise
   , splitPath
   , (</>)
   )
@@ -96,9 +94,9 @@ import System.IO.Error
   , isDoesNotExistError
   )
 
-import Distribution.Client.Compat.Directory (createFileLink, getSymbolicLinkTarget, pathIsSymbolicLink)
+import Distribution.Client.Config (defaultUserInstall)
 import Distribution.Client.Init.Prompt (promptYesNo)
-import Distribution.Client.Init.Types (DefaultPrompt (MandatoryPrompt))
+import Distribution.Client.Init.Types (DefaultPrompt (MandatoryPrompt), runPromptIO)
 import Distribution.Client.Types.OverwritePolicy
 
 import qualified Data.ByteString as BS
@@ -148,8 +146,8 @@ symlinkBinaries
             publicBinDir <- canonicalizePath symlinkBinDir
             --    TODO: do we want to do this here? :
             --      createDirectoryIfMissing True publicBinDir
-            fmap catMaybes $
-              sequenceA
+            catMaybes
+              <$> sequenceA
                 [ do
                   privateBinDir <- pkgBinDir pkg ipid
                   ok <-
@@ -204,7 +202,7 @@ symlinkBinaries
           case finalizePD
             flags
             (enableStanzas stanzas)
-            (const True)
+            (const Satisfied)
             platform
             cinfo
             []
@@ -219,7 +217,7 @@ symlinkBinaries
         defaultDirs <-
           InstallDirs.defaultInstallDirs
             compilerFlavor
-            (fromFlag (configUserInstall configFlags))
+            (fromFlagOrDefault defaultUserInstall (configUserInstall configFlags))
             (PackageDescription.hasLibs pkg)
         let templateDirs =
               InstallDirs.combineInstallDirs
@@ -316,13 +314,13 @@ symlinkBinary :: Symlink -> IO Bool
 symlinkBinary inputs@Symlink{publicBindir, privateBindir, publicName, privateName} = do
   onSymlinkBinary mkLink overwrite (return False) maybeOverwrite inputs
   where
-    relativeBindir = makeRelative publicBindir privateBindir
+    relativeBindir = makeRelative (normalise publicBindir) privateBindir
 
     mkLink :: IO Bool
     mkLink = True <$ createFileLink (relativeBindir </> privateName) (publicBindir </> publicName)
 
     rmLink :: IO Bool
-    rmLink = True <$ removeFile (publicBindir </> publicName)
+    rmLink = True <$ removeFileForcibly (publicBindir </> publicName)
 
     overwrite :: IO Bool
     overwrite = rmLink *> mkLink
@@ -335,7 +333,7 @@ symlinkBinary inputs@Symlink{publicBindir, privateBindir, publicName, privateNam
 
 promptRun :: String -> IO Bool -> IO Bool
 promptRun s m = do
-  a <- promptYesNo s MandatoryPrompt
+  a <- runPromptIO $ promptYesNo s MandatoryPrompt
   if a then m else pure a
 
 -- | Check a file path of a symlink that we would like to create to see if it
@@ -396,7 +394,7 @@ makeRelative a b =
 trySymlink :: Verbosity -> IO Bool
 trySymlink verbosity = do
   tmp <- getTemporaryDirectory
-  withTempDirectory verbosity tmp "cabal-symlink-test" $ \tmpDirPath -> do
+  withTempDirectory tmp "cabal-symlink-test" $ \tmpDirPath -> do
     let from = tmpDirPath </> "file.txt"
     let to = tmpDirPath </> "file2.txt"
 
@@ -407,7 +405,7 @@ trySymlink verbosity = do
     let create :: IO Bool
         create = do
           createFileLink from to
-          info verbosity $ "Symlinking seems to work"
+          info verbosity "Symlinking seems to work"
           return True
 
     create `catchIO` \exc -> do

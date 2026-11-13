@@ -18,14 +18,10 @@ module Distribution.Simple.Program.Builtin
   , ghcProgram
   , ghcPkgProgram
   , runghcProgram
-  , ghcjsProgram
-  , ghcjsPkgProgram
-  , hmakeProgram
   , jhcProgram
-  , haskellSuiteProgram
-  , haskellSuitePkgProgram
   , uhcProgram
   , gccProgram
+  , gppProgram
   , arProgram
   , stripProgram
   , happyProgram
@@ -36,7 +32,6 @@ module Distribution.Simple.Program.Builtin
   , hscolourProgram
   , doctestProgram
   , haddockProgram
-  , greencardProgram
   , ldProgram
   , tarProgram
   , cppProgram
@@ -56,6 +51,7 @@ import Distribution.Simple.Utils
 import Distribution.Verbosity
 import Distribution.Version
 
+import Data.Function (applyWhen)
 import qualified Data.Map as Map
 
 -- ------------------------------------------------------------
@@ -63,6 +59,9 @@ import qualified Data.Map as Map
 -- * Known programs
 
 -- ------------------------------------------------------------
+
+-- NOTE: if you modify the list of builtin programs below, also update documentation in
+-- the Cabal manual: option `--with-PROG` described in doc/setup-commands.rst
 
 -- | The default list of programs.
 -- These programs are typically used internally to Cabal.
@@ -72,11 +71,6 @@ builtinPrograms =
     ghcProgram
   , runghcProgram
   , ghcPkgProgram
-  , ghcjsProgram
-  , ghcjsPkgProgram
-  , haskellSuiteProgram
-  , haskellSuitePkgProgram
-  , hmakeProgram
   , jhcProgram
   , uhcProgram
   , hpcProgram
@@ -89,7 +83,6 @@ builtinPrograms =
   , hsc2hsProgram
   , c2hsProgram
   , cpphsProgram
-  , greencardProgram
   , -- platform toolchain
     gccProgram
   , arProgram
@@ -104,32 +97,27 @@ ghcProgram :: Program
 ghcProgram =
   (simpleProgram "ghc")
     { programFindVersion = findProgramVersion "--numeric-version" id
-    , -- Workaround for https://gitlab.haskell.org/ghc/ghc/-/issues/8825
-      -- (spurious warning on non-english locales)
-      programPostConf = \_verbosity ghcProg ->
-        do
-          let ghcProg' =
-                ghcProg
-                  { programOverrideEnv =
-                      ("LANGUAGE", Just "en")
-                        : programOverrideEnv ghcProg
-                  }
-              -- Only the 7.8 branch seems to be affected. Fixed in 7.8.4.
-              affectedVersionRange =
-                intersectVersionRanges
-                  (laterVersion $ mkVersion [7, 8, 0])
-                  (earlierVersion $ mkVersion [7, 8, 4])
-          return $
-            maybe
-              ghcProg
-              ( \v ->
-                  if withinRange v affectedVersionRange
-                    then ghcProg'
-                    else ghcProg
-              )
-              (programVersion ghcProg)
+    , programPostConf = ghcPostConf
     , programNormaliseArgs = normaliseGhcArgs
     }
+  where
+    ghcPostConf verbosity ghcProg0 = do
+      -- Record which features this GHC supports; see 'GhcFeature'.
+      ghcProg <- detectGhcFeatures verbosity ghcProg0
+
+      let ignorePackageEnv prog = prog{programDefaultArgs = "-package-env=-" : programDefaultArgs prog}
+
+          canIgnorePackageEnv = orLaterVersion $ mkVersion [8, 4, 4]
+
+      return $
+        maybe
+          ghcProg
+          ( \v ->
+              -- By default, ignore GHC_ENVIRONMENT variable of any package environment
+              -- files. See #10759
+              applyWhen (withinRange v canIgnorePackageEnv) ignorePackageEnv ghcProg
+          )
+          (programVersion ghcProg)
 
 runghcProgram :: Program
 runghcProgram =
@@ -149,35 +137,6 @@ ghcPkgProgram =
         -- "GHC package manager version 6.4.1"
         case words str of
           (_ : _ : _ : _ : ver : _) -> ver
-          _ -> ""
-    }
-
-ghcjsProgram :: Program
-ghcjsProgram =
-  (simpleProgram "ghcjs")
-    { programFindVersion = findProgramVersion "--numeric-ghcjs-version" id
-    }
-
--- note: version is the version number of the GHC version that ghcjs-pkg was built with
-ghcjsPkgProgram :: Program
-ghcjsPkgProgram =
-  (simpleProgram "ghcjs-pkg")
-    { programFindVersion = findProgramVersion "--version" $ \str ->
-        -- Invoking "ghcjs-pkg --version" gives a string like
-        -- "GHCJS package manager version 6.4.1"
-        case words str of
-          (_ : _ : _ : _ : ver : _) -> ver
-          _ -> ""
-    }
-
-hmakeProgram :: Program
-hmakeProgram =
-  (simpleProgram "hmake")
-    { programFindVersion = findProgramVersion "--version" $ \str ->
-        -- Invoking "hmake --version" gives a string line
-        -- "/usr/local/bin/hmake: 3.13 (2006-11-01)"
-        case words str of
-          (_ : ver : _) -> ver
           _ -> ""
     }
 
@@ -208,40 +167,6 @@ hpcProgram =
           _ -> ""
     }
 
--- This represents a haskell-suite compiler. Of course, the compiler
--- itself probably is not called "haskell-suite", so this is not a real
--- program. (But we don't know statically the name of the actual compiler,
--- so this is the best we can do.)
---
--- Having this Program value serves two purposes:
---
--- 1. We can accept options for the compiler in the form of
---
---   --haskell-suite-option(s)=...
---
--- 2. We can find a program later using this static id (with
--- requireProgram).
---
--- The path to the real compiler is found and recorded in the ProgramDb
--- during the configure phase.
-haskellSuiteProgram :: Program
-haskellSuiteProgram =
-  (simpleProgram "haskell-suite")
-    { -- pretend that the program exists, otherwise it won't be in the
-      -- "configured" state
-      programFindLocation = \_verbosity _searchPath ->
-        return $ Just ("haskell-suite-dummy-location", [])
-    }
-
--- This represent a haskell-suite package manager. See the comments for
--- haskellSuiteProgram.
-haskellSuitePkgProgram :: Program
-haskellSuitePkgProgram =
-  (simpleProgram "haskell-suite-pkg")
-    { programFindLocation = \_verbosity _searchPath ->
-        return $ Just ("haskell-suite-pkg-dummy-location", [])
-    }
-
 happyProgram :: Program
 happyProgram =
   (simpleProgram "happy")
@@ -270,6 +195,13 @@ gccProgram =
     { programFindVersion = findProgramVersion "-dumpversion" id
     }
 
+gppProgram :: Program
+gppProgram =
+  (simpleProgram "gpp")
+    { programFindVersion = findProgramVersion "-dumpversion" id
+    , programFindLocation = \v p -> findProgramOnSearchPath v p "g++"
+    }
+
 arProgram :: Program
 arProgram = simpleProgram "ar"
 
@@ -277,7 +209,10 @@ stripProgram :: Program
 stripProgram =
   (simpleProgram "strip")
     { programFindVersion = \verbosity ->
-        findProgramVersion "--version" stripExtractVersion (lessVerbose verbosity)
+        findProgramVersion
+          "--version"
+          stripExtractVersion
+          (modifyVerbosityFlags lessVerbose verbosity)
     }
 
 hsc2hsProgram :: Program
@@ -343,9 +278,6 @@ haddockProgram =
     , programNormaliseArgs = \_ _ args -> args
     }
 
-greencardProgram :: Program
-greencardProgram = simpleProgram "greencard"
-
 ldProgram :: Program
 ldProgram =
   (simpleProgram "ld")
@@ -400,7 +332,7 @@ tarProgram =
             -- Some versions of tar don't support '--help'.
             `catchIO` (\_ -> return "")
         let k = "Supports --format"
-            v = if ("--format" `isInfixOf` tarHelpOutput) then "YES" else "NO"
+            v = if "--format" `isInfixOf` tarHelpOutput then "YES" else "NO"
             m = Map.insert k v (programProperties tarProg)
         return $ tarProg{programProperties = m}
     }

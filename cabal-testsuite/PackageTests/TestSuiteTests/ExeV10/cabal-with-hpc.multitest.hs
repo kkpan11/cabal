@@ -8,10 +8,9 @@ import qualified Distribution.Verbosity as Verbosity
 
 import Test.Cabal.Prelude
 
-main = cabalTest $ do
-    skipIf "osx" =<< isOSX -- TODO: re-enable this once the macOS CI
-                           -- issues are resolved, see discussion in #4902.
-
+main = do
+  skipIfCIAndOSX 4902
+  cabalTest $ do
     hasShared   <- hasSharedLibraries
     hasProfiled <- hasProfiledLibraries
     hpcOk       <- correctHpcVersion
@@ -44,7 +43,7 @@ main = cabalTest $ do
 -- | Checks for a suitable HPC version for testing.
 correctHpcVersion :: TestM Bool
 correctHpcVersion = do
-    let verbosity = Verbosity.normal
+    let verbosity = Verbosity.mkVerbosity Verbosity.defaultVerbosityHandles Verbosity.normal
         verRange  = orLaterVersion (mkVersion [0,7])
     progDB <- testProgramDb `fmap` ask
     liftIO $ (requireProgramVersion verbosity hpcProgram verRange progDB

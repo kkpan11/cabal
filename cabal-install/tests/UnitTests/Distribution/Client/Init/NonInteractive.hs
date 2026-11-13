@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE LambdaCase #-}
 
 module UnitTests.Distribution.Client.Init.NonInteractive
@@ -12,7 +13,9 @@ import UnitTests.Distribution.Client.Init.Utils
 import qualified Data.List.NonEmpty as NEL
 import qualified Distribution.SPDX as SPDX
 
+#if !MIN_VERSION_base(4,20,0)
 import Data.List (foldl')
+#endif
 import qualified Data.Set as Set
 import Distribution.CabalSpecVersion
 import Distribution.Client.Init.Defaults
@@ -41,11 +44,11 @@ tests _v _initFlags comp pkgIx srcDb =
     "Distribution.Client.Init.NonInteractive.Command"
     [ testGroup
         "driver function test"
-        [ driverFunctionTest pkgIx srcDb comp
+        [ driverFunctionTest pkgIx srcDb
         ]
     , testGroup
         "target creator tests"
-        [ fileCreatorTests pkgIx srcDb comp
+        [ fileCreatorTests pkgIx srcDb
         ]
     , testGroup
         "non-interactive tests"
@@ -60,9 +63,8 @@ tests _v _initFlags comp pkgIx srcDb =
 driverFunctionTest
   :: InstalledPackageIndex
   -> SourcePackageDb
-  -> Compiler
   -> TestTree
-driverFunctionTest pkgIx srcDb comp =
+driverFunctionTest pkgIx srcDb =
   testGroup
     "createProject"
     [ testGroup
@@ -74,7 +76,7 @@ driverFunctionTest pkgIx srcDb comp =
                     , minimal = Flag False
                     , overwrite = Flag False
                     , packageDir = Flag "/home/test/test-package"
-                    , extraDoc = Flag ["CHANGELOG.md"]
+                    , extraDoc = Flag ["CHANGELOG.md", "README.md"]
                     , exposedModules = Flag []
                     , otherModules = Flag []
                     , otherExts = Flag []
@@ -90,7 +92,7 @@ driverFunctionTest pkgIx srcDb comp =
                     , "[\"quxTest/Main.hs\"]"
                     ]
 
-            case (_runPrompt $ createProject comp silent pkgIx srcDb dummyFlags') inputs of
+            case (runPrompt $ createProject (mkVerbosity defaultVerbosityHandles silent) pkgIx srcDb dummyFlags') inputs of
               Right (ProjectSettings opts desc (Just lib) (Just exe) (Just test), _) -> do
                 _optOverwrite opts @?= False
                 _optMinimal opts @?= False
@@ -110,7 +112,7 @@ driverFunctionTest pkgIx srcDb comp =
                 _pkgSynopsis desc @?= "We are Qux, and this is our package"
                 _pkgCategory desc @?= "Control"
                 _pkgExtraSrcFiles desc @?= mempty
-                _pkgExtraDocFiles desc @?= pure (Set.singleton "CHANGELOG.md")
+                _pkgExtraDocFiles desc @?= pure (Set.fromList ["CHANGELOG.md", "README.md"])
 
                 _libSourceDirs lib @?= ["quxSrc"]
                 _libLanguage lib @?= Haskell98
@@ -165,7 +167,7 @@ driverFunctionTest pkgIx srcDb comp =
                     [ "Foobar"
                     , "foobar@qux.com"
                     , -- extra sources
-                      "[\"CHANGELOG.md\"]"
+                      "[\"CHANGELOG.md\", \"README.md\"]"
                     , -- lib other modules
                       "False"
                     , -- exe other modules
@@ -177,7 +179,7 @@ driverFunctionTest pkgIx srcDb comp =
                       "False"
                     ]
 
-            case (_runPrompt $ createProject comp silent pkgIx srcDb dummyFlags') inputs of
+            case (runPrompt $ createProject (mkVerbosity defaultVerbosityHandles silent) pkgIx srcDb dummyFlags') inputs of
               Right (ProjectSettings opts desc (Just lib) (Just exe) (Just test), _) -> do
                 _optOverwrite opts @?= False
                 _optMinimal opts @?= False
@@ -197,7 +199,7 @@ driverFunctionTest pkgIx srcDb comp =
                 _pkgSynopsis desc @?= "We are Qux, and this is our package"
                 _pkgCategory desc @?= "Control"
                 _pkgExtraSrcFiles desc @?= mempty
-                _pkgExtraDocFiles desc @?= pure (Set.singleton "CHANGELOG.md")
+                _pkgExtraDocFiles desc @?= pure (Set.fromList ["CHANGELOG.md", "README.md"])
 
                 _libSourceDirs lib @?= ["quxSrc"]
                 _libLanguage lib @?= Haskell98
@@ -353,10 +355,9 @@ driverFunctionTest pkgIx srcDb comp =
                     , "[\"test/Main.hs\", \"test/Foo.hs\", \"test/bar.y\"]"
                     ]
 
-            case ( _runPrompt $
+            case ( runPrompt $
                     createProject
-                      comp
-                      silent
+                      (mkVerbosity defaultVerbosityHandles silent)
                       pkgIx
                       srcDb
                       ( emptyFlags
@@ -385,12 +386,12 @@ driverFunctionTest pkgIx srcDb comp =
                 _pkgSynopsis desc @?= ""
                 _pkgCategory desc @?= ""
                 _pkgExtraSrcFiles desc @?= mempty
-                _pkgExtraDocFiles desc @?= pure (Set.singleton "CHANGELOG.md")
+                _pkgExtraDocFiles desc @?= pure (Set.fromList ["CHANGELOG.md", "README.md"])
 
                 _libSourceDirs lib @?= ["src"]
                 _libLanguage lib @?= Haskell2010
                 _libExposedModules lib @?= NEL.fromList (map fromString ["Foo", "Bar"])
-                _libOtherModules lib @?= map fromString ["Baz.Internal"]
+                _libOtherModules lib @?= [fromString "Baz.Internal"]
                 _libOtherExts lib @?= map EnableExtension [OverloadedStrings, LambdaCase, RankNTypes, RecordWildCards]
                 _libDependencies lib @?! []
                 _libBuildTools lib @?= [mkStringyDep "happy:happy"]
@@ -505,10 +506,9 @@ driverFunctionTest pkgIx srcDb comp =
                     , "[\"test/Main.hs\", \"test/Foo.hs\", \"test/bar.y\"]"
                     ]
 
-            case ( _runPrompt $
+            case ( runPrompt $
                     createProject
-                      comp
-                      silent
+                      (mkVerbosity defaultVerbosityHandles silent)
                       pkgIx
                       srcDb
                       ( emptyFlags
@@ -537,12 +537,12 @@ driverFunctionTest pkgIx srcDb comp =
                 _pkgSynopsis desc @?= ""
                 _pkgCategory desc @?= ""
                 _pkgExtraSrcFiles desc @?= mempty
-                _pkgExtraDocFiles desc @?= pure (Set.singleton "CHANGELOG.md")
+                _pkgExtraDocFiles desc @?= pure (Set.fromList ["CHANGELOG.md", "README.md"])
 
                 _libSourceDirs lib @?= ["src"]
                 _libLanguage lib @?= Haskell2010
                 _libExposedModules lib @?= NEL.fromList (map fromString ["Foo", "Bar"])
-                _libOtherModules lib @?= map fromString ["Baz.Internal"]
+                _libOtherModules lib @?= [fromString "Baz.Internal"]
                 _libOtherExts lib @?= map EnableExtension [OverloadedStrings, LambdaCase, RankNTypes, RecordWildCards]
                 _libDependencies lib @?! []
                 _libBuildTools lib @?= [mkStringyDep "happy:happy"]
@@ -661,7 +661,7 @@ driverFunctionTest pkgIx srcDb comp =
                     , "[\"app/Main.hs\", \"src/Foo.hs\", \"src/bar.y\"]"
                     ]
 
-            case (_runPrompt $ createProject comp silent pkgIx srcDb emptyFlags) inputs of
+            case (runPrompt $ createProject (mkVerbosity defaultVerbosityHandles silent) pkgIx srcDb emptyFlags) inputs of
               Right (ProjectSettings opts desc (Just lib) (Just exe) Nothing, _) -> do
                 _optOverwrite opts @?= False
                 _optMinimal opts @?= False
@@ -681,12 +681,12 @@ driverFunctionTest pkgIx srcDb comp =
                 _pkgSynopsis desc @?= ""
                 _pkgCategory desc @?= ""
                 _pkgExtraSrcFiles desc @?= mempty
-                _pkgExtraDocFiles desc @?= pure (Set.singleton "CHANGELOG.md")
+                _pkgExtraDocFiles desc @?= pure (Set.fromList ["CHANGELOG.md", "README.md"])
 
                 _libSourceDirs lib @?= ["src"]
                 _libLanguage lib @?= Haskell2010
                 _libExposedModules lib @?= NEL.fromList (map fromString ["Foo", "Bar"])
-                _libOtherModules lib @?= map fromString ["Baz.Internal"]
+                _libOtherModules lib @?= [fromString "Baz.Internal"]
                 _libOtherExts lib @?= map EnableExtension [OverloadedStrings, LambdaCase, RankNTypes, RecordWildCards]
                 _libDependencies lib @?! []
                 _libBuildTools lib @?= [mkStringyDep "happy:happy"]
@@ -771,7 +771,7 @@ driverFunctionTest pkgIx srcDb comp =
                     , "[\"app/Main.hs\", \"src/Foo.hs\", \"src/bar.y\"]"
                     ]
 
-            case (_runPrompt $ createProject comp silent pkgIx srcDb emptyFlags) inputs of
+            case (runPrompt $ createProject (mkVerbosity defaultVerbosityHandles silent) pkgIx srcDb emptyFlags) inputs of
               Right (ProjectSettings opts desc (Just lib) Nothing Nothing, _) -> do
                 _optOverwrite opts @?= False
                 _optMinimal opts @?= False
@@ -791,12 +791,12 @@ driverFunctionTest pkgIx srcDb comp =
                 _pkgSynopsis desc @?= ""
                 _pkgCategory desc @?= ""
                 _pkgExtraSrcFiles desc @?= mempty
-                _pkgExtraDocFiles desc @?= pure (Set.singleton "CHANGELOG.md")
+                _pkgExtraDocFiles desc @?= pure (Set.fromList ["CHANGELOG.md", "README.md"])
 
                 _libSourceDirs lib @?= ["src"]
                 _libLanguage lib @?= Haskell2010
                 _libExposedModules lib @?= NEL.fromList (map fromString ["Foo", "Bar"])
-                _libOtherModules lib @?= map fromString ["Baz.Internal"]
+                _libOtherModules lib @?= [fromString "Baz.Internal"]
                 _libOtherExts lib @?= map EnableExtension [OverloadedStrings, LambdaCase, RankNTypes, RecordWildCards]
                 _libDependencies lib @?! []
                 _libBuildTools lib @?= [mkStringyDep "happy:happy"]
@@ -862,7 +862,7 @@ driverFunctionTest pkgIx srcDb comp =
                     , "[\"app/Main.hs\", \"src/Foo.hs\", \"src/bar.y\"]"
                     ]
 
-            case (_runPrompt $ createProject comp silent pkgIx srcDb emptyFlags) inputs of
+            case (runPrompt $ createProject (mkVerbosity defaultVerbosityHandles silent) pkgIx srcDb emptyFlags) inputs of
               Right (ProjectSettings opts desc Nothing (Just exe) Nothing, _) -> do
                 _optOverwrite opts @?= False
                 _optMinimal opts @?= False
@@ -882,7 +882,7 @@ driverFunctionTest pkgIx srcDb comp =
                 _pkgSynopsis desc @?= ""
                 _pkgCategory desc @?= ""
                 _pkgExtraSrcFiles desc @?= mempty
-                _pkgExtraDocFiles desc @?= pure (Set.singleton "CHANGELOG.md")
+                _pkgExtraDocFiles desc @?= pure (Set.fromList ["CHANGELOG.md", "README.md"])
 
                 _exeMainIs exe @?= HsFilePath "Main.hs" Standard
                 _exeApplicationDirs exe @?= ["app"]
@@ -902,9 +902,8 @@ driverFunctionTest pkgIx srcDb comp =
 fileCreatorTests
   :: InstalledPackageIndex
   -> SourcePackageDb
-  -> Compiler
   -> TestTree
-fileCreatorTests pkgIx srcDb comp =
+fileCreatorTests pkgIx srcDb =
   testGroup
     "generators"
     [ testGroup
@@ -928,7 +927,7 @@ fileCreatorTests pkgIx srcDb comp =
                     , "[]"
                     ]
 
-            case (_runPrompt $ genPkgDescription emptyFlags srcDb) inputs of
+            case (runPrompt $ genPkgDescription emptyFlags srcDb) inputs of
               Left e -> assertFailure $ show e
               Right{} -> return ()
         ]
@@ -977,7 +976,7 @@ fileCreatorTests pkgIx srcDb comp =
                     , "[\"app/Main.hs\", \"src/Foo.hs\", \"src/bar.y\"]"
                     ]
 
-            case (_runPrompt $ genLibTarget emptyFlags comp pkgIx defaultCabalVersion) inputs of
+            case (runPrompt $ genLibTarget emptyFlags pkgIx defaultCabalVersion) inputs of
               Left e -> assertFailure $ show e
               Right{} -> return ()
         ]
@@ -1018,7 +1017,7 @@ fileCreatorTests pkgIx srcDb comp =
                     , "[\"app/Main.hs\", \"src/Foo.hs\", \"src/bar.y\"]"
                     ]
 
-            case (_runPrompt $ genExeTarget emptyFlags comp pkgIx defaultCabalVersion) inputs of
+            case (runPrompt $ genExeTarget emptyFlags pkgIx defaultCabalVersion) inputs of
               Left e -> assertFailure $ show e
               Right{} -> return ()
         ]
@@ -1055,7 +1054,7 @@ fileCreatorTests pkgIx srcDb comp =
                     ]
                 flags = emptyFlags{initializeTestSuite = Flag True}
 
-            case (_runPrompt $ genTestTarget flags comp pkgIx defaultCabalVersion) inputs of
+            case (runPrompt $ genTestTarget flags pkgIx defaultCabalVersion) inputs of
               Left e -> assertFailure $ show e
               Right{} -> return ()
         ]
@@ -1165,38 +1164,20 @@ nonInteractiveTests pkgIx srcDb comp =
                 ["cabal-install version 2.4.0.0\ncompiled using version 2.4.0.0 of the Cabal library \n"]
             ]
         , testGroup
-            "Check languageHeuristics output"
-            [ testSimple
-                "Non GHC compiler"
-                (`languageHeuristics` (comp{compilerId = CompilerId Helium $ mkVersion [1, 8, 1]}))
-                Haskell2010
-                []
-            , testSimple
-                "Higher version compiler"
-                (`languageHeuristics` (comp{compilerId = CompilerId GHC $ mkVersion [8, 10, 4]}))
-                Haskell2010
-                []
-            , testSimple
-                "Lower version compiler"
-                (`languageHeuristics` (comp{compilerId = CompilerId GHC $ mkVersion [6, 0, 1]}))
-                Haskell98
-                []
-            ]
-        , testGroup
             "Check extraDocFileHeuristics output"
             [ testSimple
                 "No extra sources"
                 extraDocFileHeuristics
-                (pure (Set.singleton "CHANGELOG.md"))
+                (pure (Set.fromList ["CHANGELOG.md", "README.md"]))
                 [ "test-package"
                 , "[]"
                 ]
             , testSimple
                 "Extra doc files present"
                 extraDocFileHeuristics
-                (pure $ Set.singleton "README.md")
+                (pure $ Set.fromList ["CHANGELOG.md", "README.md"])
                 [ "test-package"
-                , "[\"README.md\"]"
+                , "[\"CHANGELOG.md\", \"README.md\"]"
                 ]
             ]
         , testGroup
@@ -1265,7 +1246,7 @@ nonInteractiveTests pkgIx srcDb comp =
             [ testSimple
                 "Library directory exists"
                 libOtherModulesHeuristics
-                (map fromString ["Baz.Internal"])
+                [fromString "Baz.Internal"]
                 [ "test-package"
                 , "True"
                 , "[\"src/Foo.hs\", \"src/Bar.hs\", \"src/Baz/Internal.hs\"]"
@@ -1391,16 +1372,14 @@ testBool label f target input =
   testSimple label f target [input]
 
 testGo
-  :: Eq a
-  => Show a
-  => String
+  :: String
   -> (InitFlags -> PurePrompt a)
   -> (BreakException -> Assertion)
   -> ((a, NEL.NonEmpty String) -> Assertion)
   -> [String]
   -> TestTree
 testGo label f g h inputs = testCase label $
-  case (_runPrompt $ f emptyFlags) (NEL.fromList inputs) of
+  case (runPrompt $ f emptyFlags) (NEL.fromList inputs) of
     Left x -> g x
     Right x -> h x
 
@@ -1424,7 +1403,7 @@ cliListParserTests =
         flags <- runParserTest ["--extra-doc-file", "README"]
         flags
           @?= emptyFlags
-            { extraDoc = Flag $ ["README"]
+            { extraDoc = Flag ["README"]
             }
     , testCase "Multiple extraDoc" $ do
         flags <-
@@ -1444,7 +1423,7 @@ cliListParserTests =
         flags <- runParserTest ["-o", "Test"]
         flags
           @?= emptyFlags
-            { exposedModules = Flag $ map fromString ["Test"]
+            { exposedModules = Flag [fromString "Test"]
             }
     , testCase "Multiple exposedModules" $ do
         flags <- runParserTest ["-o", "Test", "-o", "Test2", "-o", "Test3"]

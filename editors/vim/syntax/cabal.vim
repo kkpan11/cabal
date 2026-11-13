@@ -65,6 +65,7 @@ syn keyword cabalFieldName contained
   \ cmm-options
   \ cmm-sources
   \ copyright
+  \ jspp-options
   \ cpp-options
   \ cxx-options
   \ cxx-sources
@@ -80,6 +81,7 @@ syn keyword cabalFieldName contained
   \ extra-bundled-libraries
   \ extra-doc-files
   \ extra-dynamic-library-flavours
+  \ extra-files
   \ extra-framework-dirs
   \ extra-ghci-libraries
   \ extra-lib-dirs
@@ -160,8 +162,8 @@ syn keyword cabalExtension contained
   \ ConstraintKinds
   \ DataKinds
   \ DatatypeContexts
-  \ DefaultSignatures
   \ DeepSubsumption
+  \ DefaultSignatures
   \ DeriveAnyClass
   \ DeriveDataTypeable
   \ DeriveFoldable
@@ -180,6 +182,7 @@ syn keyword cabalExtension contained
   \ EmptyDataDeriving
   \ ExistentialQuantification
   \ ExplicitForAll
+  \ ExplicitLevelImports
   \ ExplicitNamespaces
   \ ExtendedDefaultRules
   \ ExtendedLiterals
@@ -199,6 +202,7 @@ syn keyword cabalExtension contained
   \ HexFloatLiterals
   \ ImplicitParams
   \ ImplicitPrelude
+  \ ImplicitStagePersistence
   \ ImportQualifiedPost
   \ ImpredicativeTypes
   \ IncoherentInstances
@@ -211,8 +215,8 @@ syn keyword cabalExtension contained
   \ LiberalTypeSynonyms
   \ LinearTypes
   \ ListTuplePuns
-  \ RequiredTypeArguments
   \ MagicHash
+  \ Modifiers
   \ MonadComprehensions
   \ MonadFailDesugaring
   \ MonoLocalBinds
@@ -220,7 +224,9 @@ syn keyword cabalExtension contained
   \ MonomorphismRestriction
   \ MultiParamTypeClasses
   \ MultiWayIf
+  \ MultilineStrings
   \ NPlusKPatterns
+  \ NamedDefaults
   \ NamedFieldPuns
   \ NamedWildCards
   \ NegativeLiterals
@@ -229,6 +235,7 @@ syn keyword cabalExtension contained
   \ NullaryTypeClasses
   \ NumDecimals
   \ NumericUnderscores
+  \ OrPatterns
   \ OverlappingInstances
   \ OverloadedLabels
   \ OverloadedLists
@@ -245,6 +252,7 @@ syn keyword cabalExtension contained
   \ PolymorphicComponents
   \ PostfixOperators
   \ QualifiedDo
+  \ QualifiedStrings
   \ QuantifiedConstraints
   \ QuasiQuotes
   \ Rank2Types
@@ -255,6 +263,7 @@ syn keyword cabalExtension contained
   \ RecursiveDo
   \ RegularPatterns
   \ RelaxedPolyRec
+  \ RequiredTypeArguments
   \ RestrictedTypeSynonyms
   \ RoleAnnotations
   \ SafeImports
@@ -302,8 +311,8 @@ syn keyword cabalExtension contained
   \ NoConstraintKinds
   \ NoDataKinds
   \ NoDatatypeContexts
-  \ NoDefaultSignatures
   \ NoDeepSubsumption
+  \ NoDefaultSignatures
   \ NoDeriveAnyClass
   \ NoDeriveDataTypeable
   \ NoDeriveFoldable
@@ -322,6 +331,7 @@ syn keyword cabalExtension contained
   \ NoEmptyDataDeriving
   \ NoExistentialQuantification
   \ NoExplicitForAll
+  \ NoExplicitLevelImports
   \ NoExplicitNamespaces
   \ NoExtendedDefaultRules
   \ NoExtendedLiterals
@@ -341,6 +351,7 @@ syn keyword cabalExtension contained
   \ NoHexFloatLiterals
   \ NoImplicitParams
   \ NoImplicitPrelude
+  \ NoImplicitStagePersistence
   \ NoImportQualifiedPost
   \ NoImpredicativeTypes
   \ NoIncoherentInstances
@@ -352,8 +363,8 @@ syn keyword cabalExtension contained
   \ NoLexicalNegation
   \ NoLiberalTypeSynonyms
   \ NoLinearTypes
-  \ NoRequiredTypeArguments
   \ NoMagicHash
+  \ NoModifiers
   \ NoMonadComprehensions
   \ NoMonadFailDesugaring
   \ NoMonoLocalBinds
@@ -361,7 +372,9 @@ syn keyword cabalExtension contained
   \ NoMonomorphismRestriction
   \ NoMultiParamTypeClasses
   \ NoMultiWayIf
+  \ NoMultilineStrings
   \ NoNPlusKPatterns
+  \ NoNamedDefaults
   \ NoNamedFieldPuns
   \ NoNamedWildCards
   \ NoNegativeLiterals
@@ -370,6 +383,7 @@ syn keyword cabalExtension contained
   \ NoNullaryTypeClasses
   \ NoNumDecimals
   \ NoNumericUnderscores
+  \ NoOrPatterns
   \ NoOverlappingInstances
   \ NoOverloadedLabels
   \ NoOverloadedLists
@@ -386,6 +400,7 @@ syn keyword cabalExtension contained
   \ NoPolymorphicComponents
   \ NoPostfixOperators
   \ NoQualifiedDo
+  \ NoQualifiedStrings
   \ NoQuantifiedConstraints
   \ NoQuasiQuotes
   \ NoRank2Types
@@ -396,6 +411,7 @@ syn keyword cabalExtension contained
   \ NoRecursiveDo
   \ NoRegularPatterns
   \ NoRelaxedPolyRec
+  \ NoRequiredTypeArguments
   \ NoRestrictedTypeSynonyms
   \ NoRoleAnnotations
   \ NoSafeImports

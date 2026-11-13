@@ -1,7 +1,4 @@
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE RankNTypes #-}
-
------------------------------------------------------------------------------
+{-# LANGUAGE DataKinds #-}
 
 -- |
 -- Module      :  Distribution.Simple.Register
@@ -28,7 +25,9 @@
 -- generation and the unregister feature are not well used or tested.
 module Distribution.Simple.Register
   ( register
+  , registerWithHandles
   , unregister
+  , unregisterWithHandles
   , internalPackageDBPath
   , initPackageDB
   , doesPackageDBExist
@@ -57,8 +56,6 @@ import Distribution.Simple.BuildTarget
 import Distribution.Simple.LocalBuildInfo
 
 import qualified Distribution.Simple.GHC as GHC
-import qualified Distribution.Simple.GHCJS as GHCJS
-import qualified Distribution.Simple.HaskellSuite as HaskellSuite
 import qualified Distribution.Simple.PackageIndex as Index
 import qualified Distribution.Simple.UHC as UHC
 
@@ -76,16 +73,20 @@ import Distribution.Simple.Flag
 import Distribution.Simple.Program
 import qualified Distribution.Simple.Program.HcPkg as HcPkg
 import Distribution.Simple.Program.Script
+import Distribution.Simple.Setup.Common
+import Distribution.Simple.Setup.Haddock (HaddockTarget (ForDevelopment))
 import Distribution.Simple.Setup.Register
 import Distribution.Simple.Utils
 import Distribution.System
-import Distribution.Utils.MapAccum
+import Distribution.Utils.Path
 import Distribution.Verbosity as Verbosity
 import Distribution.Version
 import System.Directory
-import System.FilePath (isAbsolute, (<.>), (</>))
+import System.FilePath (isAbsolute)
 
 import qualified Data.ByteString.Lazy.Char8 as BS.Char8
+import qualified Data.Text as T
+import Data.Traversable (mapAccumM)
 
 -- -----------------------------------------------------------------------------
 -- Registration
@@ -96,45 +97,51 @@ register
   -> RegisterFlags
   -- ^ Install in the user's database?; verbose
   -> IO ()
-register pkg_descr lbi0 flags =
+register = registerWithHandles defaultVerbosityHandles
+
+registerWithHandles
+  :: VerbosityHandles
+  -> PackageDescription
+  -> LocalBuildInfo
+  -> RegisterFlags
+  -- ^ Install in the user's database?; verbose
+  -> IO ()
+registerWithHandles verbHandles pkg_descr lbi0 flags = do
   -- Duncan originally asked for us to not register/install files
   -- when there was no public library.  But with per-component
   -- configure, we legitimately need to install internal libraries
   -- so that we can get them.  So just unconditionally install.
-  doRegister
-  where
-    doRegister = do
-      targets <- readTargetInfos verbosity pkg_descr lbi0 (regArgs flags)
+  let verbosity = mkVerbosity verbHandles (fromFlag $ registerVerbosity flags)
+  targets <- readTargetInfos verbosity pkg_descr lbi0 $ registerTargets flags
 
-      -- It's important to register in build order, because ghc-pkg
-      -- will complain if a dependency is not registered.
-      let componentsToRegister =
-            neededTargetsInBuildOrder' pkg_descr lbi0 (map nodeKey targets)
+  -- It's important to register in build order, because ghc-pkg
+  -- will complain if a dependency is not registered.
+  let componentsToRegister =
+        neededTargetsInBuildOrder' pkg_descr lbi0 (map nodeKey targets)
 
-      (_, ipi_mbs) <-
-        mapAccumM `flip` installedPkgs lbi0 `flip` componentsToRegister $ \index tgt ->
-          case targetComponent tgt of
-            CLib lib -> do
-              let clbi = targetCLBI tgt
-                  lbi = lbi0{installedPkgs = index}
-              ipi <- generateOne pkg_descr lib lbi clbi flags
-              return (Index.insert ipi index, Just ipi)
-            _ -> return (index, Nothing)
+  (_, ipi_mbs) <-
+    mapAccumM `flip` installedPkgs lbi0 `flip` componentsToRegister $ \index tgt ->
+      case targetComponent tgt of
+        CLib lib -> do
+          let clbi = targetCLBI tgt
+              lbi = lbi0{installedPkgs = index}
+          ipi <- generateOne verbHandles pkg_descr lib lbi clbi flags
+          return (Index.insert ipi index, Just ipi)
+        _ -> return (index, Nothing)
 
-      registerAll pkg_descr lbi0 flags (catMaybes ipi_mbs)
-      where
-        verbosity = fromFlag (regVerbosity flags)
+  registerAll verbHandles pkg_descr lbi0 flags (catMaybes ipi_mbs)
 
 generateOne
-  :: PackageDescription
+  :: VerbosityHandles
+  -> PackageDescription
   -> Library
   -> LocalBuildInfo
   -> ComponentLocalBuildInfo
   -> RegisterFlags
   -> IO InstalledPackageInfo
-generateOne pkg lib lbi clbi regFlags =
+generateOne verbHandles pkg lib lbi clbi regFlags =
   do
-    absPackageDBs <- absolutePackageDBPaths packageDbs
+    absPackageDBs <- absolutePackageDBPaths mbWorkDir packageDbs
     installedPkgInfo <-
       generateRegistrationInfo
         verbosity
@@ -149,34 +156,38 @@ generateOne pkg lib lbi clbi regFlags =
     info verbosity (IPI.showInstalledPackageInfo installedPkgInfo)
     return installedPkgInfo
   where
+    common = registerCommonFlags regFlags
     inplace = fromFlag (regInPlace regFlags)
     reloc = relocatable lbi
     -- FIXME: there's really no guarantee this will work.
     -- registering into a totally different db stack can
     -- fail if dependencies cannot be satisfied.
     packageDbs =
-      nub $
+      ordNub $
         withPackageDB lbi
           ++ maybeToList (flagToMaybe (regPackageDB regFlags))
-    distPref = fromFlag (regDistPref regFlags)
-    verbosity = fromFlag (regVerbosity regFlags)
+    distPref = fromFlag $ setupDistPref common
+    verbosity = mkVerbosity verbHandles (fromFlag $ setupVerbosity common)
+    mbWorkDir = flagToMaybe $ setupWorkingDir common
 
 registerAll
-  :: PackageDescription
+  :: VerbosityHandles
+  -> PackageDescription
   -> LocalBuildInfo
   -> RegisterFlags
   -> [InstalledPackageInfo]
   -> IO ()
-registerAll pkg lbi regFlags ipis =
+registerAll verbHandles pkg lbi regFlags ipis =
   do
-    when (fromFlag (regPrintId regFlags)) $ do
+    when (Just True == flagToMaybe (regPrintId regFlags)) $ do
       for_ ipis $ \installedPkgInfo ->
         -- Only print the public library's IPI
         when
           ( packageId installedPkgInfo == packageId pkg
               && IPI.sourceLibName installedPkgInfo == LMainLibName
           )
-          $ putStrLn (prettyShow (IPI.installedUnitId installedPkgInfo))
+          $ notice verbosity
+          $ prettyShow (IPI.installedUnitId installedPkgInfo)
 
     -- Three different modes:
     case () of
@@ -195,15 +206,17 @@ registerAll pkg lbi regFlags ipis =
                 verbosity
                 (compiler lbi)
                 (withPrograms lbi)
+                (mbWorkDirLBI lbi)
                 packageDbs
                 ipi
                 HcPkg.defaultRegisterOptions
   where
     modeGenerateRegFile = isJust (flagToMaybe (regGenPkgConf regFlags))
     regFile =
-      fromMaybe
-        (prettyShow (packageId pkg) <.> "conf")
-        (fromFlag (regGenPkgConf regFlags))
+      interpretSymbolicPathLBI lbi $
+        fromMaybe
+          (makeSymbolicPath (prettyShow (packageId pkg) <.> "conf"))
+          (fromFlag (regGenPkgConf regFlags))
 
     modeGenerateRegScript = fromFlag (regGenScript regFlags)
 
@@ -211,10 +224,12 @@ registerAll pkg lbi regFlags ipis =
     -- registering into a totally different db stack can
     -- fail if dependencies cannot be satisfied.
     packageDbs =
-      nub $
+      ordNub $
         withPackageDB lbi
           ++ maybeToList (flagToMaybe (regPackageDB regFlags))
-    verbosity = fromFlag (regVerbosity regFlags)
+    common = registerCommonFlags regFlags
+    verbosity = mkVerbosity verbHandles (fromFlag (setupVerbosity common))
+    mbWorkDir = mbWorkDirLBI lbi
 
     writeRegistrationFileOrDirectory = do
       -- Handles overwriting both directory and file
@@ -245,7 +260,7 @@ registerAll pkg lbi regFlags ipis =
             "Registration scripts are not implemented for this compiler"
             (compiler lbi)
             (withPrograms lbi)
-            (writeHcPkgRegisterScript verbosity ipis packageDbs)
+            (writeHcPkgRegisterScript verbosity mbWorkDir ipis packageDbs)
 
 generateRegistrationInfo
   :: Verbosity
@@ -255,13 +270,11 @@ generateRegistrationInfo
   -> ComponentLocalBuildInfo
   -> Bool
   -> Bool
-  -> FilePath
+  -> SymbolicPath Pkg (Dir Dist)
   -> PackageDB
   -> IO InstalledPackageInfo
 generateRegistrationInfo verbosity pkg lib lbi clbi inplace reloc distPref packageDb = do
-  -- TODO: eliminate pwd!
-  pwd <- getCurrentDirectory
-
+  inplaceDir <- absoluteWorkingDirLBI lbi
   installedPkgInfo <-
     if inplace
       then -- NB: With an inplace installation, the user may run './Setup
@@ -270,7 +283,8 @@ generateRegistrationInfo verbosity pkg lib lbi clbi inplace reloc distPref packa
 
         return
           ( inplaceInstalledPackageInfo
-              pwd
+              ForDevelopment
+              inplaceDir
               distPref
               pkg
               (mkAbiHash "inplace")
@@ -306,17 +320,14 @@ generateRegistrationInfo verbosity pkg lib lbi clbi inplace reloc distPref packa
 abiHash
   :: Verbosity
   -> PackageDescription
-  -> FilePath
+  -> SymbolicPath Pkg (Dir Dist)
   -> LocalBuildInfo
   -> Library
   -> ComponentLocalBuildInfo
   -> IO AbiHash
 abiHash verbosity pkg distPref lbi lib clbi =
   case compilerFlavor comp of
-    GHC -> do
-      fmap mkAbiHash $ GHC.libAbiHash verbosity pkg lbi' lib clbi
-    GHCJS -> do
-      fmap mkAbiHash $ GHCJS.libAbiHash verbosity pkg lbi' lib clbi
+    GHC -> mkAbiHash <$> GHC.libAbiHash verbosity pkg lbi' lib clbi
     _ -> return (mkAbiHash "")
   where
     comp = compiler lbi
@@ -337,7 +348,7 @@ relocRegistrationInfo
   -> PackageDB
   -> IO InstalledPackageInfo
 relocRegistrationInfo verbosity pkg lib lbi clbi abi_hash packageDb =
-  case (compilerFlavor (compiler lbi)) of
+  case compilerFlavor (compiler lbi) of
     GHC -> do
       fs <- GHC.pkgRoot verbosity lbi packageDb
       return
@@ -353,22 +364,19 @@ relocRegistrationInfo verbosity pkg lib lbi clbi abi_hash packageDb =
 
 initPackageDB :: Verbosity -> Compiler -> ProgramDb -> FilePath -> IO ()
 initPackageDB verbosity comp progdb dbPath =
-  createPackageDB verbosity comp progdb False dbPath
+  createPackageDB verbosity comp progdb dbPath
 
 -- | Create an empty package DB at the specified location.
 createPackageDB
   :: Verbosity
   -> Compiler
   -> ProgramDb
-  -> Bool
   -> FilePath
   -> IO ()
-createPackageDB verbosity comp progdb preferCompat dbPath =
+createPackageDB verbosity comp progdb dbPath =
   case compilerFlavor comp of
-    GHC -> HcPkg.init (GHC.hcPkgInfo progdb) verbosity preferCompat dbPath
-    GHCJS -> HcPkg.init (GHCJS.hcPkgInfo progdb) verbosity False dbPath
+    GHC -> HcPkg.init (GHC.hcPkgInfo progdb) verbosity dbPath
     UHC -> return ()
-    HaskellSuite _ -> HaskellSuite.initPackageDB verbosity progdb dbPath
     _ -> dieWithException verbosity CreatePackageDB
 
 doesPackageDBExist :: FilePath -> IO Bool
@@ -380,14 +388,9 @@ doesPackageDBExist dbPath = do
     else doesFileExist dbPath
 
 deletePackageDB :: FilePath -> IO ()
-deletePackageDB dbPath = do
+deletePackageDB =
   -- currently one impl for all compiler flavours, but could change if needed
-  dir_exists <- doesDirectoryExist dbPath
-  if dir_exists
-    then removeDirectoryRecursive dbPath
-    else do
-      file_exists <- doesFileExist dbPath
-      when file_exists $ removeFile dbPath
+  removePathForcibly
 
 -- | Run @hc-pkg@ using a given package DB stack, directly forwarding the
 -- provided command-line arguments to it.
@@ -395,62 +398,62 @@ invokeHcPkg
   :: Verbosity
   -> Compiler
   -> ProgramDb
+  -> Maybe (SymbolicPath CWD (Dir Pkg))
   -> PackageDBStack
   -> [String]
   -> IO ()
-invokeHcPkg verbosity comp progdb dbStack extraArgs =
+invokeHcPkg verbosity comp progdb mbWorkDir dbStack extraArgs =
   withHcPkg
     verbosity
     "invokeHcPkg"
     comp
     progdb
-    (\hpi -> HcPkg.invoke hpi verbosity dbStack extraArgs)
+    (\hpi -> HcPkg.invoke hpi verbosity mbWorkDir dbStack extraArgs)
 
 withHcPkg
   :: Verbosity
   -> String
   -> Compiler
   -> ProgramDb
-  -> (HcPkg.HcPkgInfo -> IO a)
+  -> (HcPkg.ConfiguredProgram -> IO a)
   -> IO a
 withHcPkg verbosity name comp progdb f =
   case compilerFlavor comp of
     GHC -> f (GHC.hcPkgInfo progdb)
-    GHCJS -> f (GHCJS.hcPkgInfo progdb)
     _ -> dieWithException verbosity $ WithHcPkg name
 
 registerPackage
   :: Verbosity
   -> Compiler
   -> ProgramDb
-  -> PackageDBStack
+  -> Maybe (SymbolicPath CWD (Dir from))
+  -> PackageDBStackS from
   -> InstalledPackageInfo
   -> HcPkg.RegisterOptions
   -> IO ()
-registerPackage verbosity comp progdb packageDbs installedPkgInfo registerOptions =
+registerPackage verbosity comp progdb mbWorkDir packageDbs installedPkgInfo registerOptions =
   case compilerFlavor comp of
-    GHC -> GHC.registerPackage verbosity progdb packageDbs installedPkgInfo registerOptions
-    GHCJS -> GHCJS.registerPackage verbosity progdb packageDbs installedPkgInfo registerOptions
-    HaskellSuite{} ->
-      HaskellSuite.registerPackage verbosity progdb packageDbs installedPkgInfo
+    GHC -> GHC.registerPackage verbosity progdb mbWorkDir packageDbs installedPkgInfo registerOptions
     _
       | HcPkg.registerMultiInstance registerOptions ->
           dieWithException verbosity RegisMultiplePkgNotSupported
-    UHC -> UHC.registerPackage verbosity comp progdb packageDbs installedPkgInfo
+    UHC -> UHC.registerPackage verbosity mbWorkDir comp progdb packageDbs installedPkgInfo
     _ -> dieWithException verbosity RegisteringNotImplemented
 
 writeHcPkgRegisterScript
   :: Verbosity
+  -> Maybe (SymbolicPath CWD (Dir Pkg))
   -> [InstalledPackageInfo]
   -> PackageDBStack
-  -> HcPkg.HcPkgInfo
+  -> HcPkg.ConfiguredProgram
   -> IO ()
-writeHcPkgRegisterScript verbosity ipis packageDbs hpi = do
+writeHcPkgRegisterScript verbosity mbWorkDir ipis packageDbs hpi = do
   let genScript installedPkgInfo =
         let invocation =
               HcPkg.registerInvocation
                 hpi
-                Verbosity.normal
+                Verbosity.Normal
+                mbWorkDir
                 packageDbs
                 installedPkgInfo
                 HcPkg.defaultRegisterOptions
@@ -459,14 +462,15 @@ writeHcPkgRegisterScript verbosity ipis packageDbs hpi = do
       -- TODO: Do something more robust here
       regScript = unlines scripts
 
-  info verbosity ("Creating package registration script: " ++ regScriptFileName)
-  writeUTF8File regScriptFileName regScript
-  setFileExecutable regScriptFileName
+  let out_file = interpretSymbolicPath mbWorkDir regScriptFileName
+  info verbosity ("Creating package registration script: " ++ out_file)
+  writeUTF8File out_file regScript
+  setFileExecutable out_file
 
-regScriptFileName :: FilePath
+regScriptFileName :: SymbolicPath Pkg File
 regScriptFileName = case buildOS of
-  Windows -> "register.bat"
-  _ -> "register.sh"
+  Windows -> makeSymbolicPath "register.bat"
+  _ -> makeSymbolicPath "register.sh"
 
 -- -----------------------------------------------------------------------------
 -- Making the InstalledPackageInfo
@@ -489,9 +493,9 @@ generalInstalledPackageInfo adjustRelIncDirs pkg abi_hash lib lbi clbi installDi
     { IPI.sourcePackageId = packageId pkg
     , IPI.installedUnitId = componentUnitId clbi
     , IPI.installedComponentId_ = componentComponentId clbi
-    , IPI.instantiatedWith = componentInstantiatedWith clbi
+    , IPI.instantiatedWith = expectLibraryComponent (maybeComponentInstantiatedWith clbi)
     , IPI.sourceLibName = libName lib
-    , IPI.compatPackageKey = componentCompatPackageKey clbi
+    , IPI.compatPackageKey = expectLibraryComponent (fmap T.pack (maybeComponentCompatPackageKey clbi))
     , -- If GHC >= 8.4 we register with SDPX, otherwise with legacy license
       IPI.license =
         if ghc84
@@ -510,28 +514,27 @@ generalInstalledPackageInfo adjustRelIncDirs pkg abi_hash lib lbi clbi installDi
     , IPI.indefinite = componentIsIndefinite clbi
     , IPI.exposed = libExposed lib
     , IPI.exposedModules =
-        componentExposedModules clbi
+        expectLibraryComponent (maybeComponentExposedModules clbi)
           -- add virtual modules into the list of exposed modules for the
           -- package database as well.
-          ++ map (\name -> IPI.ExposedModule name Nothing) (virtualModules bi)
+          ++ map (`IPI.ExposedModule` Nothing) (virtualModules bi)
     , IPI.hiddenModules = otherModules bi
     , IPI.trusted = IPI.trusted IPI.emptyInstalledPackageInfo
     , IPI.importDirs = [libdir installDirs | hasModules]
     , IPI.libraryDirs = libdirs
     , IPI.libraryDirsStatic = libdirsStatic
     , IPI.libraryDynDirs = dynlibdirs
+    , IPI.libraryBytecodeDirs =
+        [bytecodelibdir installDirs | hasLibrary && withBytecodeLib lbi]
     , IPI.dataDir = datadir installDirs
     , IPI.hsLibraries =
-        ( if hasLibrary
-            then [getHSLibraryName (componentUnitId clbi)]
-            else []
-        )
+        [T.pack (getHSLibraryName (componentUnitId clbi)) | hasLibrary]
           ++ extraBundledLibs bi
     , IPI.extraLibraries = extraLibs bi
     , IPI.extraLibrariesStatic = extraLibsStatic bi
     , IPI.extraGHCiLibraries = extraGHCiLibs bi
     , IPI.includeDirs = absinc ++ adjustRelIncDirs relinc
-    , IPI.includes = includes bi
+    , IPI.includes = map (T.pack . getSymbolicPath) $ includes bi
     , IPI.depends = depends
     , IPI.abiDepends = [] -- due to #5465
     , IPI.ccOptions = [] -- Note. NOT ccOptions bi!
@@ -539,10 +542,11 @@ generalInstalledPackageInfo adjustRelIncDirs pkg abi_hash lib lbi clbi installDi
     -- to C compilations in other packages.
     , IPI.cxxOptions = [] -- Also. NOT cxxOptions bi!
     , IPI.ldOptions = ldOptions bi
-    , IPI.frameworks = frameworks bi
-    , IPI.frameworkDirs = extraFrameworkDirs bi
-    , IPI.haddockInterfaces = [haddockdir installDirs </> haddockName pkg]
-    , IPI.haddockHTMLs = [htmldir installDirs]
+    , IPI.frameworks = map (T.pack . getSymbolicPath) $ frameworks bi
+    , IPI.frameworkDirs = map getSymbolicPath $ extraFrameworkDirs bi
+    , IPI.haddockInterfaces =
+        [haddockdir installDirs </> haddockLibraryPath pkg lib | hasModules]
+    , IPI.haddockHTMLs = [htmldir installDirs | hasModules]
     , IPI.pkgRoot = Nothing
     , IPI.libVisibility = libVisibility lib
     }
@@ -555,7 +559,7 @@ generalInstalledPackageInfo adjustRelIncDirs pkg abi_hash lib lbi clbi installDi
     -- TODO: unclear what the root cause of the
     -- duplication is, but we nub it here for now:
     depends = ordNub $ map fst (componentPackageDeps clbi)
-    (absinc, relinc) = partition isAbsolute (includeDirs bi)
+    (absinc, relinc) = partition isAbsolute (map getSymbolicPath $ includeDirs bi)
     hasModules = not $ null (allLibModules lib clbi)
     comp = compiler lbi
     hasLibrary =
@@ -570,6 +574,7 @@ generalInstalledPackageInfo adjustRelIncDirs pkg abi_hash lib lbi clbi installDi
     hasJsSupport = case hostPlatform lbi of
       Platform JavaScript _ -> True
       _ -> False
+    extraLibDirs' = map getSymbolicPath $ extraLibDirs bi
     libdirsStatic
       | hasLibrary = libdir installDirs : extraLibDirsStaticOrFallback
       | otherwise = extraLibDirsStaticOrFallback
@@ -578,20 +583,22 @@ generalInstalledPackageInfo adjustRelIncDirs pkg abi_hash lib lbi clbi installDi
         -- distinction between fully static linking and otherwise.
         -- Fall back to the normal library dirs in that case.
         extraLibDirsStaticOrFallback = case extraLibDirsStatic bi of
-          [] -> extraLibDirs bi
-          dirs -> dirs
+          [] -> extraLibDirs'
+          dirs -> map getSymbolicPath dirs
     (libdirs, dynlibdirs)
       | not hasLibrary =
-          (extraLibDirs bi, [])
+          (extraLibDirs', [])
       -- the dynamic-library-dirs defaults to the library-dirs if not specified,
       -- so this works whether the dynamic-library-dirs field is supported or not
 
       | libraryDynDirSupported comp =
-          ( libdir installDirs : extraLibDirs bi
-          , dynlibdir installDirs : extraLibDirs bi
+          ( libdir installDirs : extraLibDirs'
+          , dynlibdir installDirs : extraLibDirs'
           )
       | otherwise =
-          (libdir installDirs : dynlibdir installDirs : extraLibDirs bi, [])
+          (libdir installDirs : dynlibdir installDirs : extraLibDirs', [])
+    expectLibraryComponent (Just attribute) = attribute
+    expectLibraryComponent Nothing = error "generalInstalledPackageInfo: Expected a library component, got something else."
 
 -- the compiler doesn't understand the dynamic-library-dirs field so we
 -- add the dyn directory to the "normal" list in the library-dirs field
@@ -601,9 +608,9 @@ generalInstalledPackageInfo adjustRelIncDirs pkg abi_hash lib lbi clbi installDi
 --
 -- This function knows about the layout of in place packages.
 inplaceInstalledPackageInfo
-  :: FilePath
-  -- ^ top of the build tree
-  -> FilePath
+  :: HaddockTarget
+  -> AbsolutePath (Dir Pkg)
+  -> SymbolicPath Pkg (Dir Dist)
   -- ^ location of the dist tree
   -> PackageDescription
   -> AbiHash
@@ -611,7 +618,7 @@ inplaceInstalledPackageInfo
   -> LocalBuildInfo
   -> ComponentLocalBuildInfo
   -> InstalledPackageInfo
-inplaceInstalledPackageInfo inplaceDir distPref pkg abi_hash lib lbi clbi =
+inplaceInstalledPackageInfo haddockTarget inplaceDir distPref pkg abi_hash lib lbi clbi =
   generalInstalledPackageInfo
     adjustRelativeIncludeDirs
     pkg
@@ -621,22 +628,31 @@ inplaceInstalledPackageInfo inplaceDir distPref pkg abi_hash lib lbi clbi =
     clbi
     installDirs
   where
+    i = interpretSymbolicPathAbsolute inplaceDir -- See Note [Symbolic paths] in Distribution.Utils.Path
     adjustRelativeIncludeDirs = concatMap $ \d ->
-      [ inplaceDir </> d -- local include-dir
-      , inplaceDir </> libTargetDir </> d -- autogen include-dir
+      [ i $ makeRelativePathEx d -- local include-dir
+      , i $ libTargetDir </> makeRelativePathEx d -- autogen include-dir
       ]
     libTargetDir = componentBuildDir lbi clbi
     installDirs =
       (absoluteComponentInstallDirs pkg lbi (componentUnitId clbi) NoCopyDest)
-        { libdir = inplaceDir </> libTargetDir
-        , dynlibdir = inplaceDir </> libTargetDir
-        , datadir = inplaceDir </> dataDir pkg
-        , docdir = inplaceDocdir
+        { libdir = i libTargetDir
+        , dynlibdir = i libTargetDir
+        , bytecodelibdir = i libTargetDir
+        , datadir =
+            let rawDataDir = dataDir pkg
+             in if null $ getSymbolicPath rawDataDir
+                  then i sameDirectory
+                  else i rawDataDir
+        , docdir = i inplaceDocdir
         , htmldir = inplaceHtmldir
         , haddockdir = inplaceHtmldir
         }
-    inplaceDocdir = inplaceDir </> distPref </> "doc"
-    inplaceHtmldir = inplaceDocdir </> "html" </> prettyShow (packageName pkg)
+    inplaceDocdir = distPref </> makeRelativePathEx "doc"
+    inplaceHtmldir =
+      i $
+        (inplaceDocdir </> makeRelativePathEx "html")
+          </> makeRelativePathEx (haddockLibraryDirPath haddockTarget pkg lib)
 
 -- | Construct 'InstalledPackageInfo' for the final install location of a
 -- library package.
@@ -673,7 +689,7 @@ relocatableInstalledPackageInfo
   -> Library
   -> LocalBuildInfo
   -> ComponentLocalBuildInfo
-  -> FilePath
+  -> SymbolicPath CWD ('Dir Pkg)
   -> InstalledPackageInfo
 relocatableInstalledPackageInfo pkg abi_hash lib lbi clbi pkgroot =
   generalInstalledPackageInfo
@@ -693,26 +709,31 @@ relocatableInstalledPackageInfo pkg abi_hash lib lbi clbi pkgroot =
     bi = libBuildInfo lib
 
     installDirs =
-      fmap (("${pkgroot}" </>) . shortRelativePath pkgroot) $
-        absoluteComponentInstallDirs pkg lbi (componentUnitId clbi) NoCopyDest
+      ("${pkgroot}" </>) . shortRelativePath (getSymbolicPath pkgroot) <$> absoluteComponentInstallDirs pkg lbi (componentUnitId clbi) NoCopyDest
 
 -- -----------------------------------------------------------------------------
 -- Unregistration
 
 unregister :: PackageDescription -> LocalBuildInfo -> RegisterFlags -> IO ()
-unregister pkg lbi regFlags = do
+unregister = unregisterWithHandles defaultVerbosityHandles
+
+unregisterWithHandles :: VerbosityHandles -> PackageDescription -> LocalBuildInfo -> RegisterFlags -> IO ()
+unregisterWithHandles verbHandles pkg lbi regFlags = do
   let pkgid = packageId pkg
+      common = registerCommonFlags regFlags
       genScript = fromFlag (regGenScript regFlags)
-      verbosity = fromFlag (regVerbosity regFlags)
+      verbosity = mkVerbosity verbHandles (fromFlag (setupVerbosity common))
       packageDb =
         fromFlagOrDefault
           (registrationPackageDB (withPackageDB lbi))
           (regPackageDB regFlags)
+      mbWorkDir = mbWorkDirLBI lbi
       unreg hpi =
         let invocation =
               HcPkg.unregisterInvocation
                 hpi
-                Verbosity.normal
+                Verbosity.Normal
+                mbWorkDir
                 packageDb
                 pkgid
          in if genScript
@@ -724,7 +745,7 @@ unregister pkg lbi regFlags = do
   setupMessage verbosity "Unregistering" pkgid
   withHcPkg
     verbosity
-    "unregistering is only implemented for GHC and GHCJS"
+    "unregistering is only implemented for GHC"
     (compiler lbi)
     (withPrograms lbi)
     unreg
@@ -734,8 +755,8 @@ unregScriptFileName = case buildOS of
   Windows -> "unregister.bat"
   _ -> "unregister.sh"
 
-internalPackageDBPath :: LocalBuildInfo -> FilePath -> FilePath
+internalPackageDBPath :: LocalBuildInfo -> SymbolicPath Pkg (Dir Dist) -> SymbolicPath Pkg (Dir PkgDB)
 internalPackageDBPath lbi distPref =
   case compilerFlavor (compiler lbi) of
     UHC -> UHC.inplacePackageDbPath lbi
-    _ -> distPref </> "package.conf.inplace"
+    _ -> distPref </> makeRelativePathEx "package.conf.inplace"

@@ -1,9 +1,5 @@
-{-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE ConstraintKinds #-}
-{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE NoMonoLocalBinds #-}
 
@@ -57,7 +53,7 @@ import Distribution.Client.GlobalFlags (RepoContext)
 import Distribution.Client.InstallPlan
   ( GenericInstallPlan
   , GenericPlanPackage
-  , IsUnit
+  , IsGraph
   )
 import qualified Distribution.Client.InstallPlan as InstallPlan
 import Distribution.Client.JobControl
@@ -71,15 +67,15 @@ import Distribution.Client.Types hiding
 
 import Distribution.Package
 import Distribution.Simple.Compiler
-  ( Compiler
-  , PackageDB (..)
-  , jsemSupported
-  )
 import Distribution.Simple.Program
 import qualified Distribution.Simple.Register as Cabal
 
 import Distribution.Compat.Graph (IsNode (..))
 import Distribution.Simple.Utils
+import Distribution.Utils.Path hiding
+  ( (<.>)
+  , (</>)
+  )
 import Distribution.Version
 
 import qualified Data.Map as Map
@@ -87,17 +83,20 @@ import qualified Data.Set as Set
 
 import qualified Text.PrettyPrint as Disp
 
-import Control.Exception (assert, bracket, handle)
+import Control.Concurrent.STM (TVar, newTVarIO)
+import Control.Exception (assert, handle, try)
+import Data.Either (isLeft)
+import qualified Distribution.Client.IndexUtils as IndexUtils
+import Distribution.Simple.PackageIndex (InstalledPackageIndex)
 import System.Directory (doesDirectoryExist, doesFileExist, renameDirectory)
-import System.FilePath (makeRelative, takeDirectory, (<.>), (</>))
-import System.Semaphore (SemaphoreName (..))
+import System.FilePath (makeRelative, normalise, takeDirectory, takeFileName, (<.>), (</>))
+import System.Semaphore (SemaphoreIdentifier)
 
 import Distribution.Client.Errors
 import Distribution.Simple.Flag (fromFlagOrDefault)
 
 import Distribution.Client.ProjectBuilding.PackageFileMonitor
 import Distribution.Client.ProjectBuilding.UnpackedPackage (annotateFailureNoLog, buildAndInstallUnpackedPackage, buildInplaceUnpackedPackage)
-import Distribution.Client.Utils (numberOfProcessors)
 
 ------------------------------------------------------------------------------
 
@@ -261,20 +260,20 @@ rebuildTargetsDryRun distDirLayout@DistDirLayout{..} shared =
 -- dependencies. This can be used to propagate information from dependencies.
 foldMInstallPlanDepOrder
   :: forall m ipkg srcpkg b
-   . (Monad m, IsUnit ipkg, IsUnit srcpkg)
+   . (Monad m, IsGraph ipkg srcpkg)
   => ( GenericPlanPackage ipkg srcpkg
        -> [b]
        -> m b
      )
   -> GenericInstallPlan ipkg srcpkg
-  -> m (Map UnitId b)
+  -> m (Map (Key ipkg) b)
 foldMInstallPlanDepOrder visit =
   go Map.empty . InstallPlan.reverseTopologicalOrder
   where
     go
-      :: Map UnitId b
+      :: Map (Key ipkg) b
       -> [GenericPlanPackage ipkg srcpkg]
-      -> m (Map UnitId b)
+      -> m (Map (Key ipkg) b)
     go !results [] = return results
     go !results (pkg : pkgs) = do
       -- we go in the right order so the results map has entries for all deps
@@ -299,7 +298,7 @@ improveInstallPlanWithUpToDatePackages pkgsBuildStatus =
   where
     canPackageBeImproved :: ElaboratedConfiguredPackage -> Bool
     canPackageBeImproved pkg =
-      case Map.lookup (installedUnitId pkg) pkgsBuildStatus of
+      case Map.lookup (nodeKey pkg) pkgsBuildStatus of
         Just BuildStatusUpToDate{} -> True
         Just _ -> False
         Nothing ->
@@ -354,17 +353,6 @@ rebuildTargets
     }
     | fromFlagOrDefault False (projectConfigOfflineMode config) && not (null packagesToDownload) = return offlineError
     | otherwise = do
-        -- Concurrency control: create the job controller and concurrency limits
-        -- for downloading, building and installing.
-        mkJobControl <- case buildSettingNumJobs of
-          Serial -> newSerialJobControl
-          NumJobs n -> newParallelJobControl (fromMaybe numberOfProcessors n)
-          UseSem n ->
-            if jsemSupported compiler
-              then newSemaphoreJobControl n
-              else do
-                warn verbosity "-jsem is not supported by the selected compiler, falling back to normal parallelism control."
-                newParallelJobControl n
         registerLock <- newLock -- serialise registration
         cacheLock <- newLock -- serialise access to setup exe cache
         -- TODO: [code cleanup] eliminate setup exe cache
@@ -379,7 +367,22 @@ rebuildTargets
         createDirectoryIfMissingVerbose verbosity True distTempDirectory
         traverse_ (createPackageDBIfMissing verbosity compiler progdb) packageDBsToUse
 
-        bracket (pure mkJobControl) cleanupJobControl $ \jobControl -> do
+        -- Populate the running InstalledPackageIndex by doing a single
+        -- bulk read at startup. This allows us to obtain the
+        -- InstalledPackageInfo of every 'PreExisting' and 'Installed' unit
+        -- in the plan, regardless of how they ended up in the PackageDBs.
+        -- See (ProjIPI1) in Note [Per-project InstalledPackageIndex].
+        initialIPI <-
+          -- NB: 'getInstalledPackages' returns an error when there are no
+          -- PackageDBs, so we handle that case explicitly first.
+          if null packageDBsToUse
+            then return mempty
+            else IndexUtils.getInstalledPackages verbosity compiler packageDBsToUse progdb
+        ipiTVar <- newTVarIO initialIPI
+
+        -- Concurrency control: create the job controller and concurrency limits
+        -- for downloading, building and installing.
+        buildOutcomes <- withJobControl (newJobControlFromParStrat verbosity (Just compiler) buildSettingNumJobs Nothing) $ \jobControl -> do
           -- Before traversing the install plan, preemptively find all packages that
           -- will need to be downloaded and start downloading them.
           asyncDownloadPackages
@@ -390,15 +393,14 @@ rebuildTargets
             $ \downloadMap ->
               -- For each package in the plan, in dependency order, but in parallel...
               InstallPlan.execute
-                mkJobControl
+                jobControl
                 keepGoing
                 (BuildFailure Nothing . DependentFailed . packageId)
                 installPlan
                 $ \pkg ->
                   -- TODO: review exception handling
                   handle (\(e :: BuildFailure) -> return (Left e)) $ fmap Right $ do
-                    let uid = installedUnitId pkg
-                        pkgBuildStatus = Map.findWithDefault (error "rebuildTargets") uid pkgsBuildStatus
+                    let pkgBuildStatus = Map.findWithDefault (error "rebuildTargets") (nodeKey pkg) pkgsBuildStatus
 
                     rebuildTarget
                       verbosity
@@ -411,8 +413,13 @@ rebuildTargets
                       cacheLock
                       sharedPackageConfig
                       installPlan
+                      ipiTVar
                       pkg
                       pkgBuildStatus
+
+        -- Once the units are built, run their benchmarks.
+        -- See Note [Running benchmarks]
+        runDeferredBenchmarks keepGoing installPlan buildOutcomes
     where
       keepGoing = buildSettingKeepGoing
       withRepoCtx =
@@ -467,37 +474,137 @@ rebuildTargets
           isRemote (RemoteSourceRepoPackage _ _) = True
           isRemote _ = False
 
--- | Create a package DB if it does not currently exist. Note that this action
--- is /not/ safe to run concurrently.
+{- Note [Per-project InstalledPackageIndex]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In cabal-install, we keep a running InstalledPackageIndex, used for the whole
+project, containing all registered units relevant to the project.
+
+We do this to avoid repeatedly querying @ghc-pkg@ on a per-package basis when
+configuring individual packages.
+
+  (ProjIPI1)
+    We initialise the index with a single @ghc-pkg dump@ invocation, which
+    queries all the package DBs that the plan touches. This single read
+    replaces the per-package query that 'computePackageInfo' would otherwise
+    perform.
+
+    This robustly handles the case of resuming an interrupted build.
+
+  (ProjIPI2)
+    During execution, each time we register a library, we insert its
+    InstalledPackageInfo into the index, so that subsequent packages that
+    depend on it have it available, without needing to re-query @ghc-pkg@.
+
+  (ProjIPI3)
+    Before configuring a package, we read the running InstalledPackageIndex
+    and pass it to Cabal's 'computePackageInfoFromIndex' instead of
+    'computePackageInfo', skipping the expensive per-package @ghc-pkg dump@
+    invocation.
+-}
+
+{- Note [Running benchmarks]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Benchmarks must not run at the same time as other benchmarks, or while
+something else is being built: they would compete for resources, which skews
+their results (#7557).
+
+Yet 'InstallPlan.execute' builds the units of the plan in parallel. A unit is
+a single component of a package, or a whole package when it cannot be built
+per component (see 'NotPerComponentReason'). So the benchmark suites of a
+project, even those of the same package, are usually separate units. If each
+unit ran its benchmarks in its bench phase, right after it is built, they
+could run at the same time as each other, or while other units are still
+being built. (A whole-package unit runs all of its benchmarks with a single
+@Setup bench@ invocation, which runs them one at a time.)
+
+So, the bench phase of a unit (see 'buildAndRegisterUnpackedPackage') does not
+run its benchmarks, but returns them as a 'DeferredBenchmark', which is
+recorded in the 'BuildResult' of the unit. Once all the units are built,
+'rebuildTargets' runs them one at a time, in plan order, with
+'runDeferredBenchmarks', and records their failures in the 'BuildOutcomes'.
+
+Unless we keep going after failures, no benchmark is run if a unit failed to
+build, and no more benchmarks are run once one of them failed.
+-}
+
+-- | Run the deferred benchmarks of the units that were built successfully,
+-- one at a time, in plan order. See Note [Running benchmarks].
+runDeferredBenchmarks
+  :: Bool
+  -- ^ Keep going after failure
+  -> ElaboratedInstallPlan
+  -> BuildOutcomes
+  -> IO BuildOutcomes
+runDeferredBenchmarks keepGoing installPlan buildOutcomes
+  | not keepGoing && any isLeft buildOutcomes = return buildOutcomes
+  | otherwise = go buildOutcomes (InstallPlan.executionOrder installPlan)
+  where
+    -- Run the benchmarks of the given units, in order, and record their
+    -- failures. Unless we keep going, stop at the first failure.
+    go :: BuildOutcomes -> [ElaboratedReadyPackage] -> IO BuildOutcomes
+    go outcomes [] = return outcomes
+    go outcomes (pkg : pkgs)
+      | Just (Right result) <- Map.lookup uid outcomes
+      , Just bench <- buildResultBenchmark result = do
+          outcome <- try (runDeferredBenchmark bench)
+          case outcome of
+            Right () -> go outcomes pkgs
+            Left failure
+              | keepGoing -> go outcomes' pkgs
+              | otherwise -> return outcomes'
+              where
+                outcomes' = Map.insert uid (Left failure) outcomes
+      | otherwise = go outcomes pkgs
+      where
+        uid = nodeKey pkg
+
+-- | Create a package DB if it does not currently exist.
 createPackageDBIfMissing
   :: Verbosity
   -> Compiler
   -> ProgramDb
-  -> PackageDB
+  -> PackageDBCWD
   -> IO ()
 createPackageDBIfMissing
   verbosity
   compiler
   progdb
   (SpecificPackageDB dbPath) = do
+    -- If it already exists, skip locking.
     exists <- Cabal.doesPackageDBExist dbPath
     unless exists $ do
       createDirectoryIfMissingVerbose verbosity True (takeDirectory dbPath)
-      Cabal.createPackageDB verbosity compiler progdb False dbPath
+      withPackageDBLock verbosity dbPath $ do
+        -- Re-check under the lock. Another process may have created the DB
+        -- while we were waiting.
+        exists' <- Cabal.doesPackageDBExist dbPath
+        unless exists' $
+          Cabal.createPackageDB verbosity compiler progdb dbPath
 createPackageDBIfMissing _ _ _ _ = return ()
+
+-- | Hold an exclusive cross-process lock while initialising a package DB.
+withPackageDBLock :: Verbosity -> FilePath -> IO a -> IO a
+withPackageDBLock verbosity dbPath =
+  withFileLock verbosity lockPath waitMsg
+  where
+    lockPath = takeDirectory dbPath </> ('.' : takeFileName dbPath) <.> "lock"
+    waitMsg = "Waiting for file lock on package database " ++ dbPath
 
 -- | Given all the context and resources, (re)build an individual package.
 rebuildTarget
   :: Verbosity
   -> DistDirLayout
   -> StoreDirLayout
-  -> Maybe SemaphoreName
+  -> Maybe SemaphoreIdentifier
   -> BuildTimeSettings
   -> AsyncFetchMap
   -> Lock
+  -- ^ Serialises package registration
   -> Lock
+  -- ^ Serialises access to the setup executable cache
   -> ElaboratedSharedConfig
   -> ElaboratedInstallPlan
+  -> TVar InstalledPackageIndex
   -> ElaboratedReadyPackage
   -> BuildStatus
   -> IO BuildResult
@@ -512,6 +619,7 @@ rebuildTarget
   cacheLock
   sharedPackageConfig
   plan
+  ipiTVar
   rpkg@(ReadyPackage pkg)
   pkgBuildStatus
     -- Technically, doing the --only-download filtering only in this function is
@@ -527,13 +635,19 @@ rebuildTarget
           BuildStatusDownload ->
             void $ waitAsyncPackageDownload verbosity downloadMap pkg
           _ -> return ()
-        return $ BuildResult DocsNotTried TestsNotTried Nothing
+        return
+          BuildResult
+            { buildResultDocs = DocsNotTried
+            , buildResultTests = TestsNotTried
+            , buildResultLogFile = Nothing
+            , buildResultBenchmark = Nothing
+            }
     | otherwise =
         -- We rely on the 'BuildStatus' to decide which phase to start from:
         case pkgBuildStatus of
           BuildStatusDownload -> downloadPhase
           BuildStatusUnpack tarball -> unpackTarballPhase tarball
-          BuildStatusRebuild srcdir status -> rebuildPhase status srcdir
+          BuildStatusRebuild srcdir status -> rebuildPhase status (makeSymbolicPath srcdir)
           -- TODO: perhaps re-nest the types to make these impossible
           BuildStatusPreExisting{} -> unexpectedState
           BuildStatusInstalled{} -> unexpectedState
@@ -570,7 +684,7 @@ rebuildTarget
       -- 'BuildInplaceOnly' style packages. 'BuildAndInstall' style packages
       -- would only start from download or unpack phases.
       --
-      rebuildPhase :: BuildStatusRebuild -> FilePath -> IO BuildResult
+      rebuildPhase :: BuildStatusRebuild -> SymbolicPath CWD (Dir Pkg) -> IO BuildResult
       rebuildPhase buildStatus srcdir =
         assert
           (isInplaceBuildStyle $ elabBuildStyle pkg)
@@ -579,11 +693,13 @@ rebuildTarget
           srcdir
           builddir
         where
+          distdir = distBuildDirectory (elabDistDirParams sharedPackageConfig pkg)
           builddir =
-            distBuildDirectory
-              (elabDistDirParams sharedPackageConfig pkg)
+            makeSymbolicPath $
+              makeRelative (normalise $ getSymbolicPath srcdir) distdir
+      -- TODO: [nice to have] ^^ do this relative stuff better
 
-      buildAndInstall :: FilePath -> FilePath -> IO BuildResult
+      buildAndInstall :: SymbolicPath CWD (Dir Pkg) -> SymbolicPath Pkg (Dir Dist) -> IO BuildResult
       buildAndInstall srcdir builddir =
         buildAndInstallUnpackedPackage
           verbosity
@@ -596,13 +712,11 @@ rebuildTarget
           sharedPackageConfig
           plan
           rpkg
+          ipiTVar
           srcdir
-          builddir'
-        where
-          builddir' = makeRelative srcdir builddir
-      -- TODO: [nice to have] ^^ do this relative stuff better
+          builddir
 
-      buildInplace :: BuildStatusRebuild -> FilePath -> FilePath -> IO BuildResult
+      buildInplace :: BuildStatusRebuild -> SymbolicPath CWD (Dir Pkg) -> SymbolicPath Pkg (Dir Dist) -> IO BuildResult
       buildInplace buildStatus srcdir builddir =
         -- TODO: [nice to have] use a relative build dir rather than absolute
         buildInplaceUnpackedPackage
@@ -615,6 +729,7 @@ rebuildTarget
           sharedPackageConfig
           plan
           rpkg
+          ipiTVar
           buildStatus
           srcdir
           builddir
@@ -698,8 +813,8 @@ withTarballLocalDirectory
   -> DistDirParams
   -> BuildStyle
   -> Maybe CabalFileText
-  -> ( FilePath -- Source directory
-       -> FilePath -- Build directory
+  -> ( SymbolicPath CWD (Dir Pkg) -- Source directory
+       -> SymbolicPath Pkg (Dir Dist) -- Build directory
        -> IO a
      )
   -> IO a
@@ -723,15 +838,15 @@ withTarballLocalDirectory
       -- this way we avoid breaking those packages
       BuildAndInstall ->
         let tmpdir = distTempDirectory
-         in withTempDirectory verbosity tmpdir "src" $ \unpackdir -> do
+            builddir = relativeSymbolicPath $ makeRelativePathEx "dist"
+         in withTempDirectory tmpdir "src" $ \unpackdir -> do
+              let srcdir = makeSymbolicPath $ unpackdir </> prettyShow pkgid
               unpackPackageTarball
                 verbosity
                 tarball
                 unpackdir
                 pkgid
                 pkgTextOverride
-              let srcdir = unpackdir </> prettyShow pkgid
-                  builddir = srcdir </> "dist"
               buildPkg srcdir builddir
 
       -- In this case we make sure the tarball has been unpacked to the
@@ -740,10 +855,14 @@ withTarballLocalDirectory
       BuildInplaceOnly{} -> do
         let srcrootdir = distUnpackedSrcRootDirectory
             srcdir = distUnpackedSrcDirectory pkgid
-            builddir = distBuildDirectory dparams
+            builddir =
+              makeSymbolicPath $
+                makeRelative (normalise srcdir) $
+                  distBuildDirectory dparams
+        -- TODO: [nice to have] ^^ do this relative stuff better
+        exists <- doesDirectoryExist srcdir
         -- TODO: [nice to have] use a proper file monitor rather
         -- than this dir exists test
-        exists <- doesDirectoryExist srcdir
         unless exists $ do
           createDirectoryIfMissingVerbose verbosity True srcrootdir
           unpackPackageTarball
@@ -758,7 +877,7 @@ withTarballLocalDirectory
             srcrootdir
             pkgid
             dparams
-        buildPkg srcdir builddir
+        buildPkg (makeSymbolicPath srcdir) builddir
 
 unpackPackageTarball
   :: Verbosity

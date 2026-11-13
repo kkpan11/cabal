@@ -1,6 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-
 module Distribution.Types.IncludeRenaming
   ( IncludeRenaming (..)
   , defaultIncludeRenaming
@@ -26,12 +23,12 @@ data IncludeRenaming = IncludeRenaming
   { includeProvidesRn :: ModuleRenaming
   , includeRequiresRn :: ModuleRenaming
   }
-  deriving (Show, Read, Eq, Ord, Typeable, Data, Generic)
+  deriving (Show, Read, Eq, Ord, Data, Generic)
 
 instance Binary IncludeRenaming
 instance Structured IncludeRenaming
 
-instance NFData IncludeRenaming where rnf = genericRnf
+instance NFData IncludeRenaming
 
 -- | The 'defaultIncludeRenaming' applied when you only @build-depends@
 -- on a package.

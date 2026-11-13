@@ -1,9 +1,6 @@
-{-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE ApplicativeDo #-}
 {-# LANGUAGE OverloadedStrings #-}
-
------------------------------------------------------------------------------
-
------------------------------------------------------------------------------
+{-# LANGUAGE RecordWildCards #-}
 
 -- |
 -- Module      :  Distribution.Client.Reporting
@@ -31,6 +28,7 @@ module Distribution.Client.BuildReports.Anonymous
   --    showList,
   ) where
 
+import Data.Either (rights)
 import Distribution.Client.Compat.Prelude
 import Prelude ()
 
@@ -89,7 +87,7 @@ newBuildReport os' arch' comp pkgid flags deps result =
       Left (BR.BuildFailed _) -> BuildFailed
       Left (BR.TestsFailed _) -> TestsFailed
       Left (BR.InstallFailed _) -> InstallFailed
-      Right (BR.BuildResult _ _ _) -> InstallOk
+      Right BR.BuildResult{} -> InstallOk
     convertDocsOutcome = case result of
       Left _ -> NotTried
       Right (BR.BuildResult BR.DocsNotTried _ _) -> NotTried
@@ -110,8 +108,7 @@ cabalInstallID =
 -------------------------------------------------------------------------------
 
 fieldDescrs
-  :: ( Applicative (g BuildReport)
-     , FieldGrammar c g
+  :: ( FieldGrammar c g
      , c (Identity Arch)
      , c (Identity CompilerId)
      , c (Identity FlagAssignment)
@@ -122,28 +119,28 @@ fieldDescrs
      , c (List VCat (Identity PackageIdentifier) PackageIdentifier)
      )
   => g BuildReport BuildReport
-fieldDescrs =
-  BuildReport
-    <$> uniqueField "package" L.package
-    <*> uniqueField "os" L.os
-    <*> uniqueField "arch" L.arch
-    <*> uniqueField "compiler" L.compiler
-    <*> uniqueField "client" L.client
-    <*> monoidalField "flags" L.flagAssignment
-    <*> monoidalFieldAla "dependencies" (alaList VCat) L.dependencies
-    <*> uniqueField "install-outcome" L.installOutcome
-    <*> uniqueField "docs-outcome" L.docsOutcome
-    <*> uniqueField "tests-outcome" L.testsOutcome
+fieldDescrs = do
+  package <- uniqueField "package" L.package
+  os <- uniqueField "os" L.os
+  arch <- uniqueField "arch" L.arch
+  compiler <- uniqueField "compiler" L.compiler
+  client <- uniqueField "client" L.client
+  flagAssignment <- monoidalField "flags" L.flagAssignment
+  dependencies <- monoidalFieldAla "dependencies" (alaList VCat) L.dependencies
+  installOutcome <- uniqueField "install-outcome" L.installOutcome
+  docsOutcome <- uniqueField "docs-outcome" L.docsOutcome
+  testsOutcome <- uniqueField "tests-outcome" L.testsOutcome
+  pure BuildReport{..}
 
 -- -----------------------------------------------------------------------------
 -- Parsing
 
 parseBuildReport :: BS.ByteString -> Either String BuildReport
 parseBuildReport s = case snd $ runParseResult $ parseFields s of
-  Left (_, perrors) -> Left $ unlines [err | PError _ err <- toList perrors]
+  Left (_, perrors) -> Left $ unlines [err | PErrorWithSource _ (PError _ err) <- toList perrors]
   Right report -> Right report
 
-parseFields :: BS.ByteString -> ParseResult BuildReport
+parseFields :: BS.ByteString -> ParseResult src BuildReport
 parseFields input = do
   fields <- either (parseFatalFailure zeroPos . show) pure $ readFields input
   case partitionFields fields of
@@ -152,7 +149,7 @@ parseFields input = do
 
 parseBuildReportList :: BS.ByteString -> [BuildReport]
 parseBuildReportList str =
-  [report | Right report <- map parseBuildReport (split str)]
+  rights (map parseBuildReport $ split str)
   where
     split :: BS.ByteString -> [BS.ByteString]
     split = filter (not . BS.null) . unfoldr chunk . BS8.lines

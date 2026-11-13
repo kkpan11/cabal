@@ -1,5 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Distribution.Types.ForeignLibOption
@@ -22,7 +20,7 @@ data ForeignLibOption
     -- This option is compulsory on Windows and unsupported
     -- on other platforms.
     ForeignLibStandalone
-  deriving (Generic, Show, Read, Eq, Ord, Typeable, Data)
+  deriving (Generic, Show, Read, Eq, Ord, Data)
 
 instance Pretty ForeignLibOption where
   pretty ForeignLibStandalone = Disp.text "standalone"
@@ -36,4 +34,4 @@ instance Parsec ForeignLibOption where
 
 instance Binary ForeignLibOption
 instance Structured ForeignLibOption
-instance NFData ForeignLibOption where rnf = genericRnf
+instance NFData ForeignLibOption

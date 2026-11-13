@@ -1,9 +1,11 @@
-{-# LANGUAGE DeriveGeneric #-}
-
 module Distribution.Client.Types.Repo
   ( -- * Remote repository
     RemoteRepo (..)
   , emptyRemoteRepo
+  , remoteRepoKeyThresholdLens
+  , remoteRepoRootKeysLens
+  , remoteRepoSecureLens
+  , remoteRepoURILens
 
     -- * Local repository (no-index)
   , LocalRepo (..)
@@ -15,22 +17,32 @@ module Distribution.Client.Types.Repo
   , repoName
   , isRepoRemote
   , maybeRepoRemote
+
+    -- * Windows
+  , asPosixPath
+  , normaliseFileNoIndexURI
   ) where
 
 import Distribution.Client.Compat.Prelude
 import Prelude ()
 
+import Data.Text (Text)
 import Network.URI (URI (..), nullURI, parseAbsoluteURI, uriToString)
 
 import Distribution.Simple.Utils (toUTF8BS)
+import Distribution.System (OS (Windows))
 
 import Distribution.Client.HashValue (hashValue, showHashValue, truncateHash)
+import Distribution.Compat.Lens
 
 import qualified Data.ByteString.Lazy.Char8 as LBS
 import qualified Distribution.Compat.CharParsing as P
 import qualified Text.PrettyPrint as Disp
 
 import Distribution.Client.Types.RepoName
+
+import qualified System.FilePath.Posix as Posix
+import qualified System.FilePath.Windows as Windows
 
 -------------------------------------------------------------------------------
 -- Remote repository
@@ -46,7 +58,7 @@ data RemoteRepo = RemoteRepo
   -- to allow for a smooth transition from opt-in to opt-out security
   -- (once we switch to opt-out, all access to the central Hackage
   -- repository should be secure by default)
-  , remoteRepoRootKeys :: [String]
+  , remoteRepoRootKeys :: [Text]
   -- ^ Root key IDs (for bootstrapping)
   , remoteRepoKeyThreshold :: Int
   -- ^ Threshold for verification during bootstrapping
@@ -61,6 +73,7 @@ data RemoteRepo = RemoteRepo
   deriving (Show, Eq, Ord, Generic)
 
 instance Binary RemoteRepo
+instance NFData RemoteRepo
 instance Structured RemoteRepo
 
 instance Pretty RemoteRepo where
@@ -90,6 +103,22 @@ instance Parsec RemoteRepo where
 emptyRemoteRepo :: RepoName -> RemoteRepo
 emptyRemoteRepo name = RemoteRepo name nullURI Nothing [] 0 False
 
+remoteRepoURILens :: Lens' RemoteRepo URI
+remoteRepoURILens f s = fmap (\x -> s{remoteRepoURI = x}) (f (remoteRepoURI s))
+{-# INLINE remoteRepoURILens #-}
+
+remoteRepoSecureLens :: Lens' RemoteRepo (Maybe Bool)
+remoteRepoSecureLens f s = fmap (\x -> s{remoteRepoSecure = x}) (f (remoteRepoSecure s))
+{-# INLINE remoteRepoSecureLens #-}
+
+remoteRepoRootKeysLens :: Lens' RemoteRepo [Text]
+remoteRepoRootKeysLens f s = fmap (\x -> s{remoteRepoRootKeys = x}) (f (remoteRepoRootKeys s))
+{-# INLINE remoteRepoRootKeysLens #-}
+
+remoteRepoKeyThresholdLens :: Lens' RemoteRepo Int
+remoteRepoKeyThresholdLens f s = fmap (\x -> s{remoteRepoKeyThreshold = x}) (f (remoteRepoKeyThreshold s))
+{-# INLINE remoteRepoKeyThresholdLens #-}
+
 -------------------------------------------------------------------------------
 -- Local repository
 -------------------------------------------------------------------------------
@@ -105,6 +134,7 @@ data LocalRepo = LocalRepo
   deriving (Show, Eq, Ord, Generic)
 
 instance Binary LocalRepo
+instance NFData LocalRepo
 instance Structured LocalRepo
 
 -- | Note: doesn't parse 'localRepoSharedCache' field.
@@ -163,7 +193,7 @@ data Repo
     -- Although this contains the same fields as 'RepoRemote', we use a separate
     -- constructor to avoid confusing the two.
     --
-    -- Not all access to a secure repo goes through the hackage-security
+    -- TODO: Not all access to a secure repo goes through the hackage-security
     -- library currently; code paths that do not still make use of the
     -- 'repoRemote' and 'repoLocalDir' fields directly.
     RepoSecure
@@ -173,6 +203,7 @@ data Repo
   deriving (Show, Eq, Ord, Generic)
 
 instance Binary Repo
+instance NFData Repo
 instance Structured Repo
 
 -- | Check if this is a remote repo
@@ -190,3 +221,43 @@ repoName :: Repo -> RepoName
 repoName (RepoLocalNoIndex r _) = localRepoName r
 repoName (RepoRemote r _) = remoteRepoName r
 repoName (RepoSecure r _) = remoteRepoName r
+
+-------------------------------------------------------------------------------
+
+-- * Windows utils
+
+-------------------------------------------------------------------------------
+
+-- | When on Windows, we need to convert the paths in URIs to be POSIX-style.
+--
+-- >>> import Network.URI
+-- >>> normaliseFileNoIndexURI Windows (URI "file+noindex:" (Just nullURIAuth) "C:\\dev\\foo" "" "")
+-- file+noindex:C:/dev/foo
+--
+-- Other formats of file paths are not understood by @network-uri@:
+--
+-- >>> import Network.URI
+-- >>> uriPath <$> parseURI "file+noindex://C:/foo.txt"
+-- Just "/foo.txt"
+-- >>> parseURI "file+noindex://C:\foo.txt"
+-- Nothing
+-- >>> uriPath <$> parseURI "file+noindex:///C:/foo.txt"
+-- Just "/C:/foo.txt"
+-- >>> uriPath <$> parseURI "file+noindex:C:/foo.txt"
+-- Just "C:/foo.txt"
+--
+-- Out of the ones above, only the last one can be used from anywhere in the
+-- system.
+normaliseFileNoIndexURI :: OS -> URI -> URI
+normaliseFileNoIndexURI os uri@(URI scheme _auth path query fragment)
+  | "file+noindex:" <- scheme
+  , Windows <- os =
+      URI scheme Nothing (asPosixPath path) query fragment
+  | otherwise = uri
+
+-- | Convert a path to POSIX-style.
+asPosixPath :: FilePath -> FilePath
+asPosixPath p =
+  -- We don't use 'isPathSeparator' because @Windows.isPathSeparator
+  -- Posix.pathSeparator == True@.
+  [if x == Windows.pathSeparator then Posix.pathSeparator else x | x <- p]

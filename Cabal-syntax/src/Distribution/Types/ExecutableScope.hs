@@ -1,5 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Distribution.Types.ExecutableScope
@@ -18,7 +16,7 @@ import qualified Text.PrettyPrint as Disp
 data ExecutableScope
   = ExecutablePublic
   | ExecutablePrivate
-  deriving (Generic, Show, Read, Eq, Ord, Typeable, Data)
+  deriving (Generic, Show, Read, Eq, Ord, Data)
 
 instance Pretty ExecutableScope where
   pretty ExecutablePublic = Disp.text "public"
@@ -32,7 +30,7 @@ instance Parsec ExecutableScope where
 
 instance Binary ExecutableScope
 instance Structured ExecutableScope
-instance NFData ExecutableScope where rnf = genericRnf
+instance NFData ExecutableScope
 
 -- | 'Any' like semigroup, where 'ExecutablePrivate' is 'Any True'
 instance Semigroup ExecutableScope where
@@ -42,4 +40,3 @@ instance Semigroup ExecutableScope where
 -- | 'mempty' = 'ExecutablePublic'
 instance Monoid ExecutableScope where
   mempty = ExecutablePublic
-  mappend = (<>)

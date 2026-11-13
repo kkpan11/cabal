@@ -1,33 +1,47 @@
-{-# LANGUAGE CPP #-}
-
 module Test.Utils.TempTestDir
   ( withTestDir
+  , withTestDir'
   , removeDirectoryRecursiveHack
   ) where
 
 import Distribution.Compat.Internal.TempFile (createTempDirectory)
-import Distribution.Simple.Utils (warn)
+import Distribution.Simple.Utils (warn, TempFileOptions (..), defaultTempFileOptions)
 import Distribution.Verbosity
 
 import Control.Concurrent (threadDelay)
-import Control.Exception (bracket, throwIO, try)
-import Control.Monad (when)
+import Control.Exception (throwIO, try)
+import Control.Monad (unless, when)
+import Control.Monad.Catch ( bracket, MonadMask)
+import Control.Monad.IO.Class
 
 import System.Directory
 import System.IO.Error
-#if !(MIN_VERSION_directory(1,2,7))
 import System.FilePath ((</>))
-#endif
 import qualified System.Info (os)
 
 -- | Much like 'withTemporaryDirectory' but with a number of hacks to make
 -- sure on windows that we can clean up the directory at the end.
-withTestDir :: Verbosity -> String -> (FilePath -> IO a) -> IO a
-withTestDir verbosity template action = do
-  systmpdir <- getTemporaryDirectory
+withTestDir :: (MonadIO m, MonadMask m) => Verbosity -> String -> (FilePath -> m a) -> m a
+withTestDir verbosity template action = withTestDir' verbosity defaultTempFileOptions template action
+
+withTestDir' :: (MonadIO m, MonadMask m) => Verbosity -> TempFileOptions -> String -> (FilePath -> m a) -> m a
+withTestDir' verbosity tempFileOpts template action = do
+  systmpdir <-
+    -- MacOS returns /var/folders/... which is a symlink (/var -> /private/var),
+    -- so the test-suite struggles to make the build cwd-agnostic in particular
+    -- for the ShowBuildInfo tests. This canonicalizePath call makes it
+    -- /private/var/folders/... which will work.
+    liftIO $ canonicalizePath =<< getTemporaryDirectory
   bracket
-    (createTempDirectory systmpdir template)
-    (removeDirectoryRecursiveHack verbosity)
+    ( do { tmpRelDir <- liftIO $ createTempDirectory systmpdir template
+         ; return $ systmpdir </> tmpRelDir } )
+    (liftIO
+      -- This ensures that the temp files are not deleted at the end of the test.
+      -- It replicates the behavior of @withTempDirectoryEx@.
+      . unless (optKeepTempFiles tempFileOpts)
+      -- This is the bit that helps with Windows deleting all files.
+      . removeDirectoryRecursiveHack verbosity
+      )
     action
 
 -- | On Windows, file locks held by programs we run (in this case VCSs)
@@ -44,7 +58,7 @@ removeDirectoryRecursiveHack :: Verbosity -> FilePath -> IO ()
 removeDirectoryRecursiveHack verbosity dir | isWindows = go 1
   where
     isWindows = System.Info.os == "mingw32"
-    limit = 3
+    limit = 5
 
     go :: Int -> IO ()
     go n = do
@@ -56,7 +70,7 @@ removeDirectoryRecursiveHack verbosity dir | isWindows = go 1
               threadDelay 1000000
               go (n + 1)
 
-          -- but if we hit the limt warn and fail.
+          -- but if we hit the limit warn and fail.
           | isPermissionError e -> do
               warn verbosity $
                 "Windows file locking hack: hit the retry limit "
@@ -74,30 +88,4 @@ removeDirectoryRecursiveHack verbosity dir | isWindows = go 1
                 ++ show n
                 ++ " times to remove "
                 ++ dir
-removeDirectoryRecursiveHack _ dir = removeDirectoryRecursive dir
-
-#if !(MIN_VERSION_directory(1,2,7))
--- A simplified version that ought to work for our use case here, and does
--- not rely on directory internals.
-removePathForcibly :: FilePath -> IO ()
-removePathForcibly path = do
-    makeRemovable path `catchIOError` \ _ -> pure ()
-    isDir <- doesDirectoryExist path
-    if isDir
-       then do
-         entries <- getDirectoryContents path
-         sequence_
-           [ removePathForcibly (path </> entry)
-           | entry <- entries, entry /= ".", entry /= ".." ]
-         removeDirectory path
-       else
-         removeFile path
-  where
-    makeRemovable :: FilePath -> IO ()
-    makeRemovable p =
-      setPermissions p emptyPermissions {
-        readable   = True,
-        searchable = True,
-        writable   = True
-      }
-#endif
+removeDirectoryRecursiveHack _ dir = removePathForcibly dir

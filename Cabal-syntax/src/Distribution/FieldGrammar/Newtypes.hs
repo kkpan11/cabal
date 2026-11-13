@@ -1,9 +1,5 @@
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE FunctionalDependencies #-}
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 
 -- | This module provides @newtype@ wrappers to be used with "Distribution.FieldGrammar".
 module Distribution.FieldGrammar.Newtypes
@@ -20,7 +16,7 @@ module Distribution.FieldGrammar.Newtypes
   , Sep (..)
 
     -- ** Type
-  , List
+  , List (..)
 
     -- ** Set
   , alaSet
@@ -30,7 +26,7 @@ module Distribution.FieldGrammar.Newtypes
     -- ** NonEmpty
   , alaNonEmpty
   , alaNonEmpty'
-  , NonEmpty'
+  , NonEmpty' (..)
 
     -- * Version & License
   , SpecVersion (..)
@@ -42,9 +38,10 @@ module Distribution.FieldGrammar.Newtypes
   , Token' (..)
   , MQuoted (..)
   , FilePathNT (..)
+  , SymbolicPathNT (..)
+  , RelativePathNT (..)
   ) where
 
-import Distribution.Compat.Newtype
 import Distribution.Compat.Prelude
 import Prelude ()
 
@@ -53,6 +50,7 @@ import Distribution.Compiler (CompilerFlavor)
 import Distribution.License (License)
 import Distribution.Parsec
 import Distribution.Pretty
+import Distribution.Utils.Path
 import Distribution.Version
   ( LowerBound (..)
   , Version
@@ -68,8 +66,11 @@ import Distribution.Version
   )
 import Text.PrettyPrint (Doc, comma, fsep, punctuate, text, vcat)
 
+import Data.Coerce (Coercible, coerce)
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Set as Set
+import Data.Text (Text)
+import qualified Data.Text as Text
 import qualified Distribution.Compat.CharParsing as P
 import qualified Distribution.SPDX as SPDX
 
@@ -138,7 +139,7 @@ newtype List sep b a = List {_getList :: [a]}
 -- alaList VCat :: [a] -> List VCat (Identity a) a
 --
 -- >>> :t alaList' FSep Token
--- alaList' FSep Token :: [String] -> List FSep Token String
+-- alaList' FSep Token :: [Text] -> List FSep Token Text
 alaList :: sep -> [a] -> List sep (Identity a) a
 alaList _ = List
 
@@ -146,13 +147,11 @@ alaList _ = List
 alaList' :: sep -> (a -> b) -> [a] -> List sep b a
 alaList' _ _ = List
 
-instance Newtype [a] (List sep wrapper a)
+instance (Coercible a b, Sep sep, Parsec b) => Parsec (List sep b a) where
+  parsec = coerce . map (coerce :: b -> a) <$> parseSep (Proxy :: Proxy sep) parsec
 
-instance (Newtype a b, Sep sep, Parsec b) => Parsec (List sep b a) where
-  parsec = pack . map (unpack :: b -> a) <$> parseSep (Proxy :: Proxy sep) parsec
-
-instance (Newtype a b, Sep sep, Pretty b) => Pretty (List sep b a) where
-  pretty = prettySep (Proxy :: Proxy sep) . map (pretty . (pack :: a -> b)) . unpack
+instance (Coercible a b, Sep sep, Pretty b) => Pretty (List sep b a) where
+  pretty = prettySep (Proxy :: Proxy sep) . map (pretty . (coerce :: a -> b)) . coerce
 
 --
 
@@ -168,10 +167,7 @@ newtype Set' sep b a = Set' {_getSet :: Set a}
 -- alaSet VCat :: Set a -> Set' VCat (Identity a) a
 --
 -- >>> :t alaSet' FSep Token
--- alaSet' FSep Token :: Set String -> Set' FSep Token String
---
--- >>> unpack' (alaSet' FSep Token) <$> eitherParsec "foo bar foo"
--- Right (fromList ["bar","foo"])
+-- alaSet' FSep Token :: Set Text -> Set' FSep Token Text
 --
 -- @since 3.2.0.0
 alaSet :: sep -> Set a -> Set' sep (Identity a) a
@@ -183,13 +179,11 @@ alaSet _ = Set'
 alaSet' :: sep -> (a -> b) -> Set a -> Set' sep b a
 alaSet' _ _ = Set'
 
-instance Newtype (Set a) (Set' sep wrapper a)
+instance (Coercible a b, Ord a, Sep sep, Parsec b) => Parsec (Set' sep b a) where
+  parsec = coerce . Set.fromList . map (coerce :: b -> a) <$> parseSep (Proxy :: Proxy sep) parsec
 
-instance (Newtype a b, Ord a, Sep sep, Parsec b) => Parsec (Set' sep b a) where
-  parsec = pack . Set.fromList . map (unpack :: b -> a) <$> parseSep (Proxy :: Proxy sep) parsec
-
-instance (Newtype a b, Sep sep, Pretty b) => Pretty (Set' sep b a) where
-  pretty = prettySep (Proxy :: Proxy sep) . map (pretty . (pack :: a -> b)) . Set.toList . unpack
+instance (Coercible a b, Sep sep, Pretty b) => Pretty (Set' sep b a) where
+  pretty = prettySep (Proxy :: Proxy sep) . map (pretty . (coerce :: a -> b)) . Set.toList . coerce
 
 --
 
@@ -204,9 +198,6 @@ newtype NonEmpty' sep b a = NonEmpty' {_getNonEmpty :: NonEmpty a}
 -- >>> :t alaNonEmpty VCat
 -- alaNonEmpty VCat :: NonEmpty a -> NonEmpty' VCat (Identity a) a
 --
--- >>> unpack' (alaNonEmpty' FSep Token) <$> eitherParsec "foo bar foo"
--- Right ("foo" :| ["bar","foo"])
---
 -- @since 3.2.0.0
 alaNonEmpty :: sep -> NonEmpty a -> NonEmpty' sep (Identity a) a
 alaNonEmpty _ = NonEmpty'
@@ -217,55 +208,45 @@ alaNonEmpty _ = NonEmpty'
 alaNonEmpty' :: sep -> (a -> b) -> NonEmpty a -> NonEmpty' sep b a
 alaNonEmpty' _ _ = NonEmpty'
 
-instance Newtype (NonEmpty a) (NonEmpty' sep wrapper a)
+instance (Coercible a b, Sep sep, Parsec b) => Parsec (NonEmpty' sep b a) where
+  parsec = coerce . fmap (coerce :: b -> a) <$> parseSepNE (Proxy :: Proxy sep) parsec
 
-instance (Newtype a b, Sep sep, Parsec b) => Parsec (NonEmpty' sep b a) where
-  parsec = pack . fmap (unpack :: b -> a) <$> parseSepNE (Proxy :: Proxy sep) parsec
-
-instance (Newtype a b, Sep sep, Pretty b) => Pretty (NonEmpty' sep b a) where
-  pretty = prettySep (Proxy :: Proxy sep) . map (pretty . (pack :: a -> b)) . NE.toList . unpack
+instance (Coercible a b, Sep sep, Pretty b) => Pretty (NonEmpty' sep b a) where
+  pretty = prettySep (Proxy :: Proxy sep) . map (pretty . (coerce :: a -> b)) . NE.toList . coerce
 
 -------------------------------------------------------------------------------
 -- Identifiers
 -------------------------------------------------------------------------------
 
 -- | Haskell string or @[^ ,]+@
-newtype Token = Token {getToken :: String}
-
-instance Newtype String Token
+newtype Token = Token {getToken :: Text}
 
 instance Parsec Token where
-  parsec = pack <$> parsecToken
+  parsec = Token . Text.pack <$> parsecToken
 
 instance Pretty Token where
-  pretty = showToken . unpack
+  pretty = showToken . Text.unpack . getToken
 
 -- | Haskell string or @[^ ]+@
-newtype Token' = Token' {getToken' :: String}
-
-instance Newtype String Token'
+newtype Token' = Token' {getToken' :: Text}
 
 instance Parsec Token' where
-  parsec = pack <$> parsecToken'
+  parsec = Token' . Text.pack <$> parsecToken'
 
 instance Pretty Token' where
-  pretty = showToken . unpack
+  pretty = showToken . Text.unpack . getToken'
 
 -- | Either @"quoted"@ or @un-quoted@.
 newtype MQuoted a = MQuoted {getMQuoted :: a}
 
-instance Newtype a (MQuoted a)
-
 instance Parsec a => Parsec (MQuoted a) where
-  parsec = pack <$> parsecMaybeQuoted parsec
+  parsec = MQuoted <$> parsecMaybeQuoted parsec
 
 instance Pretty a => Pretty (MQuoted a) where
-  pretty = pretty . unpack
+  pretty = pretty . getMQuoted
 
 -- | Filepath are parsed as 'Token'.
 newtype FilePathNT = FilePathNT {getFilePathNT :: String}
-
-instance Newtype String FilePathNT
 
 instance Parsec FilePathNT where
   parsec = do
@@ -275,7 +256,38 @@ instance Parsec FilePathNT where
       else return (FilePathNT token)
 
 instance Pretty FilePathNT where
-  pretty = showFilePath . unpack
+  pretty = showFilePath . getFilePathNT
+
+-- | Newtype for 'SymbolicPath', with a different 'Parsec' instance
+-- to disallow empty paths.
+newtype SymbolicPathNT from to = SymbolicPathNT {getSymbolicPathNT :: SymbolicPath from to}
+
+instance Parsec (SymbolicPathNT from to) where
+  parsec = do
+    token <- parsecToken
+    if null token
+      then P.unexpected "empty FilePath"
+      else return (SymbolicPathNT $ makeSymbolicPath token)
+
+instance Pretty (SymbolicPathNT from to) where
+  pretty = showFilePath . getSymbolicPath . getSymbolicPathNT
+
+-- | Newtype for 'RelativePath', with a different 'Parsec' instance
+-- to disallow empty paths but allow non-relative paths (which get rejected
+-- later with a different error message, see 'Distribution.PackageDescription.Check.Paths.checkPath')
+newtype RelativePathNT from to = RelativePathNT {getRelativePathNT :: RelativePath from to}
+
+-- NB: we don't reject non-relative paths here; we allow them here and reject
+-- later (see 'Distribution.PackageDescription.Check.Paths.checkPath').
+instance Parsec (RelativePathNT from to) where
+  parsec = do
+    token <- parsecToken
+    if null token
+      then P.unexpected "empty FilePath"
+      else return (RelativePathNT $ unsafeMakeSymbolicPath token)
+
+instance Pretty (RelativePathNT from to) where
+  pretty = showFilePath . getSymbolicPath . getRelativePathNT
 
 -------------------------------------------------------------------------------
 -- SpecVersion
@@ -295,8 +307,6 @@ instance Pretty FilePathNT where
 --     Version -> CabalSpecVersion -> Parsec -> ...
 newtype SpecVersion = SpecVersion {getSpecVersion :: CabalSpecVersion}
   deriving (Eq, Show) -- instances needed for tests
-
-instance Newtype CabalSpecVersion SpecVersion
 
 instance Parsec SpecVersion where
   parsec = do
@@ -348,7 +358,7 @@ instance Parsec SpecVersion where
           -- otherwise no warnings
           _ -> pure ()
 
-        return (pack csv)
+        return (coerce csv)
     where
       parsecSpecVersion = Left <$> parsec <|> Right <$> range
 
@@ -381,8 +391,6 @@ instance Pretty SpecVersion where
 newtype SpecLicense = SpecLicense {getSpecLicense :: Either SPDX.License License}
   deriving (Show, Eq)
 
-instance Newtype (Either SPDX.License License) SpecLicense
-
 instance Parsec SpecLicense where
   parsec = do
     v <- askCabalSpecVersion
@@ -391,7 +399,7 @@ instance Parsec SpecLicense where
       else SpecLicense . Right <$> parsec
 
 instance Pretty SpecLicense where
-  pretty = either pretty pretty . unpack
+  pretty = either pretty pretty . getSpecLicense
 
 -------------------------------------------------------------------------------
 -- TestedWith
@@ -400,13 +408,11 @@ instance Pretty SpecLicense where
 -- | Version range or just version
 newtype TestedWith = TestedWith {getTestedWith :: (CompilerFlavor, VersionRange)}
 
-instance Newtype (CompilerFlavor, VersionRange) TestedWith
-
 instance Parsec TestedWith where
-  parsec = pack <$> parsecTestedWith
+  parsec = TestedWith <$> parsecTestedWith
 
 instance Pretty TestedWith where
-  pretty x = case unpack x of
+  pretty x = case getTestedWith x of
     (compiler, vr) -> pretty compiler <+> pretty vr
 
 parsecTestedWith :: CabalParsing m => m (CompilerFlavor, VersionRange)

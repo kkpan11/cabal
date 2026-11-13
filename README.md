@@ -7,17 +7,28 @@
 [![Matrix chat](https://img.shields.io/badge/chat-via%20matrix-brightgreen.svg)](https://matrix.to/#/#hackage:matrix.org)
 [![GitLab pipeline status](https://gitlab.haskell.org/haskell/cabal/badges/cabal-head/pipeline.svg?key_text=Release%20CI%20Early%20Warning&key_width=150)](https://gitlab.haskell.org/haskell/cabal/-/commits/cabal-head)
 
-<img src="https://www.haskell.org/cabal/images/Cabal-light.png" align="right">
+<img src="Cabal-light.png" align="right">
 
 This Cabal Git repository contains the following main packages:
 
  * [Cabal](Cabal/README.md): the Cabal library package ([license](Cabal/LICENSE))
+ * [Cabal-hooks](Cabal-hooks/README.md): the library providing an API for the Cabal `Hooks` build type ([license](Cabal-hooks/LICENSE))
  * [Cabal-syntax](Cabal-syntax/README.md): the `.cabal` file format library ([license](Cabal-syntax/LICENSE))
  * [cabal-install](cabal-install/README.md): the package containing the `cabal` tool ([license](cabal-install/LICENSE))
  * [cabal-install-solver](cabal-install-solver): the package containing the solver component of the `cabal` tool ([license](cabal-install-solver/LICENSE))
 
 The canonical upstream repository is located at
 https://github.com/haskell/cabal.
+
+Proposals for the Cabal project
+-------------------------------
+
+The [proposals process](proposals.md) is the mechanism which developers can gain
+the necessary consensus to make larger changes to the Cabal ecosystem.
+
+* It is light-weight, a PR is opened and discussed on [cabal-proposals](https://github.com/haskell/cabal-proposals/) repo with a fixed discussion period.
+* It is developer-led, final decisions are made by developers at the Cabal developers meeting.
+* It is flexible, there is no formal voting procedure, decisions are made by [rough consensus](https://datatracker.ietf.org/doc/html/rfc7282).
 
 Ways to get the `cabal-install` binary
 --------------------------------
@@ -63,7 +74,7 @@ Currently, we only provide binaries for `x86_64` platforms.
 
 
 2. Even more cutting-edge binaries built from pull requests are always available
-   from the `Validate` worklow page on GitHub, at the very bottom of the page,
+   from the `Validate` workflow page on GitHub, at the very bottom of the page,
    or from the `build-alpine` workflow for statically linked Linux builds.
 
 Ways to build `cabal-install` for everyday use
@@ -84,7 +95,7 @@ Ways to build `cabal-install` for everyday use
     Git repository, move to its root, and run:
 
     ```
-    cabal install --project-file=cabal.project.release cabal-install
+    cabal install --project-file=cabal.release.project cabal-install
     ```
 
 3. _Bootstrapping_:
@@ -101,7 +112,38 @@ If you are new to `cabal` and want to quickly learn the basics, check
 Got questions? Ask in [Haskell Matrix](https://matrix.to/#/#haskell:matrix.org)
 (online chat) or [Haskell Discourse](https://discourse.haskell.org).
 
+Support window
+--------------
+
+Our GHC support window is three years ([reference](https://gitlab.haskell.org/ghc/ghc/-/wikis/GHC%20Status#all-released-ghc-versions))
+for both the Cabal library and `cabal-install`.  That is:
+
+* Cabal library must be buildable out-of-the-box against the
+  boot libraries shipped with GHC, for any GHC released in the past three
+  years from Cabal library release date.
+* `cabal-install` should be buildable with `bootstrap/bootstrap.py`
+  script, for any GHC released in the past three years from `cabal-install`
+  release date.
+* `cabal-install` should be able to drive the most recent minor version of
+  any GHCs major version released in the past three years from `cabal-install`
+  release date.
+  In this context, "drive" means `cabal-install` will work with the Cabal
+  library (usually but not always the one that came with the ghc version)
+  used to build the package.
+
+Self-upgrade to the latest version (i.e. `cabal install cabal-install`)
+must work with all versions of `cabal-install` released during the last
+three years.
+
+Cabal maintainers try to support GHC versions older than three years
+on a minimal-effort basis.
+
 Build for hacking and contributing to cabal
 -------------------------------------------
 
 Refer to [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Maintainers
+-------------------------------------------
+
+Refer to [MAINTAINERS.md](MAINTAINERS.md).

@@ -1,7 +1,6 @@
-{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE TypeApplications #-}
 
 -- | cabal-install CLI command: repl
 module Distribution.Client.CmdRepl
@@ -42,6 +41,7 @@ import Distribution.Client.Errors
 import qualified Distribution.Client.InstallPlan as InstallPlan
 import Distribution.Client.NixStyleOptions
   ( NixStyleFlags (..)
+  , cfgVerbosity
   , defaultNixStyleFlags
   , nixStyleOptions
   )
@@ -61,6 +61,7 @@ import Distribution.Client.ProjectPlanning.Types
 import Distribution.Client.ScriptUtils
   ( AcceptNoTargets (..)
   , TargetContext (..)
+  , TargetsAction
   , fakeProjectSourcePackage
   , lSrcpkgDescription
   , updateContextAndWriteProjectFile
@@ -91,6 +92,7 @@ import Distribution.Package
   , UnitId
   , installedUnitId
   , mkPackageName
+  , mkPackageNameST
   , packageName
   )
 import Distribution.Simple.Command
@@ -99,20 +101,24 @@ import Distribution.Simple.Command
   )
 import Distribution.Simple.Compiler
   ( Compiler
+  , PackageDBX (..)
   , compilerCompatVersion
   )
+import Distribution.Simple.Program.GHC
 import Distribution.Simple.Setup
-  ( ReplOptions (..)
+  ( Flag
+  , ReplOptions (..)
+  , commonSetupTempFileOptions
   )
 import Distribution.Simple.Utils
-  ( TempFileOptions (..)
-  , debugNoWrap
+  ( debugNoWrap
   , dieWithException
+  , notice
   , withTempDirectoryEx
   , wrapText
   )
 import Distribution.Solver.Types.ConstraintSource
-  ( ConstraintSource (ConstraintSourceMultiRepl)
+  ( ConstraintSource (ConstraintSourceMultiRepl, ConstraintSourceWithRepl)
   )
 import Distribution.Solver.Types.PackageConstraint
   ( PackageProperty (PackagePropertyVersion)
@@ -138,6 +144,7 @@ import Distribution.Types.Library
   ( Library (..)
   , emptyLibrary
   )
+import Distribution.Types.ParStrat
 import Distribution.Types.Version
   ( Version
   , mkVersion
@@ -151,6 +158,7 @@ import Distribution.Utils.Generic
   )
 import Distribution.Verbosity
   ( lessVerbose
+  , modifyVerbosityFlags
   , normal
   )
 import Language.Haskell.Extension
@@ -164,9 +172,10 @@ import Data.List
   )
 import qualified Data.Map as Map
 import qualified Data.Set as Set
+import qualified Data.Text as Text
 import Distribution.Client.ProjectConfig
-  ( ProjectConfig (projectConfigShared)
-  , ProjectConfigShared (projectConfigConstraints, projectConfigMultiRepl)
+  ( ProjectConfig (..)
+  , ProjectConfigShared (..)
   )
 import Distribution.Client.ReplFlags
   ( EnvFlags (envIncludeTransitive, envPackages)
@@ -175,16 +184,11 @@ import Distribution.Client.ReplFlags
   , topReplOptions
   )
 import Distribution.Compat.Binary (decode)
-import Distribution.Simple.Flag (Flag (Flag), fromFlagOrDefault)
+import Distribution.Simple.Flag (flagToMaybe, fromFlagOrDefault, pattern Flag)
 import Distribution.Simple.Program.Builtin (ghcProgram)
 import Distribution.Simple.Program.Db (requireProgram)
-import Distribution.Simple.Program.Run
-  ( programInvocation
-  , runProgramInvocation
-  )
 import Distribution.Simple.Program.Types
-  ( ConfiguredProgram (programOverrideEnv)
-  )
+import Distribution.Types.PackageName.Magic (fakePackageId)
 import System.Directory
   ( doesFileExist
   , getCurrentDirectory
@@ -196,6 +200,7 @@ import System.FilePath
   , splitSearchPath
   , (</>)
   )
+import Text.PrettyPrint hiding ((<>))
 
 replCommand :: CommandUI (NixStyleFlags ReplFlags)
 replCommand =
@@ -205,8 +210,9 @@ replCommand =
     , commandUsage = usageAlternatives "v2-repl" ["[TARGET] [FLAGS]"]
     , commandDescription = Just $ \_ ->
         wrapText $
-          "Open an interactive session for a component within the project. The "
-            ++ "available targets are the same as for the 'v2-build' command: "
+          "Open an interactive session for a single component within the project "
+            ++ "or for multiple components at once if multi-repl is enabled.\n\n"
+            ++ "The available targets are the same as for the 'v2-build' command: "
             ++ "individual components within packages in the project, including "
             ++ "libraries, executables, test-suites or benchmarks. Packages can "
             ++ "also be specified in which case the library component in the "
@@ -242,12 +248,16 @@ replCommand =
           ++ pname
           ++ " v2-repl --build-depends lens\n"
           ++ "    add the latest version of the library 'lens' to the default component "
-          ++ "(or no componentif there is no project present)\n"
+          ++ "(or no component if there is no project present)\n"
           ++ "  "
           ++ pname
           ++ " v2-repl --build-depends \"lens >= 4.15 && < 4.18\"\n"
           ++ "    add a version (constrained between 4.15 and 4.18) of the library 'lens' "
           ++ "to the default component (or no component if there is no project present)\n"
+          ++ "  "
+          ++ pname
+          ++ " repl pkg:cabal-install-solver pkg:Cabal-syntax --enable-multi-repl\n"
+          ++ "    for default (in this case library) components in two packages\n"
     , commandDefaultFlags = defaultNixStyleFlags defaultReplFlags
     , commandOptions = nixStyleOptions topReplOptions
     }
@@ -271,6 +281,16 @@ multiReplDecision ctx compiler flags =
     -- a repl specific option.
     (fromFlagOrDefault False (projectConfigMultiRepl ctx <> replUseMulti flags))
 
+-- | A function that resolves targets within a project context. The input target
+-- selectors may be empty with a project in which case a default target is
+-- chosen. The input target selectors must be empty with a global context that
+-- will construct a fake package target. For a script context, the input target
+-- selectors must contain only one element.
+type TargetResolver = ProjectBaseContext -> [TargetSelector] -> IO ResolvedTargets
+
+-- | Targets resolved from target strings with context and multi-repl flag.
+type ResolvedTargets = ((ProjectBaseContext, Bool), [TargetSelector])
+
 -- | The @repl@ command is very much like @build@. It brings the install plan
 -- up to date, selects that part of the plan needed by the given or implicit
 -- repl target and then executes the plan.
@@ -282,57 +302,137 @@ multiReplDecision ctx compiler flags =
 -- For more details on how this works, see the module
 -- "Distribution.Client.ProjectOrchestration"
 replAction :: NixStyleFlags ReplFlags -> [String] -> GlobalFlags -> IO ()
-replAction flags@NixStyleFlags{extraFlags = r@ReplFlags{..}, ..} targetStrings globalFlags =
-  withContextAndSelectors AcceptNoTargets (Just LibKind) flags targetStrings globalFlags ReplCommand $ \targetCtx ctx targetSelectors -> do
+replAction flags targetStrings globalFlags =
+  withCtx flags targetStrings globalFlags $ \targetCtx ctx selectors -> do
     when (buildSettingOnlyDeps (buildSettings ctx)) $
-      dieWithException verbosity ReplCommandDoesn'tSupport
-    let projectRoot = distProjectRootDirectory $ distDirLayout ctx
-        distDir = distDirectory $ distDirLayout ctx
+      dieWithException (cfgVerbosity normal flags) ReplCommandDoesn'tSupport
+    let resolveTarget = case targetCtx of
+          ProjectContext -> resolveProjectTarget
+          GlobalContext -> resolveGlobalTarget
+          ScriptContext path exe -> resolveScriptTarget path exe
+    resolvedTargets <- resolveTarget flags targetStrings ctx selectors
+    targetedRepl flags targetCtx ctx resolvedTargets
 
-    baseCtx <- case targetCtx of
-      ProjectContext -> return ctx
-      GlobalContext -> do
-        unless (null targetStrings) $
-          dieWithException verbosity $
-            ReplTakesNoArguments targetStrings
-        let
-          sourcePackage =
-            fakeProjectSourcePackage projectRoot
-              & lSrcpkgDescription . L.condLibrary
-                .~ Just (CondNode library [baseDep] [])
-          library = emptyLibrary{libBuildInfo = lBuildInfo}
-          lBuildInfo =
-            emptyBuildInfo
-              { targetBuildDepends = [baseDep]
-              , defaultLanguage = Just Haskell2010
-              }
-          baseDep = Dependency "base" anyVersion mainLibSet
+resolveProjectTarget :: NixStyleFlags ReplFlags -> [String] -> TargetResolver
+resolveProjectTarget flags@NixStyleFlags{extraFlags = ReplFlags{..}} targetStrings ctx userTargetSelectors = do
+  case userTargetSelectors of
+    [] -> do
+      -- If in the project context with no selectors then for a target we:
+      -- 1. pick the only package in the project
+      -- 2. pick 'all' if multiple packages and multi-repl is enabled
+      --
+      -- We could have picked 'all' even for a single package project with
+      -- multi-repl but that is not as specific.
+      let projectFile = projectConfigProjectFile . projectConfigShared $ projectConfig ctx
+      let pkgs = projectPackages $ projectConfig ctx
+      case pkgs of
+        [pkg] | Text.unpack pkg `notElem` targetStrings -> do
+          retargetNotice ("package '" ++ Text.unpack pkg ++ "'")
+          return (ctxMulti, [TargetPackageNamed (mkPackageNameST pkg) Nothing])
+        _ ->
+          if isMulti && not (null pkgs)
+            then do
+              retargetNotice "'all'"
+              return (ctxMulti, [TargetAllPackages Nothing])
+            else
+              dieWithException verbosity $
+                RenderReplTargetProblem [render (reportProjectNoTarget projectFile (map Text.unpack pkgs))]
+    _ -> return (ctxMulti, userTargetSelectors)
+  where
+    verbosity = cfgVerbosity normal flags
+    ctxMulti@(_, isMulti) = (ctx, isMultiReplEnabled replUseMulti ctx)
+    retargetNotice newTarget =
+      notice verbosity $
+        "No target specified, using " ++ newTarget ++ " as the target for the REPL."
 
-        updateContextAndWriteProjectFile' ctx sourcePackage
-      ScriptContext scriptPath scriptExecutable -> do
-        unless (length targetStrings == 1) $
-          dieWithException verbosity $
-            ReplTakesSingleArgument targetStrings
-        existsScriptPath <- doesFileExist scriptPath
-        unless existsScriptPath $
-          dieWithException verbosity $
-            ReplTakesSingleArgument targetStrings
+resolveGlobalTarget :: NixStyleFlags ReplFlags -> [String] -> TargetResolver
+resolveGlobalTarget flags@NixStyleFlags{extraFlags = ReplFlags{..}} targetStrings ctx userTargetSelectors = do
+  let projectRoot = distProjectRootDirectory $ distDirLayout ctx
 
-        updateContextAndWriteProjectFile ctx scriptPath scriptExecutable
+  -- In the global context, construct a fake package which can be used to start
+  -- a repl with extra arguments if `-b` is given.
+  do
+    unless (null userTargetSelectors) $
+      dieWithException (cfgVerbosity normal flags) $
+        ReplTakesNoArguments targetStrings
+    let
+      sourcePackage =
+        fakeProjectSourcePackage projectRoot
+          & ( (lSrcpkgDescription . L.condLibrary)
+                ?~ CondNode library []
+            )
+      library = emptyLibrary{libBuildInfo = lBuildInfo}
+      lBuildInfo =
+        emptyBuildInfo
+          { targetBuildDepends = [baseDep] ++ envPackages replEnvFlags
+          , defaultLanguage = Just Haskell2010
+          }
+      baseDep = Dependency "base" anyVersion mainLibSet
 
-    -- If multi-repl is used, we need a Cabal recent enough to handle it.
-    -- We need to do this before solving, but the compiler version is only known
-    -- after solving (phaseConfigureCompiler), so instead of using
-    -- multiReplDecision we just check the flag.
-    let baseCtx' =
-          if fromFlagOrDefault False $
-            projectConfigMultiRepl (projectConfigShared $ projectConfig baseCtx)
-              <> replUseMulti
+    -- Write the fake package
+    updatedCtx <- updateContextAndWriteProjectFile' ctx sourcePackage
+    -- Specify the selector for this package
+    let fakeSelector = TargetPackage TargetExplicitNamed [fakePackageId] Nothing
+    return ((updatedCtx, isMultiReplEnabled replUseMulti updatedCtx), [fakeSelector])
+
+resolveScriptTarget :: FilePath -> L.Executable -> NixStyleFlags ReplFlags -> [String] -> TargetResolver
+resolveScriptTarget scriptPath scriptExecutable flags@NixStyleFlags{extraFlags = ReplFlags{..}} targetStrings ctx userTargetSelectors = do
+  -- For the script context, no special behaviour.
+  do
+    unless (length targetStrings == 1) $
+      dieWithException verbosity $
+        ReplTakesSingleArgument targetStrings
+    existsScriptPath <- doesFileExist scriptPath
+    unless existsScriptPath $
+      dieWithException verbosity $
+        ReplTakesSingleArgument targetStrings
+
+    updatedCtx <- updateContextAndWriteProjectFile ctx scriptPath scriptExecutable
+    return ((updatedCtx, isMultiReplEnabled replUseMulti updatedCtx), userTargetSelectors)
+  where
+    verbosity = cfgVerbosity normal flags
+
+-- If multi-repl is used, we need a Cabal recent enough to handle it.  We need
+-- to do this before solving, but the compiler version is only known after
+-- solving (phaseConfigureCompiler), so instead of using multiReplDecision we
+-- just check the flag.
+isMultiReplEnabled :: Flag Bool -> ProjectBaseContext -> Bool
+isMultiReplEnabled replUseMulti ctx =
+  fromFlagOrDefault False $
+    projectConfigMultiRepl (projectConfigShared $ projectConfig ctx)
+      <> replUseMulti
+
+-- | Bring up a REPL with the targets.  With resolved user selectors and
+-- context, adjust the REPL behaviour for the target.
+targetedRepl :: NixStyleFlags ReplFlags -> TargetsAction ResolvedTargets ()
+targetedRepl
+  flags@NixStyleFlags{extraFlags = replFlags@ReplFlags{..}, configFlags}
+  targetCtx
+  ctx
+  ((baseCtx, multiReplEnabled), targetSelectors) = do
+    let withReplEnabled =
+          isJust $ flagToMaybe $ replWithRepl configureReplOptions
+
+        addConstraintWhen cond constraint base_ctx =
+          if cond
             then
-              baseCtx
+              base_ctx
                 & lProjectConfig . lProjectConfigShared . lProjectConfigConstraints
-                  %~ (multiReplCabalConstraint :)
-            else baseCtx
+                  %~ (constraint :)
+            else base_ctx
+
+        -- This is the constraint setup.Cabal>=3.11. 3.11 is when Cabal options
+        -- used for multi-repl were introduced.
+        -- Idelly we'd apply this constraint only on the closure of repl targets,
+        -- but that would require another solver run for marginal advantages that
+        -- will further shrink as 3.11 is adopted.
+        addMultiReplConstraint = addConstraintWhen multiReplEnabled $ requireCabal [3, 11] ConstraintSourceMultiRepl
+
+        -- Similarly, if you use `--with-repl` then your version of `Cabal` needs to
+        -- support the `--with-repl` flag.
+        addWithReplConstraint = addConstraintWhen withReplEnabled $ requireCabal [3, 15] ConstraintSourceWithRepl
+
+        baseCtx' = addMultiReplConstraint $ addWithReplConstraint baseCtx
 
     (originalComponent, baseCtx'') <-
       if null (envPackages replEnvFlags)
@@ -340,15 +440,15 @@ replAction flags@NixStyleFlags{extraFlags = r@ReplFlags{..}, ..} targetStrings g
         else -- Unfortunately, the best way to do this is to let the normal solver
         -- help us resolve the targets, but that isn't ideal for performance,
         -- especially in the no-project case.
-        withInstallPlan (lessVerbose verbosity) baseCtx' $ \elaboratedPlan sharedConfig -> do
+        withInstallPlan (modifyVerbosityFlags lessVerbose verbosity) baseCtx' $ \elaboratedPlan sharedConfig -> do
           -- targets should be non-empty map, but there's no NonEmptyMap yet.
-          targets <- validatedTargets (projectConfigShared (projectConfig ctx)) (pkgConfigCompiler sharedConfig) elaboratedPlan targetSelectors
+          targets <- validatedTargets' (projectConfigShared (projectConfig ctx)) (pkgConfigCompiler sharedConfig) elaboratedPlan targetSelectors
 
           let
             (unitId, _) = fromMaybe (error "panic: targets should be non-empty") $ safeHead $ Map.toList targets
             originalDeps = installedUnitId <$> InstallPlan.directDeps elaboratedPlan unitId
             oci = OriginalComponentInfo unitId originalDeps
-            pkgId = fromMaybe (error $ "cannot find " ++ prettyShow unitId) $ packageId <$> InstallPlan.lookup elaboratedPlan unitId
+            pkgId = maybe (error $ "cannot find " ++ prettyShow unitId) packageId (InstallPlan.lookup elaboratedPlan unitId)
             baseCtx'' = addDepsToProjectTarget (envPackages replEnvFlags) pkgId baseCtx'
 
           return (Just oci, baseCtx'')
@@ -361,19 +461,24 @@ replAction flags@NixStyleFlags{extraFlags = r@ReplFlags{..}, ..} targetStrings g
     -- In addition, to avoid a *third* trip through the solver, we are
     -- replicating the second half of 'runProjectPreBuildPhase' by hand
     -- here.
-    (buildCtx, compiler, replOpts', targets) <- withInstallPlan verbosity baseCtx'' $
+    (buildCtx, compiler, platform, replOpts', targets) <- withInstallPlan verbosity baseCtx'' $
       \elaboratedPlan elaboratedShared' -> do
         let ProjectBaseContext{..} = baseCtx''
 
         -- Recalculate with updated project.
-        targets <- validatedTargets (projectConfigShared projectConfig) (pkgConfigCompiler elaboratedShared') elaboratedPlan targetSelectors
+        targets <- validatedTargets' (projectConfigShared projectConfig) (pkgConfigCompiler elaboratedShared') elaboratedPlan targetSelectors
 
         let
           elaboratedPlan' =
-            pruneInstallPlanToTargets
-              TargetActionRepl
-              targets
-              elaboratedPlan
+            -- Guard against pruning with empty targets and failing an assertion
+            -- within pruneInstallPlanToTargets.
+            if null targets
+              then elaboratedPlan
+              else
+                pruneInstallPlanToTargets
+                  TargetActionRepl
+                  targets
+                  elaboratedPlan
           includeTransitive = fromFlagOrDefault True (envIncludeTransitive replEnvFlags)
 
         pkgsBuildStatus <-
@@ -398,25 +503,25 @@ replAction flags@NixStyleFlags{extraFlags = r@ReplFlags{..}, ..} targetStrings g
               , targetsMap = targets
               }
 
-          ElaboratedSharedConfig{pkgConfigCompiler = compiler} = elaboratedShared'
+          ElaboratedSharedConfig{pkgConfigCompiler = compiler, pkgConfigPlatform = platform} = elaboratedShared'
 
           repl_flags = case originalComponent of
             Just oci -> generateReplFlags includeTransitive elaboratedPlan' oci
             Nothing -> []
 
-        return (buildCtx, compiler, configureReplOptions & lReplOptionsFlags %~ (++ repl_flags), targets)
+        return (buildCtx, compiler, platform, configureReplOptions & lReplOptionsFlags %~ (++ repl_flags), targets)
 
-    -- Multi Repl implemention see: https://well-typed.com/blog/2023/03/cabal-multi-unit/ for
+    -- Multi Repl implementation see: https://well-typed.com/blog/2023/03/cabal-multi-unit/ for
     -- a high-level overview about how everything fits together.
     if Set.size (distinctTargetComponents targets) > 1
-      then withTempDirectoryEx verbosity (TempFileOptions keepTempFiles) distDir "multi-out" $ \dir' -> do
+      then withTempDirectoryEx tempFileOptions distDir "multi-out" $ \dir' -> do
         -- multi target repl
         dir <- makeAbsolute dir'
         -- Modify the replOptions so that the ./Setup repl command will write options
         -- into the multi-out directory.
         replOpts'' <- case targetCtx of
           ProjectContext -> return $ replOpts'{replOptionsFlagOutput = Flag dir}
-          _ -> usingGhciScript compiler projectRoot replOpts'
+          _ -> usingGhciScript projectRoot replOpts'
 
         let buildCtx' = buildCtx & lElaboratedShared . lPkgConfigReplOptions .~ replOpts''
         printPlan verbosity baseCtx'' buildCtx'
@@ -438,14 +543,14 @@ replAction flags@NixStyleFlags{extraFlags = r@ReplFlags{..}, ..} targetStrings g
         let sp = intercalate [searchPathSeparator] (map fst (sortBy (comparing @Int snd) $ Map.toList (combine_search_paths all_paths)))
         -- HACK: Just combine together all env overrides, placing the most common things last
 
-        -- ghc program with overriden PATH
+        -- ghc program with overridden PATH
         (ghcProg, _) <- requireProgram verbosity ghcProgram (pkgConfigCompilerProgs (elaboratedShared buildCtx'))
         let ghcProg' = ghcProg{programOverrideEnv = [("PATH", Just sp)]}
 
         -- Find what the unit files are, and start a repl based on all the response
         -- files which have been created in the directory.
         -- unit files for components
-        unit_files <- listDirectory dir
+        unit_files <- filter (/= "paths") <$> listDirectory dir
 
         -- Order the unit files so that the find target becomes the active unit
         let active_unit_fp :: Maybe FilePath
@@ -466,77 +571,130 @@ replAction flags@NixStyleFlags{extraFlags = r@ReplFlags{..}, ..} targetStrings g
                in -- GHC considers the last unit passed to be the active one
                   other_units ++ active_unit_files
 
-        -- run ghc --interactive with
-        runProgramInvocation verbosity $
-          programInvocation ghcProg' $
-            concat $
-              [ "--interactive"
-              , "-package-env"
-              , "-" -- to ignore ghc.environment.* files
-              , "-j"
-              , show (buildSettingNumJobs (buildSettings ctx))
-              ]
-                : [ ["-unit", "@" ++ dir </> unit]
-                  | unit <- unit_files_ordered
-                  , unit /= "paths"
-                  ]
+            convertParStrat :: ParStratX Int -> ParStratX String
+            convertParStrat Serial = Serial
+            convertParStrat (UseSem n) = NumJobs (Just n)
+            convertParStrat (NumJobs mn) = NumJobs mn
 
-        pure ()
+        let ghc_opts =
+              mempty
+                { ghcOptMode = Flag GhcModeInteractive
+                , ghcOptUnitFiles = map (dir </>) unit_files_ordered
+                , ghcOptNumJobs = Flag (convertParStrat (buildSettingNumJobs (buildSettings ctx)))
+                , ghcOptPackageDBs = [GlobalPackageDB]
+                }
+
+        -- run ghc --interactive with
+        runReplProgram (flagToMaybe $ replWithRepl replOpts') tempFileOptions verbosity ghcProg' compiler platform Nothing ghc_opts
       else do
         -- single target repl
         replOpts'' <- case targetCtx of
           ProjectContext -> return replOpts'
-          _ -> usingGhciScript compiler projectRoot replOpts'
+          _ -> usingGhciScript projectRoot replOpts'
 
         let buildCtx' = buildCtx & lElaboratedShared . lPkgConfigReplOptions .~ replOpts''
         printPlan verbosity baseCtx'' buildCtx'
 
         buildOutcomes <- runProjectBuildPhase verbosity baseCtx'' buildCtx'
         runProjectPostBuildPhase verbosity baseCtx'' buildCtx' buildOutcomes
+    where
+      projectRoot = distProjectRootDirectory $ distDirLayout ctx
+      distDir = distDirectory $ distDirLayout ctx
+
+      combine_search_paths paths =
+        foldl' go Map.empty paths
+        where
+          go m ("PATH", Just s) = foldl' (\m' f -> Map.insertWith (+) f 1 m') m (splitSearchPath s)
+          go m _ = m
+
+      verbosity = cfgVerbosity normal flags
+      tempFileOptions = commonSetupTempFileOptions $ configCommonFlags configFlags
+      validatedTargets' = validatedTargets verbosity replFlags
+
+withCtx :: NixStyleFlags a -> [String] -> GlobalFlags -> TargetsAction [TargetSelector] b -> IO b
+withCtx flags targetStrings globalFlags =
+  withContextAndSelectors
+    (cfgVerbosity normal flags)
+    (if null targetStrings then AcceptNoTargets else RejectNoTargets)
+    (Just LibKind)
+    flags
+    targetStrings
+    globalFlags
+    ReplCommand
+
+-- | Create a constraint which requires a later version of Cabal.
+-- This is used for commands which require a specific feature from the Cabal library
+-- such as multi-repl or the --with-repl flag.
+requireCabal :: [Int] -> ConstraintSource -> (UserConstraint, ConstraintSource)
+requireCabal version source =
+  ( UserConstraint
+      (UserAnySetupQualifier (mkPackageName "Cabal"))
+      (PackagePropertyVersion $ orLaterVersion $ mkVersion version)
+  , source
+  )
+
+reportProjectNoTarget :: Flag FilePath -> [String] -> Doc
+reportProjectNoTarget projectFile pkgs =
+  case (null pkgs, projectName) of
+    (True, Just project) ->
+      text "There are no packages in"
+        <+> (project <> char '.')
+        <+> text "Please add a package to the project and"
+        <+> pickComponent
+    (True, Nothing) ->
+      text "Please add a package to the project and" <+> pickComponent
+    (False, Just project) ->
+      text "Please"
+        <+> pickComponent
+        <+> text "The packages in"
+        <+> project
+        <+> (text "from which to select a component target are" <> colon)
+        $+$ nest 1 (vcat [text "-" <+> text pkg | pkg <- sort pkgs])
+    (False, Nothing) ->
+      text "Please"
+        <+> pickComponent
+        <+> (text "The packages from which to select a component in 'cabal.project'" <> comma)
+        <+> (text "the implicit default as if `--project-file=cabal.project` was added as a command option" <> comma)
+        <+> (text "are" <> colon)
+        $+$ nest 1 (vcat [text "-" <+> text pkg | pkg <- sort pkgs])
   where
-    combine_search_paths paths =
-      foldl' go Map.empty paths
-      where
-        go m ("PATH", Just s) = foldl' (\m' f -> Map.insertWith (+) f 1 m') m (splitSearchPath s)
-        go m _ = m
+    projectName = case projectFile of
+      Flag "" -> Nothing
+      Flag n -> Just $ quotes (text n)
+      _ -> Nothing
+    pickComponent = text "pick a single [package:][ctype:]component (or all) as target for the REPL command."
 
-    verbosity = fromFlagOrDefault normal (configVerbosity configFlags)
-    keepTempFiles = fromFlagOrDefault False replKeepTempFiles
+-- | Invariant: validatedTargets returns at least one target for the REPL.
+validatedTargets
+  :: Verbosity
+  -> ReplFlags
+  -> ProjectConfigShared
+  -> Compiler
+  -> ElaboratedInstallPlan
+  -> [TargetSelector]
+  -> IO TargetsMap
+validatedTargets verbosity replFlags ctx compiler elaboratedPlan targetSelectors = do
+  let multi_repl_enabled = multiReplDecision ctx compiler replFlags
+  -- Interpret the targets on the command line as repl targets (as opposed to
+  -- say build or haddock targets).
+  targets <-
+    either (reportTargetProblems verbosity) return $
+      resolveTargetsFromSolver
+        (selectPackageTargets multi_repl_enabled)
+        selectComponentTarget
+        elaboratedPlan
+        Nothing
+        targetSelectors
 
-    validatedTargets ctx compiler elaboratedPlan targetSelectors = do
-      let multi_repl_enabled = multiReplDecision ctx compiler r
-      -- Interpret the targets on the command line as repl targets
-      -- (as opposed to say build or haddock targets).
-      targets <-
-        either (reportTargetProblems verbosity) return $
-          resolveTargets
-            (selectPackageTargets multi_repl_enabled)
-            selectComponentTarget
-            elaboratedPlan
-            Nothing
-            targetSelectors
+  -- Reject multiple targets, or at least targets in different components. It is
+  -- ok to have two module/file targets in the same component, but not two that
+  -- live in different components.
+  when (Set.size (distinctTargetComponents targets) > 1 && not (useMultiRepl multi_repl_enabled)) $
+    reportTargetProblems
+      verbosity
+      [multipleTargetsProblem multi_repl_enabled targets]
 
-      -- Reject multiple targets, or at least targets in different
-      -- components. It is ok to have two module/file targets in the
-      -- same component, but not two that live in different components.
-      when (Set.size (distinctTargetComponents targets) > 1 && not (useMultiRepl multi_repl_enabled)) $
-        reportTargetProblems
-          verbosity
-          [multipleTargetsProblem multi_repl_enabled targets]
-
-      return targets
-
-    -- This is the constraint setup.Cabal>=3.11. 3.11 is when Cabal options
-    -- used for multi-repl were introduced.
-    -- Idelly we'd apply this constraint only on the closure of repl targets,
-    -- but that would require another solver run for marginal advantages that
-    -- will further shrink as 3.11 is adopted.
-    multiReplCabalConstraint =
-      ( UserConstraint
-          (UserAnySetupQualifier (mkPackageName "Cabal"))
-          (PackagePropertyVersion $ orLaterVersion $ mkVersion [3, 11])
-      , ConstraintSourceMultiRepl
-      )
+  return targets
 
 -- | First version of GHC which supports multiple home packages
 minMultipleHomeUnitsVersion :: Version
@@ -602,20 +760,13 @@ generateReplFlags includeTransitive elaboratedPlan OriginalComponentInfo{..} = f
 -- so we need to tell ghci to change back to the correct directory.
 --
 -- The @-ghci-script@ flag is path to the ghci script responsible for changing to the
--- correct directory. Only works on GHC >= 7.6, though. 🙁
-usingGhciScript :: Compiler -> FilePath -> ReplOptions -> IO ReplOptions
-usingGhciScript compiler projectRoot replOpts
-  | compilerCompatVersion GHC compiler >= Just minGhciScriptVersion = do
-      let ghciScriptPath = projectRoot </> "setcwd.ghci"
-      cwd <- getCurrentDirectory
-      writeFile ghciScriptPath (":cd " ++ cwd)
-      return $ replOpts & lReplOptionsFlags %~ (("-ghci-script" ++ ghciScriptPath) :)
-  | otherwise = return replOpts
-
--- | First version of GHC where GHCi supported the flag we need.
--- https://downloads.haskell.org/~ghc/7.6.1/docs/html/users_guide/release-7-6-1.html
-minGhciScriptVersion :: Version
-minGhciScriptVersion = mkVersion [7, 6]
+-- correct directory.
+usingGhciScript :: FilePath -> ReplOptions -> IO ReplOptions
+usingGhciScript projectRoot replOpts = do
+  let ghciScriptPath = projectRoot </> "setcwd.ghci"
+  cwd <- getCurrentDirectory
+  writeFile ghciScriptPath (":cd " ++ cwd)
+  return $ replOpts & lReplOptionsFlags %~ (("-ghci-script" ++ ghciScriptPath) :)
 
 -- | This defines what a 'TargetSelector' means for the @repl@ command.
 -- It selects the 'AvailableTarget's that the 'TargetSelector' refers to,

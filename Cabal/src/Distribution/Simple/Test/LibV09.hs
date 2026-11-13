@@ -1,5 +1,4 @@
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE DataKinds #-}
 
 module Distribution.Simple.Test.LibV09
   ( runTest
@@ -16,63 +15,63 @@ import Distribution.Compat.Prelude
 import Distribution.Types.UnqualComponentName
 import Prelude ()
 
-import Distribution.Compat.Environment
 import Distribution.Compat.Internal.TempFile
+import Distribution.Compat.Process (proc)
 import Distribution.ModuleName
 import qualified Distribution.PackageDescription as PD
 import Distribution.Pretty
-import Distribution.Simple.Build.PathsModule
 import Distribution.Simple.BuildPaths
 import Distribution.Simple.Compiler
-import Distribution.Simple.Flag (Flag (Flag, NoFlag), fromFlag)
+import Distribution.Simple.Errors
 import Distribution.Simple.Hpc
 import Distribution.Simple.InstallDirs
 import qualified Distribution.Simple.LocalBuildInfo as LBI
+import Distribution.Simple.Program.Db
+import Distribution.Simple.Program.Find
+import Distribution.Simple.Program.Run
+import Distribution.Simple.Setup.Common
 import Distribution.Simple.Setup.Test
 import Distribution.Simple.Test.Log
 import Distribution.Simple.Utils
 import Distribution.System
 import Distribution.TestSuite
 import qualified Distribution.Types.LocalBuildInfo as LBI
+import Distribution.Utils.Path
 import Distribution.Verbosity
 
 import qualified Control.Exception as CE
 import qualified Data.ByteString.Lazy as LBS
-import Distribution.Compat.Process (proc)
-import Distribution.Simple.Errors
 import System.Directory
   ( canonicalizePath
   , createDirectoryIfMissing
-  , doesDirectoryExist
   , doesFileExist
   , getCurrentDirectory
-  , removeDirectoryRecursive
-  , removeFile
+  , removePathForcibly
   , setCurrentDirectory
   )
-import System.FilePath ((<.>), (</>))
 import System.IO (hClose, hPutStr)
 import qualified System.Process as Process
 
 runTest
-  :: PD.PackageDescription
+  :: VerbosityHandles
+  -> PD.PackageDescription
   -> LBI.LocalBuildInfo
   -> LBI.ComponentLocalBuildInfo
   -> HPCMarkupInfo
   -> TestFlags
   -> PD.TestSuite
   -> IO TestSuiteLog
-runTest pkg_descr lbi clbi hpcMarkupInfo flags suite = do
+runTest verbHandles pkg_descr lbi clbi hpcMarkupInfo flags suite = do
   let isCoverageEnabled = LBI.testCoverage lbi
       way = guessWay lbi
 
-  pwd <- getCurrentDirectory
-  existingEnv <- getEnvironment
+  let mbWorkDir = LBI.mbWorkDirLBI lbi
 
   let cmd =
-        LBI.buildDir lbi
+        interpretSymbolicPath mbWorkDir (LBI.buildDir lbi)
           </> stubName suite
           </> stubName suite <.> exeExtension (LBI.hostPlatform lbi)
+      tDir = i $ tixDir distPref way
   -- Check that the test executable exists.
   exists <- doesFileExist cmd
   unless exists $
@@ -80,35 +79,39 @@ runTest pkg_descr lbi clbi hpcMarkupInfo flags suite = do
       Couldn'tFindTestProgLibV09 cmd
 
   -- Remove old .tix files if appropriate.
-  unless (fromFlag $ testKeepTix flags) $ do
-    let tDir = tixDir distPref way
-    exists' <- doesDirectoryExist tDir
-    when exists' $ removeDirectoryRecursive tDir
+  unless (fromFlag $ testKeepTix flags) $
+    removePathForcibly tDir
 
   -- Create directory for HPC files.
-  createDirectoryIfMissing True $ tixDir distPref way
+  createDirectoryIfMissing True tDir
 
   -- Write summary notices indicating start of test suite
   notice verbosity $ summarizeSuiteStart testName'
 
-  suiteLog <- CE.bracket openCabalTemp deleteIfExists $ \tempLog -> do
+  suiteLog <- CE.bracket openCabalTemp removeFileForcibly $ \tempLog -> do
+    -- Compute the appropriate environment for running the test suite
+    let progDb = LBI.withPrograms lbi
+        pathVar = progSearchPath progDb
+        envOverrides = progOverrideEnv progDb
+    newPath <- programSearchPathAsPATHVar pathVar
+
     -- Run test executable
     let opts = map (testOption pkg_descr lbi suite) $ testOptions flags
-        dataDirPath = pwd </> PD.dataDir pkg_descr
-        tixFile = pwd </> tixFilePath distPref way testName'
-        pkgPathEnv =
-          (pkgPathEnvVar pkg_descr "datadir", dataDirPath)
-            : existingEnv
-        shellEnv =
-          [("HPCTIXFILE", tixFile) | isCoverageEnabled]
-            ++ pkgPathEnv
+        tixFile = i $ tixFilePath distPref way testName'
+
+    shellEnv <-
+      getFullEnvironment
+        ( [("PATH", Just newPath)]
+            ++ [("HPCTIXFILE", Just tixFile) | isCoverageEnabled]
+            ++ envOverrides
+        )
     -- Add (DY)LD_LIBRARY_PATH if needed
     shellEnv' <-
       if LBI.withDynExe lbi
         then do
           let (Platform _ os) = LBI.hostPlatform lbi
           paths <- LBI.depLibraryPaths True False lbi clbi
-          cpath <- canonicalizePath $ LBI.componentBuildDir lbi clbi
+          cpath <- canonicalizePath $ i $ LBI.componentBuildDir lbi clbi
           return (addLibraryPath os (cpath : paths) shellEnv)
         else return shellEnv
     let (cmd', opts') = case testWrapper flags of
@@ -143,7 +146,7 @@ runTest pkg_descr lbi clbi hpcMarkupInfo flags suite = do
 
     -- Generate final log file name
     let finalLogName l =
-          testLogDir
+          interpretSymbolicPath mbWorkDir testLogDir
             </> testSuiteLogPath
               (fromFlag $ testHumanLog flags)
               pkg_descr
@@ -153,13 +156,12 @@ runTest pkg_descr lbi clbi hpcMarkupInfo flags suite = do
     -- Generate TestSuiteLog from executable exit code and a machine-
     -- readable test log
     suiteLog <-
-      fmap
-        ( \s ->
-            (\l -> l{logFile = finalLogName l})
-              . fromMaybe (error $ "panic! read @TestSuiteLog " ++ show s)
-              $ readMaybe s -- TODO: eradicateNoParse
+      ( \s ->
+          (\l -> l{logFile = finalLogName l})
+            . fromMaybe (error $ "panic! read @TestSuiteLog " ++ show s)
+            $ readMaybe s -- TODO: eradicateNoParse
         )
-        $ readFile tempLog
+        <$> readFile tempLog
 
     -- Write summary notice to log file indicating start of test suite
     appendFile (logFile suiteLog) $ summarizeSuiteStart testName'
@@ -176,9 +178,9 @@ runTest pkg_descr lbi clbi hpcMarkupInfo flags suite = do
           when $
             (details > Never)
               && (not (suitePassed $ testLogs suiteLog) || details == Always)
-              && verbosity >= normal
+              && verbosityLevel verbosity >= Normal
     whenPrinting $ do
-      LBS.putStr logText
+      LBS.hPutStr (verbosityChosenOutputHandle verbosity) logText
       putChar '\n'
 
     return suiteLog
@@ -199,19 +201,17 @@ runTest pkg_descr lbi clbi hpcMarkupInfo flags suite = do
 
   return suiteLog
   where
+    i = LBI.interpretSymbolicPathLBI lbi
+    common = testCommonFlags flags
     testName' = unUnqualComponentName $ PD.testName suite
 
-    deleteIfExists file = do
-      exists <- doesFileExist file
-      when exists $ removeFile file
-
-    testLogDir = distPref </> "test"
+    testLogDir = distPref </> makeRelativePathEx "test"
     openCabalTemp = do
-      (f, h) <- openTempFile testLogDir $ "cabal-test-" <.> "log"
+      (f, h) <- openTempFile (i testLogDir) $ "cabal-test-" <.> "log"
       hClose h >> return f
 
-    distPref = fromFlag $ testDistPref flags
-    verbosity = fromFlag $ testVerbosity flags
+    distPref = fromFlag $ setupDistPref common
+    verbosity = mkVerbosity verbHandles (fromFlag $ setupVerbosity common)
 
 -- TODO: This is abusing the notion of a 'PathTemplate'.  The result isn't
 -- necessarily a path.
@@ -233,10 +233,6 @@ testOption pkg_descr lbi suite template =
         ++ [(TestSuiteNameVar, toPathTemplate $ unUnqualComponentName $ PD.testName suite)]
 
 -- Test stub ----------
-
--- | The name of the stub executable associated with a library 'TestSuite'.
-stubName :: PD.TestSuite -> FilePath
-stubName t = unUnqualComponentName (PD.testName t) ++ "Stub"
 
 -- | The filename of the source file for the stub executable associated with a
 -- library 'TestSuite'.
@@ -307,7 +303,7 @@ stubRunTests tests = do
   where
     stubRunTests' (Test t) = do
       l <- run t >>= finish
-      summarizeTest normal Always l
+      summarizeTest (mkVerbosity defaultVerbosityHandles normal) Always l
       return l
       where
         finish (Finished result) =
@@ -323,7 +319,7 @@ stubRunTests tests = do
       return $ GroupLogs (groupName g) logs
     stubRunTests' (ExtraOptions _ t) = stubRunTests' t
     maybeDefaultOption opt =
-      maybe Nothing (\d -> Just (optionName opt, d)) $ optionDefault opt
+      (\d -> Just (optionName opt, d)) =<< optionDefault opt
     defaultOptions testInst = mapMaybe maybeDefaultOption $ options testInst
 
 -- | From a test stub, write the 'TestSuiteLog' to temporary file for the calling

@@ -1,8 +1,4 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE OverloadedStrings #-}
-
------------------------------------------------------------------------------
 
 -- |
 -- Module      :  Language.Haskell.Extension
@@ -59,12 +55,12 @@ data Language
     GHC2024
   | -- | An unknown language, identified by its name.
     UnknownLanguage String
-  deriving (Generic, Show, Read, Eq, Ord, Typeable, Data)
+  deriving (Generic, Show, Read, Eq, Ord, Data)
 
 instance Binary Language
 instance Structured Language
 
-instance NFData Language where rnf = genericRnf
+instance NFData Language
 
 -- | List of known (supported) languages for GHC, oldest first.
 knownLanguages :: [Language]
@@ -98,7 +94,7 @@ classifyLanguage = \str -> case lookup str langTable of
 
 -- * also add it to the Distribution.Simple.X.compilerExtensions lists
 
---   (where X is each compiler: GHC, UHC, HaskellSuite)
+--   (where X is each compiler: GHC, UHC)
 --
 
 -- | This represents language extensions beyond a base 'Language' definition
@@ -115,12 +111,12 @@ data Extension
   | -- | An unknown extension, identified by the name of its @LANGUAGE@
     -- pragma.
     UnknownExtension String
-  deriving (Generic, Show, Read, Eq, Ord, Typeable, Data)
+  deriving (Generic, Show, Read, Eq, Ord, Data)
 
 instance Binary Extension
 instance Structured Extension
 
-instance NFData Extension where rnf = genericRnf
+instance NFData Extension
 
 -- | Known Haskell language extensions, including deprecated and undocumented
 -- ones.
@@ -303,6 +299,9 @@ data KnownExtension
   | -- | Allow default instantiation of polymorphic types in more
     -- situations.
     ExtendedDefaultRules
+  | -- | Allow @default@ declarations to explicitly name the class and
+    -- be exported.
+    NamedDefaults
   | -- | Enable unboxed tuples.
     UnboxedTuples
   | -- | Enable @deriving@ for classes 'Data.Typeable.Typeable' and
@@ -548,12 +547,27 @@ data KnownExtension
   | -- | Allow the use of built-in syntax for list, tuple and sum type constructors
     -- rather than being exclusive to data constructors.
     ListTuplePuns
-  deriving (Generic, Show, Read, Eq, Ord, Enum, Bounded, Typeable, Data)
+  | -- | Support multiline strings.
+    MultilineStrings
+  | -- | Allow use of or-pattern syntax, condensing multiple patterns
+    -- into a single one.
+    OrPatterns
+  | -- | Along with 'ImplicitStagePersistence', this gives fine-grained control
+    -- over which modules are needed at each stage of execution.
+    ExplicitLevelImports
+  | -- | Allow identifiers to be used at different levels than where they’re
+    -- defined, using path-based persistence.
+    ImplicitStagePersistence
+  | -- | Enable qualified string literals.
+    QualifiedStrings
+  | -- | Enable modifier syntax.
+    Modifiers
+  deriving (Generic, Show, Read, Eq, Ord, Enum, Bounded, Data)
 
 instance Binary KnownExtension
 instance Structured KnownExtension
 
-instance NFData KnownExtension where rnf = genericRnf
+instance NFData KnownExtension
 
 -- | Extensions that have been deprecated, possibly paired with another
 -- extension that replaces it.

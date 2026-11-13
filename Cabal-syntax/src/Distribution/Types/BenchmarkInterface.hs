@@ -1,5 +1,4 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DataKinds #-}
 
 module Distribution.Types.BenchmarkInterface
   ( BenchmarkInterface (..)
@@ -9,6 +8,7 @@ import Distribution.Compat.Prelude
 import Prelude ()
 
 import Distribution.Types.BenchmarkType
+import Distribution.Utils.Path
 import Distribution.Version
 
 -- | The benchmark interfaces that are currently defined.
@@ -21,19 +21,18 @@ data BenchmarkInterface
     -- for success, non-zero for failure. The stdout and stderr
     -- channels may be logged. Test tooling may pass command line
     -- arguments and/or connect the stdin channel to the test.
-    BenchmarkExeV10 Version FilePath
+    BenchmarkExeV10 Version (RelativePath Source File)
   | -- | A benchmark that does not conform to one of the above
     -- interfaces for the given reason (e.g. unknown benchmark type).
     BenchmarkUnsupported BenchmarkType
-  deriving (Eq, Ord, Generic, Read, Show, Typeable, Data)
+  deriving (Eq, Ord, Generic, Read, Show, Data)
 
 instance Binary BenchmarkInterface
 instance Structured BenchmarkInterface
-instance NFData BenchmarkInterface where rnf = genericRnf
+instance NFData BenchmarkInterface
 
 instance Monoid BenchmarkInterface where
   mempty = BenchmarkUnsupported (BenchmarkTypeUnknown mempty nullVersion)
-  mappend = (<>)
 
 instance Semigroup BenchmarkInterface where
   a <> (BenchmarkUnsupported _) = a

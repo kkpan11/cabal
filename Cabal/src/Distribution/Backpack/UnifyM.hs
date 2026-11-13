@@ -1,6 +1,3 @@
-{-# LANGUAGE Rank2Types #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-
 -- | See <https://github.com/ezyang/ghc-proposals/blob/backpack/proposals/0000-backpack.rst>
 module Distribution.Backpack.UnifyM
   ( -- * Unification monad
@@ -152,7 +149,6 @@ instance Applicative (UnifyM s) where
           Just x'' -> return (Just (f'' x''))
 
 instance Monad (UnifyM s) where
-  return = pure
   UnifyM m >>= f = UnifyM $ \r -> do
     x <- m r
     case x of
@@ -186,7 +182,7 @@ failIfErrs :: UnifyM s ()
 failIfErrs = do
   env <- getUnifEnv
   errs <- liftST $ readSTRef (unify_errs env)
-  when (not (null errs)) failM
+  unless (null errs) failM
 
 tryM :: UnifyM s a -> UnifyM s (Maybe a)
 tryM m =
@@ -535,9 +531,7 @@ convertInclude
               <+> vcat (map pretty (v : vs))
           return v
 
-    let req_rename_fn k = case Map.lookup k req_rename of
-          Nothing -> k
-          Just v -> v
+    let req_rename_fn k = Map.findWithDefault k k req_rename
 
     -- Requirement substitution.
     --

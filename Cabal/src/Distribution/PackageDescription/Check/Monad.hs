@@ -1,6 +1,3 @@
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-
 -- |
 -- Module      :  Distribution.PackageDescription.Check.Monad
 -- Copyright   :  Francesco Ariis 2022
@@ -39,6 +36,7 @@ module Distribution.PackageDescription.Check.Monad
   , liftInt
   , tellP
   , checkSpecVer
+  , checkSpecVerGte
   ) where
 
 import Distribution.Compat.Prelude
@@ -92,7 +90,7 @@ data CheckInterface m = CheckInterface
 data CheckPackageContentOps m = CheckPackageContentOps
   { doesFileExist :: FilePath -> m Bool
   , doesDirectoryExist :: FilePath -> m Bool
-  , getDirectoryContents :: FilePath -> m [FilePath]
+  , listDirectory :: FilePath -> m [FilePath]
   , getFileContents :: FilePath -> m BS.ByteString
   }
 
@@ -102,7 +100,7 @@ data CheckPackageContentOps m = CheckPackageContentOps
 -- (e.g. a VCS work tree).
 data CheckPreDistributionOps m = CheckPreDistributionOps
   { runDirFileGlobM :: FilePath -> Glob -> m [GlobResult FilePath]
-  , getDirectoryContentsM :: FilePath -> m [FilePath]
+  , listDirectoryM :: FilePath -> m [FilePath]
   }
 
 -- | Context to perform checks (will be the Reader part in your monad).
@@ -135,8 +133,7 @@ data CheckCtx m = CheckCtx
 -- | Creates a pristing 'CheckCtx'. With pristine we mean everything that
 -- can be deduced by GPD but *not* user flags information.
 pristineCheckCtx
-  :: Monad m
-  => CheckInterface m
+  :: CheckInterface m
   -> GenericPackageDescription
   -> CheckCtx m
 pristineCheckCtx ci gpd =
@@ -150,7 +147,7 @@ pristineCheckCtx ci gpd =
 
 -- | Adds useful bits to 'CheckCtx' (as now, whether we are operating under
 -- a user off-by-default flag).
-initCheckCtx :: Monad m => TargetAnnotation a -> CheckCtx m -> CheckCtx m
+initCheckCtx :: TargetAnnotation a -> CheckCtx m -> CheckCtx m
 initCheckCtx t c = c{ccFlag = taPackageFlag t}
 
 -- | 'TargetAnnotation' collects contextual information on the target we are
@@ -242,7 +239,7 @@ tellCM ck = do
     -- There are some errors which, even though severe, will
     -- be allowed by Hackage *if* under a non-default flag.
     isErrAllowable :: PackageCheck -> Bool
-    isErrAllowable c = case extractCheckExplantion c of
+    isErrAllowable c = case extractCheckExplanation c of
       (WErrorUnneeded _) -> True
       (JUnneeded _) -> True
       (FDeferTypeErrorsUnneeded _) -> True
@@ -322,7 +319,7 @@ checkIntDep acc mck = do
   po <- asksCM (acc . ccInterface)
   maybe (return ()) (lc . mck) po
   where
-    lc :: Monad m => m (Maybe PackageCheck) -> CheckM m ()
+    lc :: m (Maybe PackageCheck) -> CheckM m ()
     lc wmck = do
       b <- liftCM wmck
       maybe (return ()) (check True) b
@@ -369,3 +366,16 @@ checkSpecVer
 checkSpecVer vc cond c = do
   vp <- asksCM ccSpecVersion
   unless (vp >= vc) (checkP cond c)
+
+-- | Like 'checkSpecVer', except performs the check when our
+-- spec version >= the param.
+checkSpecVerGte
+  :: Monad m
+  => CabalSpecVersion -- Perform this check only if our
+  -- spec version is >= than this.
+  -> Bool -- Check condition.
+  -> PackageCheck -- Check message.
+  -> CheckM m ()
+checkSpecVerGte vc cond c = do
+  vp <- asksCM ccSpecVersion
+  when (vp >= vc) (checkP cond c)

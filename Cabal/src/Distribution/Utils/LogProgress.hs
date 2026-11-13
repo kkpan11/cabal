@@ -1,7 +1,3 @@
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE Rank2Types #-}
-
 module Distribution.Utils.LogProgress
   ( LogProgress
   , runLogProgress
@@ -17,10 +13,12 @@ import Prelude ()
 import Distribution.Simple.Utils
 import Distribution.Utils.Progress
 import Distribution.Verbosity
+import GHC.Stack (HasCallStack, callStack, prettyCallStack)
+import System.IO (hFlush, hPutStr, hPutStrLn)
 import Text.PrettyPrint
 
 type CtxMsg = Doc
-type LogMsg = Doc
+data LogMsg = WarnMsg Doc | InfoMsg Doc
 type ErrMsg = Doc
 
 data LogEnv = LogEnv
@@ -40,7 +38,6 @@ instance Applicative LogProgress where
   LogProgress f <*> LogProgress x = LogProgress $ \r -> f r `ap` x r
 
 instance Monad LogProgress where
-  return = pure
   LogProgress m >>= f = LogProgress $ \r -> m r >>= \x -> unLogProgress (f x) r
 
 -- | Run 'LogProgress', outputting traces according to 'Verbosity',
@@ -55,31 +52,46 @@ runLogProgress verbosity (LogProgress m) =
         , le_context = []
         }
     step_fn :: LogMsg -> IO a -> IO a
-    step_fn doc go = do
-      putStrLn (render doc)
+    step_fn (WarnMsg doc) go = do
+      -- Log the warning to the stderr handle, but flush the stdout handle first,
+      -- to prevent interleaving (see Distribution.Simple.Utils.warnMessage).
+      let h = verbosityErrorHandle verbosity
+          flags = verbosityFlags verbosity
+      hFlush (verbosityChosenOutputHandle verbosity)
+      hPutStr h $ withOutputMarker flags (render doc ++ "\n")
       go
-    fail_fn :: Doc -> IO a
+    step_fn (InfoMsg doc) go = do
+      -- Don't mark 'infoProgress' messages (mostly Backpack internals)
+      hPutStrLn (verbosityChosenOutputHandle verbosity) (render doc)
+      go
+    fail_fn :: ErrMsg -> IO a
     fail_fn doc = do
       dieNoWrap verbosity (render doc)
 
 -- | Output a warning trace message in 'LogProgress'.
 warnProgress :: Doc -> LogProgress ()
 warnProgress s = LogProgress $ \env ->
-  when (le_verbosity env >= normal) $
+  when (verbosityLevel (le_verbosity env) >= Normal) $
     stepProgress $
-      hang (text "Warning:") 4 (formatMsg (le_context env) s)
+      WarnMsg $
+        hang (text "Warning:") 4 (formatMsg (le_context env) s)
 
 -- | Output an informational trace message in 'LogProgress'.
 infoProgress :: Doc -> LogProgress ()
 infoProgress s = LogProgress $ \env ->
-  when (le_verbosity env >= verbose) $
-    stepProgress s
+  when (verbosityLevel (le_verbosity env) >= Verbose) $
+    stepProgress $
+      InfoMsg s
 
 -- | Fail the computation with an error message.
-dieProgress :: Doc -> LogProgress a
+dieProgress :: HasCallStack => Doc -> LogProgress a
 dieProgress s = LogProgress $ \env ->
   failProgress $
-    hang (text "Error:") 4 (formatMsg (le_context env) s)
+    hang (text "Error:") 4 $
+      vcat
+        [ formatMsg (le_context env) s
+        , vcat (map text (lines (prettyCallStack callStack)))
+        ]
 
 -- | Format a message with context. (Something simple for now.)
 formatMsg :: [CtxMsg] -> Doc -> Doc

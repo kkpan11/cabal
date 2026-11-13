@@ -1,14 +1,20 @@
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE ApplicativeDo #-}
+{-# LANGUAGE DerivingVia #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE RecordWildCards #-}
 
 module Distribution.Client.CmdInstall.ClientInstallFlags
   ( InstallMethod (..)
   , ClientInstallFlags (..)
   , defaultClientInstallFlags
   , clientInstallOptions
+  , clientInstallFlagsGrammar
   ) where
 
 import Distribution.Client.Compat.Prelude
+import Distribution.Compat.Lens (Lens')
+import Distribution.FieldGrammar
 import Prelude ()
 
 import Distribution.ReadE
@@ -22,10 +28,11 @@ import Distribution.Simple.Command
   , reqArg
   )
 import Distribution.Simple.Setup
-  ( Flag (..)
+  ( Flag
   , flagToList
   , toFlag
   , trueArg
+  , pattern Flag
   )
 
 import Distribution.Client.Types.InstallMethod
@@ -34,6 +41,7 @@ import Distribution.Client.Types.InstallMethod
 import Distribution.Client.Types.OverwritePolicy
   ( OverwritePolicy (..)
   )
+import Distribution.Client.Utils.Parsec
 
 import qualified Distribution.Compat.CharParsing as P
 
@@ -45,15 +53,10 @@ data ClientInstallFlags = ClientInstallFlags
   , cinstInstalldir :: Flag FilePath
   }
   deriving (Eq, Show, Generic)
-
-instance Monoid ClientInstallFlags where
-  mempty = gmempty
-  mappend = (<>)
-
-instance Semigroup ClientInstallFlags where
-  (<>) = gmappend
+  deriving (Semigroup, Monoid) via Generically ClientInstallFlags
 
 instance Binary ClientInstallFlags
+instance NFData ClientInstallFlags
 instance Structured ClientInstallFlags
 
 defaultClientInstallFlags :: ClientInstallFlags
@@ -113,6 +116,25 @@ clientInstallOptions _ =
       $ reqArg "DIR" (succeedReadE Flag) flagToList
   ]
 
+clientInstallFlagsGrammar
+  :: ( FieldGrammar c g
+     , c (Identity (Flag Bool))
+     , c (Flag' FilePathNT FilePath)
+     , c (Identity (Flag OverwritePolicy))
+     , c (Identity (Flag InstallMethod))
+     )
+  => g ClientInstallFlags ClientInstallFlags
+clientInstallFlagsGrammar = do
+  cinstInstallLibs <- optionalFieldDef "lib" cinstInstallLibsLens mempty
+  cinstEnvironmentPath <-
+    optionalFieldDefAla "package-env" (alaFlag FilePathNT) cinstEnvironmentPathLens mempty
+      <* optionalFieldDefAla "env" (alaFlag FilePathNT) cinstEnvironmentPathLens mempty
+  cinstOverwritePolicy <- optionalFieldDef "overwrite-policy" cinstOverwritePolicyLens mempty
+  cinstInstallMethod <- optionalFieldDef "install-method" cinstInstallMethodLens mempty
+  cinstInstalldir <- optionalFieldDefAla "installdir" (alaFlag FilePathNT) cinstInstalldirLens mempty
+  pure ClientInstallFlags{..}
+{-# SPECIALIZE clientInstallFlagsGrammar :: ParsecFieldGrammar' ClientInstallFlags #-}
+
 parsecInstallMethod :: CabalParsing m => m InstallMethod
 parsecInstallMethod = do
   name <- P.munch1 isAlpha
@@ -120,3 +142,23 @@ parsecInstallMethod = do
     "copy" -> pure InstallMethodCopy
     "symlink" -> pure InstallMethodSymlink
     _ -> P.unexpected $ "InstallMethod: " ++ name
+
+cinstInstallLibsLens :: Lens' ClientInstallFlags (Flag Bool)
+cinstInstallLibsLens f c = fmap (\x -> c{cinstInstallLibs = x}) (f (cinstInstallLibs c))
+{-# INLINEABLE cinstInstallLibsLens #-}
+
+cinstEnvironmentPathLens :: Lens' ClientInstallFlags (Flag FilePath)
+cinstEnvironmentPathLens f c = fmap (\x -> c{cinstEnvironmentPath = x}) (f (cinstEnvironmentPath c))
+{-# INLINEABLE cinstEnvironmentPathLens #-}
+
+cinstOverwritePolicyLens :: Lens' ClientInstallFlags (Flag OverwritePolicy)
+cinstOverwritePolicyLens f c = fmap (\x -> c{cinstOverwritePolicy = x}) (f (cinstOverwritePolicy c))
+{-# INLINEABLE cinstOverwritePolicyLens #-}
+
+cinstInstallMethodLens :: Lens' ClientInstallFlags (Flag InstallMethod)
+cinstInstallMethodLens f c = fmap (\x -> c{cinstInstallMethod = x}) (f (cinstInstallMethod c))
+{-# INLINEABLE cinstInstallMethodLens #-}
+
+cinstInstalldirLens :: Lens' ClientInstallFlags (Flag FilePath)
+cinstInstalldirLens f c = fmap (\x -> c{cinstInstalldir = x}) (f (cinstInstalldir c))
+{-# INLINEABLE cinstInstalldirLens #-}

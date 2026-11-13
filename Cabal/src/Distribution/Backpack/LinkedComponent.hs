@@ -1,4 +1,3 @@
-{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
 
 -- | See <https://github.com/ezyang/ghc-proposals/blob/backpack/proposals/0000-backpack.rst>
@@ -26,7 +25,6 @@ import Distribution.Backpack.ModuleScope
 import Distribution.Backpack.ModuleShape
 import Distribution.Backpack.PreModuleShape
 import Distribution.Backpack.UnifyM
-import Distribution.Utils.MapAccum
 
 import Distribution.ModuleName
 import Distribution.Package
@@ -39,6 +37,7 @@ import Distribution.Verbosity
 
 import qualified Data.Map as Map
 import qualified Data.Set as Set
+import Data.Traversable (mapAccumM)
 import Distribution.Pretty (pretty)
 import Text.PrettyPrint (Doc, hang, hsep, quotes, text, vcat, ($+$))
 
@@ -161,9 +160,7 @@ toLinkedComponent
 
       lookupUid :: ComponentId -> (OpenUnitId, ModuleShape)
       lookupUid cid =
-        fromMaybe
-          (error "linkComponent: lookupUid")
-          (Map.lookup cid pkg_map)
+        Map.findWithDefault (error "linkComponent: lookupUid") cid pkg_map
 
     let orErr (Right x) = return x
         orErr (Left [err]) = dieProgress err
@@ -260,7 +257,17 @@ toLinkedComponent
         hang
           (text "Non-library component has unfilled requirements:")
           4
-          (vcat [pretty req | req <- Set.toList reqs])
+          ( vcat
+              [ case Map.lookup req (modScopeRequires linked_shape0) of
+                Just srcs@(_ : _) ->
+                  hang
+                    (pretty req)
+                    4
+                    (vcat [text "brought into scope by" <+> dispModuleSource (getSource src) | src <- srcs])
+                _ -> pretty req
+              | req <- Set.toList reqs
+              ]
+          )
 
     -- NB: do NOT include hidden modules here: GHC 7.10's ghc-pkg
     -- won't allow it (since someone could directly synthesize
@@ -290,7 +297,7 @@ toLinkedComponent
                   (text "Problem with module re-exports:")
                   2
                   (vcat [hang (text "-") 2 l | l <- ls])
-    reexports_list <- hdl . (flip map) src_reexports $ \reex@(ModuleReexport mb_pn from to) -> do
+    reexports_list <- hdl . flip map src_reexports $ \reex@(ModuleReexport mb_pn from to) -> do
       case Map.lookup from (modScopeProvides linked_shape) of
         Just cands@(x0 : xs0) -> do
           -- Make sure there is at least one candidate
@@ -331,7 +338,7 @@ toLinkedComponent
         -- TODO: doublecheck we have checked for
         -- src_provs duplicates already!
         -- These are normal module exports.
-        [(mod_name, (OpenModule this_uid mod_name)) | mod_name <- src_provs]
+        [(mod_name, OpenModule this_uid mod_name) | mod_name <- src_provs]
           ++
           -- These are reexports, which we managed to resolve to something in an external package.
           [(mn_new, om) | (mn_new, Just om) <- reexports_list]
@@ -373,7 +380,7 @@ toLinkedComponent
         , lc_component = component
         , lc_public = is_public
         , -- These must be executables
-          lc_exe_deps = map (fmap (\cid -> IndefFullUnitId cid Map.empty)) exe_deps
+          lc_exe_deps = map (fmap (`IndefFullUnitId` Map.empty)) exe_deps
         , lc_shape = final_linked_shape
         , lc_includes = linked_includes
         , lc_sig_includes = linked_sig_includes

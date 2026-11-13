@@ -1,11 +1,11 @@
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE DataKinds #-}
 
 module Distribution.Types.PackageDescription.Lens
   ( PackageDescription
   , module Distribution.Types.PackageDescription.Lens
   ) where
 
+import Data.Bifunctor
 import Distribution.Compat.Lens
 import Distribution.Compat.Prelude
 import Prelude ()
@@ -31,10 +31,11 @@ import Distribution.Types.SetupBuildInfo (SetupBuildInfo)
 import Distribution.Types.SourceRepo (SourceRepo)
 import Distribution.Types.TestSuite (TestSuite, testModules)
 import Distribution.Types.TestSuite.Lens (testBuildInfo, testName)
-import Distribution.Utils.Path (LicenseFile, PackageDir, SymbolicPath)
+import Distribution.Utils.Path
 import Distribution.Utils.ShortText (ShortText)
 import Distribution.Version (VersionRange)
 
+import qualified Data.Text as T
 import qualified Distribution.SPDX as SPDX
 import qualified Distribution.Types.PackageDescription as T
 
@@ -46,7 +47,7 @@ licenseRaw :: Lens' PackageDescription (Either SPDX.License License)
 licenseRaw f s = fmap (\x -> s{T.licenseRaw = x}) (f (T.licenseRaw s))
 {-# INLINE licenseRaw #-}
 
-licenseFiles :: Lens' PackageDescription [SymbolicPath PackageDir LicenseFile]
+licenseFiles :: Lens' PackageDescription [RelativePath Pkg File]
 licenseFiles f s = fmap (\x -> s{T.licenseFiles = x}) (f (T.licenseFiles s))
 {-# INLINE licenseFiles #-}
 
@@ -102,6 +103,13 @@ customFieldsPD :: Lens' PackageDescription [(String, String)]
 customFieldsPD f s = fmap (\x -> s{T.customFieldsPD = x}) (f (T.customFieldsPD s))
 {-# INLINE customFieldsPD #-}
 
+customFieldsPDText :: Lens' PackageDescription [(T.Text, T.Text)]
+customFieldsPDText = customFieldsPD . textLens
+  where
+    textLens :: Lens' [(String, String)] [(T.Text, T.Text)]
+    textLens f = fmap (map (bimap T.unpack T.unpack)) . f . map (bimap T.pack T.pack)
+{-# INLINE customFieldsPDText #-}
+
 specVersion :: Lens' PackageDescription CabalSpecVersion
 specVersion f s = fmap (\x -> s{T.specVersion = x}) (f (T.specVersion s))
 {-# INLINE specVersion #-}
@@ -138,25 +146,29 @@ benchmarks :: Lens' PackageDescription [Benchmark]
 benchmarks f s = fmap (\x -> s{T.benchmarks = x}) (f (T.benchmarks s))
 {-# INLINE benchmarks #-}
 
-dataFiles :: Lens' PackageDescription [FilePath]
+dataFiles :: Lens' PackageDescription [RelativePath DataDir File]
 dataFiles f s = fmap (\x -> s{T.dataFiles = x}) (f (T.dataFiles s))
 {-# INLINE dataFiles #-}
 
-dataDir :: Lens' PackageDescription FilePath
+dataDir :: Lens' PackageDescription (SymbolicPath Pkg (Dir DataDir))
 dataDir f s = fmap (\x -> s{T.dataDir = x}) (f (T.dataDir s))
 {-# INLINE dataDir #-}
 
-extraSrcFiles :: Lens' PackageDescription [String]
+extraSrcFiles :: Lens' PackageDescription [RelativePath Pkg File]
 extraSrcFiles f s = fmap (\x -> s{T.extraSrcFiles = x}) (f (T.extraSrcFiles s))
 {-# INLINE extraSrcFiles #-}
 
-extraTmpFiles :: Lens' PackageDescription [String]
+extraTmpFiles :: Lens' PackageDescription [RelativePath Pkg File]
 extraTmpFiles f s = fmap (\x -> s{T.extraTmpFiles = x}) (f (T.extraTmpFiles s))
 {-# INLINE extraTmpFiles #-}
 
-extraDocFiles :: Lens' PackageDescription [String]
+extraDocFiles :: Lens' PackageDescription [RelativePath Pkg File]
 extraDocFiles f s = fmap (\x -> s{T.extraDocFiles = x}) (f (T.extraDocFiles s))
 {-# INLINE extraDocFiles #-}
+
+extraFiles :: Lens' PackageDescription [RelativePath Pkg File]
+extraFiles f s = fmap (\x -> s{T.extraFiles = x}) (f (T.extraFiles s))
+{-# INLINE extraFiles #-}
 
 -- | @since 3.0.0.0
 allLibraries :: Traversal' PackageDescription Library

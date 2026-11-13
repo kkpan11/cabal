@@ -1,5 +1,4 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DataKinds #-}
 
 module Distribution.Types.ForeignLib
   ( ForeignLib (..)
@@ -26,6 +25,7 @@ import Distribution.Types.BuildInfo
 import Distribution.Types.ForeignLibOption
 import Distribution.Types.ForeignLibType
 import Distribution.Types.UnqualComponentName
+import Distribution.Utils.Path
 import Distribution.Version
 
 import Data.Monoid
@@ -53,15 +53,15 @@ data ForeignLib = ForeignLib
   -- current:revision:age versioning scheme.
   , foreignLibVersionLinux :: Maybe Version
   -- ^ Linux library version
-  , foreignLibModDefFile :: [FilePath]
+  , foreignLibModDefFile :: [RelativePath Source File]
   -- ^ (Windows-specific) module definition files
   --
   -- This is a list rather than a maybe field so that we can flatten
   -- the condition trees (for instance, when creating an sdist)
   }
-  deriving (Generic, Show, Read, Eq, Ord, Typeable, Data)
+  deriving (Generic, Show, Read, Eq, Ord, Data)
 
-data LibVersionInfo = LibVersionInfo Int Int Int deriving (Data, Eq, Generic, Typeable)
+data LibVersionInfo = LibVersionInfo Int Int Int deriving (Data, Eq, Generic)
 
 instance Ord LibVersionInfo where
   LibVersionInfo c r _ `compare` LibVersionInfo c' r' _ =
@@ -83,7 +83,7 @@ instance Read LibVersionInfo where
 
 instance Binary LibVersionInfo
 instance Structured LibVersionInfo
-instance NFData LibVersionInfo where rnf = genericRnf
+instance NFData LibVersionInfo
 
 instance Pretty LibVersionInfo where
   pretty (LibVersionInfo c r a) =
@@ -136,7 +136,7 @@ instance L.HasBuildInfo ForeignLib where
 
 instance Binary ForeignLib
 instance Structured ForeignLib
-instance NFData ForeignLib where rnf = genericRnf
+instance NFData ForeignLib
 
 instance Semigroup ForeignLib where
   a <> b =
@@ -150,7 +150,7 @@ instance Semigroup ForeignLib where
       , foreignLibModDefFile = combine foreignLibModDefFile
       }
     where
-      combine field = field a `mappend` field b
+      combine field = field a <> field b
       -- chooseLast: the second field overrides the first, unless it is Nothing
       chooseLast field = getLast (Last (field a) <> Last (field b))
 
@@ -165,7 +165,6 @@ instance Monoid ForeignLib where
       , foreignLibVersionLinux = Nothing
       , foreignLibModDefFile = []
       }
-  mappend = (<>)
 
 -- | An empty foreign library.
 emptyForeignLib :: ForeignLib

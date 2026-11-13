@@ -11,65 +11,77 @@ http://cabal.readthedocs.io/
 
 ### How to build it
 
-Building the documentation requires Python 3 and PIP. Run the following command either from the root of the cabal repository or from the `docs/` subdirectory:
+Building the documentation requires uv and Python 3. Run the following command
+either from the root of the cabal repository or from the `doc/` subdirectory:
 
 ``` console
-make users-guide
+> make users-guide
 ```
+
+To list the other documentation targets, run `make -C doc help` from the root or
+`make help` from the `doc/` subdirectory.
 
 Note: Python on Mac OS X dislikes `LC_CTYPE=UTF-8`, so unset the variable
 and instead set `LC_ALL=en_US.UTF-8`.
 
 ### How to update dependencies
 
-Once in a while you need to update Python dependencies (for instance,
-when Dependabot alerts about possible security flaw). The list of
-transitive dependencies (`requirements.txt`) is generated from the
-list of direct dependencies in `requirements.in`. To perform the
-generation step run
+The list of transitive dependencies (`requirements.txt`) is generated from the
+list of direct dependencies in `pyproject.toml`. Find outdated dependencies using UV
+(see also "UV setup details" section at the bottom) with:
 
 ```console
-> make users-guide-requirements
+> cd doc
+> uv pip list --outdated
+Package            Version    Latest   Type
+------------------ ---------- -------- -----
+certifi            2025.11.12 2026.1.4 wheel
+docutils           0.21.2     0.22.4   wheel
+sphinx             8.2.3      9.1.0    wheel
+sphinxnotes-strike 1.5        2.0      wheel
+urllib3            2.6.2      2.6.3    wheel
 ```
 
-either from the root of the cabal repository or from the `docs/` subdirectory.
-
-Note that generating `requirements.txt` is sensitive to the Python version.
-The version currently used is stamped at the top of `requirements.txt`.
-Normally, we would expect the same version of Python to be used for
-regeneration. An easy way to enforce a particular version is to perform
-regeneration in a Docker container, e.g. (from the root of repository):
+Upgrade the lock file to the latest satisfiable requirements with:
 
 ```console
-> docker run -itv $PWD:/cabal python:3.10-alpine sh
+> uv sync --upgrade
 ...
-# apk add make
-...
-# cd cabal
-# make users-guide-requirements
+ - certifi==2025.11.12
+ + certifi==2026.1.4
+ - sphinxnotes-strike==1.5
+ + sphinxnotes-strike==2.0
+ - urllib3==2.6.2
+ + urllib3==2.6.3
 ```
 
-One way to make sure the dependencies are reasonably up to date
-is to remove `requirements.txt` and regenerate it as described
-above. But in some cases you may have to add a bound manually
-to `requirements.in`, e.g. `requests >= 2.31.0`.
+In some cases, you may have to add a bound manually to `pyproject.toml`, e.g. `requests >= 2.31.0`.
 
-### Gitpod workflow
+### How to check spelling
 
-From a fork of cabal, these docs can be edited online with
-[gitpod](https://www.gitpod.io/):
+To check for typos, run `make typos` and to fix them, run `make fix-typos`. Fixing might fail.
 
-* Open in gitpod https://gitpod.io/#https://github.com/username/cabal
-* Install the virtual environment prerequisite.
-  `> sudo apt install python3.8-venv`
-* Build the user guide `> make users-guide`.
-* Open the guide in a local browser.
-  `> python -m http.server 8000 --directory=dist-newstyle/doc/users-guide`
+> If there is any ambiguity (multiple possible corrections),
+> `typos` will just report it to the user and move on.
+>
+> SOURCE: [typos/Getting Started](https://github.com/crate-ci/typos#getting-started)
 
-Make your edits, rebuild the guide and refresh the browser to preview the
-changes. When happy, commit your changes with git in the included terminal.
+```
+# spellchecker:off
+$ make users-guide-typos
+cd doc && find . -type f -name '*.rst' | xargs typos
+error: `managable` should be `manageable`, `manageably`
+  --> doc/getting-started.rst:75:6
+   |
+75 | more managable building blocks.
+   |      ^^^^^^^^^
+   |
+make: *** [Makefile: users-guide-typos] Error 2
+# spellchecker:on
+```
 
 ### Caveats, for newcomers to RST from MD
+
 RST does not allow you to skip section levels when nesting, like MD
 does.
 So, you cannot have
@@ -171,3 +183,21 @@ So, you cannot have
         `#123 <https://github.com/haskell/cabal/issues/123>`__
 
   See `conf.py` for list of currently defined link shorteners.
+
+### UV setup details
+
+The documentation build process uses [UV](https://github.com/astral-sh/uv) to manage Python dependencies.
+UV is a fast Python package installer and resolver, written in Rust.
+To get started with UV, you can install it following the [official instructions]([url](https://docs.astral.sh/uv/getting-started/installation/#installation-methods)).
+
+The following UV commands are used in the Makefile and documentation:
+
+- `uv sync`: Installs the dependencies listed in `uv.lock` (or resolves them from `pyproject.toml` if the lock file is missing).
+- `uv export --frozen --format requirements.txt`: Exports the resolved dependencies to a `requirements.txt` file (used for skjold checks).
+- `uv pip list --outdated`: Lists outdated dependencies (for updating).
+- `uv sync --upgrade`: Upgrades the dependencies to the latest versions allowed by `pyproject.toml` and updates the lock file.
+- `uvx skjold`: Runs the skjold tool (for security vulnerability checks) in an isolated environment.
+
+
+Note: The `uv.lock` file in the `doc/` directory is committed to the repository to ensure reproducible builds.
+When updating dependencies, remember to commit the updated `uv.lock` and `pyproject.toml` (if bounds are changed).

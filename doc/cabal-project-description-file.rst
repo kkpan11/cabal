@@ -1,3 +1,5 @@
+.. _cabal-project-file:
+
 Project Description — cabal.project File
 ========================================
 
@@ -78,13 +80,46 @@ cabal.project files or v1-style cabal.config freeze files. As a usage example:
 
     import: /absolutepath/some-project.project
 
+.. warning::
+
+    Conditionals are resolved *last*, irrespective of their lexical position.
+
+    ::
+
+        if true-condition
+            optimization: True
+        optimization: False
+        -- Enables optimization since conditionals are resolved last.
+
 Using conditionals will force cabal to find a ghc to derive
 architecture and version information from, which will force some
 commands (update, sdist) to require ghc present where otherwise it
 would not be necessitated.
 
+One use case for imports is to specify a `Stackage <https://www.stackage.org/>`
+snapshot, so that your cabal project can use the same set of packages as
+that snapshot. To use the ``lts-21.25`` resolver, you can write
+``import: https://www.stackage.org/lts-21.25/cabal.config`` in your
+``cabal.project``.
+
+There are a number of limitations that come with this approach however; please
+see :ref:`How can I have a reproducible set of versions for my dependencies?<how reproducible>` for
+more information.
+
 Specifying the local packages
 -----------------------------
+
+You *must* provide a non-empty list of local packages in your project, filling
+out either a ``packages`` field or an ``optional-packages`` field or both to
+satisfy this requirement.
+
+When ``cabal.project`` doesn't exist, ``cabal-install`` fabricates an ephemeral
+project for its own use with this simple content, a glob that will find any (but
+expects to find one) package in the current directory:
+
+.. code-block:: cabal
+
+        packages: ./*.cabal
 
 The following top-level options specify what the local packages of a
 project are:
@@ -92,13 +127,7 @@ project are:
 .. cfg-field:: packages: package location list (space or comma separated)
     :synopsis: Project packages.
 
-    :default: ``./*.cabal``
-
-    .. warning::
-
-      The default value ``./*.cabal`` only takes effect if there is no explicit
-      ``cabal.project`` file.
-      If you use such explicit file you *must* fill the field.
+    :default: empty
 
     Specifies the list of package locations which contain the local
     packages to be built by this project. Package locations can take the
@@ -205,14 +234,24 @@ Formally, the format is described by the following BNF:
                 | "{" Glob "," ... "," Glob "}" # union (match any of these)
 
 
-Specifying Packages from Remote Version Control Locations
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+.. _pkg-consume-source:
+
+Taking a dependency from a *source code* repository
+---------------------------------------------------
 
 Since version 2.4, the ``source-repository-package`` stanza allows for
 specifying packages in a remote version control system that cabal should
 consider during package retrieval. This allows use of a package from a
 remote version control system, rather than looking for that package in
 Hackage.
+
+Since version 3.4, cabal-install creates tarballs for each package coming from a
+``source-repository-package`` stanza (effectively applying cabal sdists to such
+packages). It gathers the names of the packages from the appropriate ``.cabal``
+file in the version control repository, and allows their use just like Hackage
+or locally defined packages.
+
+There is no command line variant of this stanza.
 
 .. code-block:: cabal
 
@@ -235,32 +274,63 @@ Hackage.
         tag: e76fdc753e660dfa615af6c8b6a2ad9ddf6afe70
         post-checkout-command: autoreconf -i
 
-Since version 3.4, cabal-install creates tarballs for each package coming
-from a ``source-repository-package`` stanza (effectively applying cabal
-sdists to such packages). It gathers the names of the packages from the
-appropriate .cabal file in the version control repository, and allows
-their use just like Hackage or locally defined packages.
+.. _source-repository-package-fields:
+
+The :ref:`VCS fields<vcs-fields>` of ``source-repository-package`` are:
+
+..
+  data SourceRepositoryPackage f = SourceRepositoryPackage
+    { srpType :: !RepoType
+    , srpLocation :: !String
+    , srpTag :: !(Maybe String)
+    , srpBranch :: !(Maybe String)
+    , srpSubdir :: !(f FilePath)
+    , srpCommand :: ![String]
+    }
 
 .. cfg-field:: type: VCS kind
 
-.. cfg-field:: location: VCS location (usually URL)
+    This field is required.
+
+    .. include:: vcs/kind.rst
+
+.. cfg-field:: location: VCS location
+
+    This field is required.
+
+    .. include:: vcs/location.rst
+
+.. cfg-field:: branch: VCS branch
+
+    This field is optional.
+
+    .. include:: vcs/branch.rst
 
 .. cfg-field:: tag: VCS tag
 
-.. cfg-field:: subdir: subdirectory list
+    This field is optional.
 
-    Look in one or more subdirectories of the repository for cabal files, rather than the root.
+    .. include:: vcs/tag.rst
+
+.. cfg-field:: subdir: VCS subdirectory list
+
+    Look in one or more subdirectories of the repository for cabal files, rather
+    than the root. This field is optional.
+
+    .. include:: vcs/subdir.rst
 
 .. cfg-field:: post-checkout-command: command
 
     Run command in the checked out repository, prior sdisting.
 
-Global configuration options
-----------------------------
+Global options
+--------------
 
 The following top-level configuration options are not specific to any
-package, and thus apply globally:
+package, and thus apply globally.
 
+Verbosity options
+^^^^^^^^^^^^^^^^^
 
 .. cfg-field:: verbose: nat
                -v[n], --verbose[=n]
@@ -273,6 +343,18 @@ package, and thus apply globally:
 
     The command line variant of this field is ``--verbose=2``; a short
     form ``-v2`` is also supported.
+
+.. cfg-field:: build-timings: boolean
+               --build-timings
+
+    Log timing information to stdout, in the following format::
+
+        [build-timings] configure aeson-2.2.3.0 0.042s
+        [build-timings] build     aeson-2.2.3.0 3.284s
+        [build-timings] install   aeson-2.2.3.0 0.123s
+
+Job and concurrency options
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 .. cfg-field:: jobs: nat or $ncpus
                -j[NUM], --jobs[=NUM], --jobs=$ncpus
@@ -316,15 +398,8 @@ package, and thus apply globally:
 
     The command line variant of this field is ``--keep-going``.
 
-.. option:: --builddir=DIR
-
-    Specifies the name of the directory where build products for
-    build will be stored; defaults to ``dist-newstyle``.  If a
-    relative name is specified, this directory is resolved relative
-    to the root of the project (i.e., where the ``cabal.project``
-    file lives.)
-
-    This option can only be specified from the command line.
+Project options
+^^^^^^^^^^^^^^^
 
 .. _cmdoption-project-dir:
 .. option:: --project-dir=DIR
@@ -356,6 +431,22 @@ package, and thus apply globally:
 
     This option can only be specified from the command line.
 
+.. _cmdoption-project-file-parser:
+.. option:: --project-file-parser=PARSER
+
+    :since: 3.18
+
+    Specifies the parser to use for reading the project file. The available
+    parsers are:
+
+    * ``legacy`` - the old parser (will be removed in a future release)
+    * ``default`` - the default parser (uses ``fallback`` unless compiled with ``-f+legacy-comparison``)
+    * ``parsec`` - the new parser using Parsec
+    * ``fallback`` - the new parser using Parsec, but falling back to the old parser if it fails
+    * ``compare`` - the new parser using Parsec, but comparing the results with the old parser
+
+    This option can only be specified from the command line.
+
 .. option:: -z, --ignore-project
 
     Ignores the local ``cabal.project`` file and uses the default
@@ -363,7 +454,35 @@ package, and thus apply globally:
     this flag will be ignored if either of the ``--project-dir`` or
     ``--project-file`` flags are also set.
 
-.. option:: --store-dir=DIR
+Environment options
+-------------------
+
+.. cfg-field:: offline: boolean
+               --offline
+               --no-offline
+    :synopsis: Disable package downloads from the network.
+
+    :default: ``False``
+
+    If ``True``, Cabal refuses to download packages from remote repositories.
+
+    The command line variant of this field is ``--offline``.
+
+.. cfg-field:: package-env: environment name or filepath
+               --package-env=ENV
+               --env=ENV
+    :synopsis: Package environment file to create or modify.
+
+    :default: unset
+
+    Set the package environment file that may be modified by
+    ``cabal install --lib``.
+
+    The command line variants of this field are ``--package-env=ENV`` and
+    ``--env=ENV``.
+
+.. cfg-field:: store-dir: filepath
+               --store-dir=DIR
 
     Specifies the name of the directory of the global package store.
 
@@ -427,33 +546,8 @@ package, and thus apply globally:
     The command line variant of this flag is ``--package-db=DB`` which can be
     specified multiple times.
 
-Phase control
--------------
-
-The following settings apply to commands that result in build actions
-(``build``, ``run``, ``repl``, ``test``...), and control which phases of the
-build are executed.
-
-.. option:: --dry-run
-
-    Do not download, build, or install anything, only print what would happen.
-
-.. option:: --only-configure
-
-    Instead of performing a full build just run the configure step.
-    Only accepted by the ``build`` command.
-
-.. option:: --only-download
-
-    Do not build anything, only fetch the packages.
-
-.. option:: --only-dependencies
-
-    Install only the dependencies necessary to build the given packages.
-    Not accepted by the ``repl`` command.
-
-Solver configuration options
-----------------------------
+Solver options
+--------------
 
 The following settings control the behavior of the dependency solver:
 
@@ -698,6 +792,13 @@ The following settings control the behavior of the dependency solver:
     present in my-repository only in version 2.0, and the :override forbids
     searching for other versions of X further up the list.
 
+    There is one exception: if all versions of a package in the overriding
+    repository are deprecated (i.e. excluded by that repository's
+    ``preferred-versions``), :override falls back to merge semantics for that
+    package, so versions from earlier repositories remain visible. This avoids
+    a situation where a fully-deprecated override inadvertently hides all
+    usable versions of a package.
+
     :override has no effect for package names that aren't present in the
     overriding repository.
 
@@ -732,9 +833,156 @@ The following settings control the behavior of the dependency solver:
    explicitly constrained. When set to `none`, the solver will
    consider all packages.
 
+.. _package-configuration-options:
 
-Package configuration options
------------------------------
+Build options
+-------------
+
+.. cfg-field:: builddir: directory
+               --builddir=DIR
+
+    Specifies the name of the directory where build products for
+    build will be stored; defaults to ``dist-newstyle``.  If a
+    relative name is specified, this directory is resolved relative
+    to the root of the project (i.e., where the ``cabal.project``
+    file lives.)
+
+    This option can only be specified from the command line.
+
+.. cfg-field:: build-info: boolean
+               --enable-build-info
+               --disable-build-info
+    :synopsis: Whether build information for each individual component should be
+               written in a machine readable format.
+
+    :default: ``False``
+
+    Enable generation of build information for Cabal components. Contains very
+    detailed information on how to build an individual component, such as
+    compiler version, modules of a component and how to compile the component.
+
+    The output format is in JSON, and the exact location can be discovered from
+    ``plan.json``, where it is identified by ``build-info`` within the items in
+    the ``install-plan``.
+    Note, that this field in ``plan.json`` can be ``null``, if and only if
+    ``build-type: Custom`` is set, and the ``Cabal`` version is too
+    old (i.e. ``< 3.7``).
+    If the field is missing entirely, the component is not a local one, thus,
+    no ``build-info`` exists for that particular component within the
+    ``install-plan``.
+
+    .. note::
+        The format and fields of the generated build information is currently experimental,
+        in the future we might add or remove fields, depending on the needs of other tooling.
+
+.. cfg-field:: logs-dir: directory
+               --logs-dir=DIR
+    :synopsis: Directory to store build logs.
+
+    :default: ``~/.cabal/logs``
+
+    :strike:`The location where build logs for packages are stored.`
+    Not implemented yet.
+
+    The command line variant of this flag is ``--logs-dir=DIR``.
+
+.. cfg-field:: build-summary: template filepath
+               --build-summary=TEMPLATE
+    :synopsis: Build summaries location.
+
+    :default: ``~/.cabal/logs/build.log``
+
+    :strike:`The file to save build summaries.` Not implemented yet.
+
+    Valid variables which can be used in the path are ``$pkgid``,
+    ``$compiler``, ``$os`` and ``$arch``.
+
+    The command line variant of this flag is
+    ``--build-summary=TEMPLATE``.
+
+.. cfg-field:: build-log: template filepath
+               --build-log=TEMPLATE
+    :synopsis: Build log location template.
+
+    :default: unset
+
+    Log all builds to file. Valid variables which can be used in the path are
+    ``$pkgid``, ``$compiler``, ``$os`` and ``$arch``.
+
+    The command line variant of this flag is ``--build-log=TEMPLATE``.
+
+.. cfg-field:: remote-build-reporting: none, anonymous, or detailed
+               --remote-build-reporting=LEVEL
+    :synopsis: Build report level for remote reporting.
+
+    :default: ``none``
+
+    Generate build reports to send to a remote server.
+
+    The command line variant of this flag is
+    ``--remote-build-reporting=LEVEL``.
+
+Install options
+---------------
+
+.. cfg-field:: overwrite-policy: always, never, or prompt
+               --overwrite-policy=POLICY
+    :synopsis: How to handle existing executable links.
+
+    :default: ``never``
+
+    Controls what ``cabal install`` does when an executable already exists in
+    the target installation directory.
+
+    The command line variant of this field is
+    ``--overwrite-policy=POLICY``.
+
+.. cfg-field:: install-method: copy or symlink
+               --install-method=METHOD
+    :synopsis: How to install executables.
+
+    :default: platform dependent
+
+    Controls whether executables are installed by copying or by creating
+    symlinks.
+
+    The command line variant of this field is ``--install-method=METHOD``.
+
+.. cfg-field:: installdir: directory
+               --installdir=DIR
+    :synopsis: Target directory for installed executables.
+
+    :default: platform dependent
+
+    Where ``cabal install`` places installed executables (by symlinking or
+    copying, depending on :cfg-field:`install-method`).
+
+    The command line variant of this field is ``--installdir=DIR``.
+
+.. cfg-field:: symlink-bindir: directory
+               --symlink-bindir=DIR
+    :synopsis: Add symlinks to installed executables into this directory.
+
+    :default: unset
+
+    This is a legacy option. Prefer :cfg-field:`installdir` for current
+    ``cabal install`` workflows.
+
+    The command line variant of this field is ``--symlink-bindir=DIR``.
+
+.. cfg-field:: lib: boolean
+               --lib
+    :synopsis: Install libraries instead of executables.
+
+    :default: ``False``
+
+    For ``cabal install``, install libraries from target packages (rather than
+    executable components).
+
+    The command line variant of this field is ``--lib``.
+
+Package options
+---------------
 
 Package options affect the building of specific packages. There are three
 ways a package option can be specified:
@@ -750,20 +998,17 @@ ways a package option can be specified:
    apply to all packages, local ones from the project and also external
    dependencies.
 
-
 For example, the following options specify that :cfg-field:`optimization`
-should be turned off for all local packages, and that ``bytestring`` (possibly
-an external dependency) should be built with ``-fno-state-hack``::
+should be turned off for all local packages, and that ``awesome-package`` (possibly
+an external dependency) should have the flag ``some-flag`` disabled ::
 
     optimization: False
 
-    package bytestring
-        ghc-options: -fno-state-hack
+    package awesome-package
+        flags: -some-flag
 
-``ghc-options`` is not specifically described in this documentation, but is one
-of many fields for configuring programs.  They take the form
-``progname-options`` and ``progname-location``, and can be set for all local
-packages in a ``program-options`` stanza or under a package stanza.
+Note that options at the top level take precedence over those at the ``package``
+stanza for local packages.
 
 On the command line, these options are applied to all local packages.
 There is no per-package command line interface.
@@ -772,6 +1017,26 @@ Some flags were added by more recent versions of the Cabal library. This
 means that they are NOT supported by packages which use Custom setup
 scripts that require a version of the Cabal library older than when the
 feature was added.
+
+.. cfg-section:: package name or *
+
+    Specify package configuration options for the specific package (be it an
+    external or local package) or for all packages (external and local).
+
+    A ``package`` stanza can contain the configuration fields listed in this
+    section and ``<progname>-options``:
+
+    ::
+
+        package awesome-package
+          flags: -some-flag
+          profiling: True
+          cxx-options: -Wall
+
+    Program options are not extensively described in this documentation but a
+    good amount of them can be found in the :ref:`build-info` section.
+
+.. cfg-section:: None
 
 .. cfg-field:: flags: list of +flagname or -flagname (space separated)
                -f FLAGS or -fFLAGS, --flags=FLAGS
@@ -809,7 +1074,7 @@ feature was added.
 
     Specify the path to a particular compiler to be used. If not an
     absolute path, it will be resolved according to the ``PATH``
-    environment. The type of the compiler (GHC, GHCJS, etc) must be
+    environment. The type of the compiler (GHC, UHC, etc) must be
     consistent with the setting of the :cfg-field:`compiler` field.
 
     The most common use of this option is to specify a different version
@@ -892,7 +1157,7 @@ feature was added.
     The command line variant of this flag is ``--configure-option=arg``,
     which can be specified multiple times to pass multiple options.
 
-.. cfg-field:: compiler: ghc, ghcjs, jhc, lhc, uhc or haskell-suite
+.. cfg-field:: compiler: ghc, jhc, lhc, or uhc
                --compiler=compiler
     :synopsis: Compiler to build with.
 
@@ -979,24 +1244,28 @@ feature was added.
 Object code options
 ^^^^^^^^^^^^^^^^^^^
 
-.. cfg-field:: debug-info: integer
-               --enable-debug-info[=n]
+.. cfg-field:: debug-info: boolean | integer [0 .. 3]
+               -g[n], --enable-debug-info[=n]
                --disable-debug-info
     :synopsis: Build with debug info enabled.
     :since: 1.22
 
     :default: False
 
-    If the compiler (e.g., GHC 7.10 and later) supports outputting OS
-    native debug info (e.g., DWARF), setting ``debug-info: True`` will
-    instruct it to do so. See the GHC wiki page on :ghc-wiki:`DWARF`
-    for more information about this feature.
-
-    (This field also accepts numeric syntax, but until GHC 8.2 this didn't
-    do anything.)
-
-    The command line variant of this flag is ``--enable-debug-info`` and
+    If the compiler supports outputting OS native debug info, setting
+    ``debug-info: True`` will instruct it to do so.  The command line variants of
+    this flag are ``-g[n]``, ``--enable-debug-info[=n]`` and
     ``--disable-debug-info``.
+
+    .. admonition:: GHC Behaviour
+        :class: tip
+
+        Until GHC 8.2, GHC didn't do anything if this field was forwarded to it
+        in numeric syntax.
+
+        GHC 7.10 and later support outputting OS native debug info (e.g.,
+        DWARF). See the GHC wiki page on :ghc-wiki:`DWARF` for more information
+        about this feature.
 
 .. cfg-field:: split-sections: boolean
                --enable-split-sections
@@ -1158,6 +1427,25 @@ Dynamic linking options
     The command line variant of this flag is
     ``--enable-library-for-ghci`` and ``--disable-library-for-ghci``.
 
+.. cfg-field:: library-bytecode: boolean
+               --enable-library-bytecode
+               --disable-library-bytecode
+    :synopsis: Build bytecode libraries.
+
+    :default: False
+
+    Build bytecode libraries (``.bytecodelib`` artifacts) alongside the
+    normal object code libraries. Bytecode libraries are useful when you
+    need to force ``ghci`` to run in bytecode mode, for example by
+    passing ``-fprefer-byte-code``. This option currently requires GHC
+    9.15 or newer; older compilers ignore the flag.
+
+    Profiled bytecode libraries are not currently supported. Bytecode files are always
+    produced alongside a vanilla object format.
+
+    The command line variant of this flag is
+    ``--enable-library-bytecode`` and ``--disable-library-bytecode``.
+
 .. cfg-field:: relocatable:
                --relocatable
     :synopsis: Build relocatable package.
@@ -1250,6 +1538,8 @@ Foreign function interface options
     ``--extra-framework-dirs=DIR``, which can be specified multiple
     times.
 
+.. _profiling-options:
+
 Profiling options
 ^^^^^^^^^^^^^^^^^
 
@@ -1275,6 +1565,8 @@ Profiling options
 
     The command line variant of this flag is ``--enable-profiling`` and
     ``--disable-profiling``.
+
+.. _profiling-detail:
 
 .. cfg-field:: profiling-detail: level
                --profiling-detail=level
@@ -1315,7 +1607,7 @@ Profiling options
     late-toplevel
         Like top-level but costs will be assigned to top level definitions after
         optimization. This lowers profiling overhead massively while giving similar
-        levels of detail as toplevle-functions. However it means functions introduced
+        levels of detail as toplevel-functions. However it means functions introduced
         by GHC during optimization will show up in profiles as well.
         Corresponds to ``-fprof-late`` if supported and ``-fprof-auto-top`` otherwise.
     late
@@ -1581,6 +1873,21 @@ running ``setup haddock``.
     This flag is provided as a technology preview and is subject to change in the
     next releases.
 
+.. cfg-field:: haddock-use-unicode: boolean
+               --haddock-use-unicode
+    :synopsis: Pass --use-unicode option to haddock.
+
+    Generate HTML documentation which contains unicode characters.
+
+.. cfg-field:: haddock-resources-dir: DIR
+               --haddock-resources-dir=DIR
+    :synopsis: Location of Haddock's static/auxiliary files.
+
+    Location of Haddock's static/auxiliary files. For Haddock distributed with
+    GHC (or, more precisely, built within the GHC source tree), this path should
+    be automatically inferred. For Haddock built from source, however, this path
+    should likely be explicitly set for every Haddock invocation.
+
 .. cfg-field:: open: boolean
                --open
     :synopsis: Open generated documentation in-browser.
@@ -1589,11 +1896,36 @@ running ``setup haddock``.
     when complete. This will use ``xdg-open`` on Linux and BSD systems,
     ``open`` on macOS, and ``start`` on Windows.
 
-Advanced global configuration options
--------------------------------------
+Program options
+^^^^^^^^^^^^^^^
+
+.. cfg-section:: program-options
+
+:ref:`Program options<program_options>` can be specified once for all local packages by means of the
+``program-options`` stanza. For example:
+
+::
+
+    program-options
+        ghc-options: -Werror
+
+indicates that all **local packages** will provide ``-Werror`` to GHC when being
+built. On the other hand, the following snippet:
+
+::
+
+    package *
+        ghc-options: -Werror
+
+will apply ``-Werror`` to all packages, local and remote.
+
+Advanced global options
+-----------------------
+
+.. cfg-section:: None
 
 .. cfg-field:: write-ghc-environment-files: always, never, or ghc8.4.4+
-               --write-ghc-environment-files=always\|never\|ghc8.4.4+
+               --write-ghc-environment-files=always|never|ghc8.4.4+
     :synopsis: Whether a ``.ghc.environment`` should be created after a successful build.
 
     :default: ``never``
@@ -1602,37 +1934,11 @@ Advanced global configuration options
     should be created after a successful build.
 
     Since Cabal 3.0, defaults to ``never``. Before that, defaulted to
-    creating them only when compiling with GHC 8.4.4 and older (GHC
+    creating them only when compiling with GHC 8.4.4 and later (GHC
     8.4.4 `is the first version
     <https://gitlab.haskell.org/ghc/ghc/-/issues/13753>`_ that supports
     the ``-package-env -`` option that allows ignoring the package
     environment files).
-
-.. cfg-field:: build-info: True, False
-               --enable-build-info
-               --disable-build-info
-    :synopsis: Whether build information for each individual component should be
-               written in a machine readable format.
-
-    :default: ``False``
-
-    Enable generation of build information for Cabal components. Contains very
-    detailed information on how to build an individual component, such as
-    compiler version, modules of a component and how to compile the component.
-
-    The output format is in json, and the exact location can be discovered from
-    ``plan.json``, where it is identified by ``build-info`` within the items in
-    the ``install-plan``.
-    Note, that this field in ``plan.json`` can be ``null``, if and only if
-    ``build-type: Custom`` is set, and the ``Cabal`` version is too
-    old (i.e. ``< 3.7``).
-    If the field is missing entirely, the component is not a local one, thus,
-    no ``build-info`` exists for that particular component within the
-    ``install-plan``.
-
-    .. note::
-        The format and fields of the generated build information is currently experimental,
-        in the future we might add or remove fields, depending on the needs of other tooling.
 
 .. _cmdoption-http-transport:
 .. cfg-field:: http-transport: curl, wget, powershell, or plain-http
@@ -1678,34 +1984,6 @@ Advanced global configuration options
 
     The command line variant of this flag is
     ``--remote-repo-cache=DIR``.
-
-.. cfg-field:: logs-dir: directory
-               --logs-dir=DIR
-    :synopsis: Directory to store build logs.
-
-    :default: ``~/.cabal/logs``
-
-    :strike:`The location where build logs for packages are stored.`
-    Not implemented yet.
-
-    The command line variant of this flag is ``--logs-dir=DIR``.
-
-.. cfg-field:: build-summary: template filepath
-               --build-summary=TEMPLATE
-    :synopsis: Build summaries location.
-
-    :default: ``~/.cabal/logs/build.log``
-
-    :strike:`The file to save build summaries.` Not implemented yet.
-
-    Valid variables which can be used in the path are ``$pkgid``,
-    ``$compiler``, ``$os`` and ``$arch``.
-
-    The command line variant of this flag is
-    ``--build-summary=TEMPLATE``.
-
-Undocumented fields: ``root-cmd``, ``symlink-bindir``, ``build-log``,
-``remote-build-reporting``, ``report-planned-failure``, ``offline``.
 
 Advanced solver options
 ^^^^^^^^^^^^^^^^^^^^^^^
@@ -1838,17 +2116,48 @@ Most users generally won't need these.
                --no-prefer-oldest
     :synopsis: Prefer the oldest versions of packages available.
     :since:    3.10
+    :deprecated:
 
     :default:  False
 
     By default, when solver has a choice of multiple versions of the same
     package, it will first try to derive a build plan with the latest
-    version. This flag switches the behaviour, making the solver
-    to prefer the oldest packages available.
+    version, except if it can use a version from the global package database.
+    This flag switches the behaviour, making the solver to prefer the oldest packages available.
 
     The primary use case is to help users in establishing lower bounds
     of upstream dependencies.
 
     The command line variant of this field is ``--(no-)prefer-oldest``.
+
+.. cfg-field:: prefer-version: (oldest|latest|installed-or-latest)
+               --prefer-version=(oldest|latest|installed-or-latest)
+    :synopsis: Specify how to pick package versions
+    :since:    3.20
+
+    :default:  installed
+
+    By default, when solver has a choice of multiple versions of the same
+    package, it will first try to derive a build plan with the latest version,
+    except if it can use a version from the global package database (``installed-or-latest``).  This flag
+    switches the behaviour, allowing the solver to prefer the latest packages
+    (irrespective of the global package DB) (``latest``) or the oldest packages available (``oldest``).
+
+    The primary use case of picking the oldest package is to help users in
+    establishing lower bounds of upstream dependencies.
+
+Specialised logging options
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. cfg-field:: report-planning-failure: boolean
+               --report-planning-failure
+    :synopsis: Report dependency solving failures.
+
+    :default: ``False``
+
+    Generate build reports when the dependency solver fails. This is used by
+    the Hackage build bot.
+
+    The command line variant of this field is ``--report-planning-failure``.
 
 .. include:: references.inc

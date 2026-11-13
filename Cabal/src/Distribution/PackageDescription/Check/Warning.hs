@@ -1,6 +1,5 @@
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 
 -- |
 -- Module      :  Distribution.PackageDescription.Check.Warning
@@ -24,7 +23,7 @@ module Distribution.PackageDescription.Check.Warning
   , ppPackageCheck
   , ppCheckExplanationId
   , isHackageDistError
-  , extractCheckExplantion
+  , extractCheckExplanation
   , filterPackageChecksById
   , filterPackageChecksByIdString
   ) where
@@ -46,12 +45,7 @@ import Distribution.Types.PackageName (PackageName)
 import Distribution.Types.TestType (TestType, knownTestTypes)
 import Distribution.Types.UnqualComponentName
 import Distribution.Types.Version (Version)
-import Distribution.Utils.Path
-  ( LicenseFile
-  , PackageDir
-  , SymbolicPath
-  , getSymbolicPath
-  )
+import Distribution.Utils.Path (FileOrDir (..), Pkg, RelativePath, getSymbolicPath)
 import Language.Haskell.Extension (Extension)
 
 import qualified Data.Either as Either
@@ -128,7 +122,7 @@ filterPackageChecksById cs is = filter ff cs
     ff c =
       flip notElem is
         . checkExplanationId
-        . extractCheckExplantion
+        . extractCheckExplanation
         $ c
 
 -- | Filter Package Check by Check explanation /string/.
@@ -175,6 +169,7 @@ data CheckExplanation
   | UnknownExtensions [String]
   | LanguagesAsExtension [String]
   | DeprecatedExtensions [(Extension, Maybe Extension)]
+  | FreeTextDotline String
   | MissingFieldCategory
   | MissingFieldMaintainer
   | MissingFieldSynopsis
@@ -197,6 +192,7 @@ data CheckExplanation
   | UnrecognisedSourceRepo String
   | MissingType
   | MissingLocation
+  | GitProtocol
   | MissingModule
   | MissingTag
   | SubdirRelPath
@@ -218,6 +214,7 @@ data CheckExplanation
   | OptWithRts String
   | COptONumber String WarnLang
   | COptCPP String
+  | OptJSPP String
   | OptAlternatives String String [(String, String)]
   | RelativeOutside String FilePath
   | AbsolutePath String FilePath
@@ -233,6 +230,7 @@ data CheckExplanation
   | CVTestSuite
   | CVDefaultLanguage
   | CVDefaultLanguageComponent
+  | CVDefaultLanguageComponentSoft
   | CVExtraDocFiles
   | CVMultiLib
   | CVReexported
@@ -246,7 +244,7 @@ data CheckExplanation
   | CVSourceRepository
   | CVExtensions CabalSpecVersion [Extension]
   | CVCustomSetup
-  | CVExpliticDepsCustomSetup
+  | CVExplicitDepsCustomSetup
   | CVAutogenPaths
   | CVAutogenPackageInfo
   | CVAutogenPackageInfoGuard
@@ -258,6 +256,9 @@ data CheckExplanation
   | UnknownCompiler [String]
   | BaseNoUpperBounds
   | MissingUpperBounds CEType [String]
+  | LEUpperBounds CEType [String]
+  | TrailingZeroUpperBounds CEType [String]
+  | GTLowerBounds CEType [String]
   | SuspiciousFlagName [String]
   | DeclaredUsedFlags (Set.Set FlagName) (Set.Set FlagName)
   | NonASCIICustomField [String]
@@ -275,7 +276,7 @@ data CheckExplanation
   | NotPackageName FilePath String
   | NoDesc
   | MultiDesc [String]
-  | UnknownFile String (SymbolicPath PackageDir LicenseFile)
+  | UnknownFile String (RelativePath Pkg File)
   | MissingSetupFile
   | MissingConfigureScript
   | UnknownDirectory String FilePath
@@ -295,14 +296,14 @@ data CheckExplanation
 --      to be a ad hoc monoid.
 
 -- Convenience.
-extractCheckExplantion :: PackageCheck -> CheckExplanation
-extractCheckExplantion (PackageBuildImpossible e) = e
-extractCheckExplantion (PackageBuildWarning e) = e
-extractCheckExplantion (PackageDistSuspicious e) = e
-extractCheckExplantion (PackageDistSuspiciousWarn e) = e
-extractCheckExplantion (PackageDistInexcusable e) = e
+extractCheckExplanation :: PackageCheck -> CheckExplanation
+extractCheckExplanation (PackageBuildImpossible e) = e
+extractCheckExplanation (PackageBuildWarning e) = e
+extractCheckExplanation (PackageDistSuspicious e) = e
+extractCheckExplanation (PackageDistSuspiciousWarn e) = e
+extractCheckExplanation (PackageDistInexcusable e) = e
 
--- | Identifier for the speficic 'CheckExplanation'. This ensures `--ignore`
+-- | Identifier for the specific 'CheckExplanation'. This ensures `--ignore`
 -- can output a warning on unrecognised values.
 -- ☞ N.B.: should be kept in sync with 'CheckExplanation'.
 data CheckExplanationID
@@ -336,6 +337,7 @@ data CheckExplanationID
   | CIUnknownExtensions
   | CILanguagesAsExtension
   | CIDeprecatedExtensions
+  | CIFreeTextDotline
   | CIMissingFieldCategory
   | CIMissingFieldMaintainer
   | CIMissingFieldSynopsis
@@ -358,6 +360,7 @@ data CheckExplanationID
   | CIUnrecognisedSourceRepo
   | CIMissingType
   | CIMissingLocation
+  | CIGitProtocol
   | CIMissingModule
   | CIMissingTag
   | CISubdirRelPath
@@ -379,6 +382,7 @@ data CheckExplanationID
   | CIOptWithRts
   | CICOptONumber
   | CICOptCPP
+  | CIOptJSPP
   | CIOptAlternatives
   | CIRelativeOutside
   | CIAbsolutePath
@@ -394,6 +398,7 @@ data CheckExplanationID
   | CICVTestSuite
   | CICVDefaultLanguage
   | CICVDefaultLanguageComponent
+  | CICVDefaultLanguageComponentSoft
   | CICVExtraDocFiles
   | CICVMultiLib
   | CICVReexported
@@ -407,7 +412,7 @@ data CheckExplanationID
   | CICVSourceRepository
   | CICVExtensions
   | CICVCustomSetup
-  | CICVExpliticDepsCustomSetup
+  | CICVExplicitDepsCustomSetup
   | CICVAutogenPaths
   | CICVAutogenPackageInfo
   | CICVAutogenPackageInfoGuard
@@ -419,6 +424,9 @@ data CheckExplanationID
   | CIUnknownCompiler
   | CIBaseNoUpperBounds
   | CIMissingUpperBounds
+  | CILEUpperBounds
+  | CITrailingZeroUpperBounds
+  | CIGTLowerBounds
   | CISuspiciousFlagName
   | CIDeclaredUsedFlags
   | CINonASCIICustomField
@@ -476,6 +484,7 @@ checkExplanationId (UnknownLanguages{}) = CIUnknownLanguages
 checkExplanationId (UnknownExtensions{}) = CIUnknownExtensions
 checkExplanationId (LanguagesAsExtension{}) = CILanguagesAsExtension
 checkExplanationId (DeprecatedExtensions{}) = CIDeprecatedExtensions
+checkExplanationId (FreeTextDotline{}) = CIFreeTextDotline
 checkExplanationId (MissingFieldCategory{}) = CIMissingFieldCategory
 checkExplanationId (MissingFieldMaintainer{}) = CIMissingFieldMaintainer
 checkExplanationId (MissingFieldSynopsis{}) = CIMissingFieldSynopsis
@@ -498,6 +507,7 @@ checkExplanationId (NoLicenseFile{}) = CINoLicenseFile
 checkExplanationId (UnrecognisedSourceRepo{}) = CIUnrecognisedSourceRepo
 checkExplanationId (MissingType{}) = CIMissingType
 checkExplanationId (MissingLocation{}) = CIMissingLocation
+checkExplanationId (GitProtocol{}) = CIGitProtocol
 checkExplanationId (MissingModule{}) = CIMissingModule
 checkExplanationId (MissingTag{}) = CIMissingTag
 checkExplanationId (SubdirRelPath{}) = CISubdirRelPath
@@ -519,6 +529,7 @@ checkExplanationId (OptRts{}) = CIOptRts
 checkExplanationId (OptWithRts{}) = CIOptWithRts
 checkExplanationId (COptONumber{}) = CICOptONumber
 checkExplanationId (COptCPP{}) = CICOptCPP
+checkExplanationId (OptJSPP{}) = CIOptJSPP
 checkExplanationId (OptAlternatives{}) = CIOptAlternatives
 checkExplanationId (RelativeOutside{}) = CIRelativeOutside
 checkExplanationId (AbsolutePath{}) = CIAbsolutePath
@@ -534,6 +545,7 @@ checkExplanationId (FilePathEmpty{}) = CIFilePathEmpty
 checkExplanationId (CVTestSuite{}) = CICVTestSuite
 checkExplanationId (CVDefaultLanguage{}) = CICVDefaultLanguage
 checkExplanationId (CVDefaultLanguageComponent{}) = CICVDefaultLanguageComponent
+checkExplanationId (CVDefaultLanguageComponentSoft{}) = CICVDefaultLanguageComponentSoft
 checkExplanationId (CVExtraDocFiles{}) = CICVExtraDocFiles
 checkExplanationId (CVMultiLib{}) = CICVMultiLib
 checkExplanationId (CVReexported{}) = CICVReexported
@@ -547,7 +559,7 @@ checkExplanationId (CVVirtualModules{}) = CICVVirtualModules
 checkExplanationId (CVSourceRepository{}) = CICVSourceRepository
 checkExplanationId (CVExtensions{}) = CICVExtensions
 checkExplanationId (CVCustomSetup{}) = CICVCustomSetup
-checkExplanationId (CVExpliticDepsCustomSetup{}) = CICVExpliticDepsCustomSetup
+checkExplanationId (CVExplicitDepsCustomSetup{}) = CICVExplicitDepsCustomSetup
 checkExplanationId (CVAutogenPaths{}) = CICVAutogenPaths
 checkExplanationId (CVAutogenPackageInfo{}) = CICVAutogenPackageInfo
 checkExplanationId (CVAutogenPackageInfoGuard{}) = CICVAutogenPackageInfoGuard
@@ -559,6 +571,9 @@ checkExplanationId (UnknownArch{}) = CIUnknownArch
 checkExplanationId (UnknownCompiler{}) = CIUnknownCompiler
 checkExplanationId (BaseNoUpperBounds{}) = CIBaseNoUpperBounds
 checkExplanationId (MissingUpperBounds{}) = CIMissingUpperBounds
+checkExplanationId (LEUpperBounds{}) = CILEUpperBounds
+checkExplanationId (TrailingZeroUpperBounds{}) = CITrailingZeroUpperBounds
+checkExplanationId (GTLowerBounds{}) = CIGTLowerBounds
 checkExplanationId (SuspiciousFlagName{}) = CISuspiciousFlagName
 checkExplanationId (DeclaredUsedFlags{}) = CIDeclaredUsedFlags
 checkExplanationId (NonASCIICustomField{}) = CINonASCIICustomField
@@ -586,11 +601,13 @@ checkExplanationId (WrongFieldForExpectedDocFiles{}) = CIWrongFieldForExpectedDo
 
 type CheckExplanationIDString = String
 
--- A one-word identifier for each CheckExplanation
---
--- ☞ N.B: if you modify anything here, remeber to change the documentation
--- in @doc/cabal-commands.rst@!
+-- | A one-word identifier for each @CheckExplanation@.
 ppCheckExplanationId :: CheckExplanationID -> CheckExplanationIDString
+-- NOTE: If you modify anything here, remember to change the documentation
+-- in @doc/cabal-commands.rst@!
+-- NOTE: These strings will have to satisfy a test that these messages don't
+-- have too many dashes:
+--   $ cabal run Cabal-tests:unit-tests -- --pattern=Parsimonious
 ppCheckExplanationId CIParseWarning = "parser-warning"
 ppCheckExplanationId CINoNameField = "no-name-field"
 ppCheckExplanationId CINoVersionField = "no-version-field"
@@ -621,6 +638,7 @@ ppCheckExplanationId CIUnknownLanguages = "unknown-languages"
 ppCheckExplanationId CIUnknownExtensions = "unknown-extension"
 ppCheckExplanationId CILanguagesAsExtension = "languages-as-extensions"
 ppCheckExplanationId CIDeprecatedExtensions = "deprecated-extensions"
+ppCheckExplanationId CIFreeTextDotline = "free-text-dotline"
 ppCheckExplanationId CIMissingFieldCategory = "no-category"
 ppCheckExplanationId CIMissingFieldMaintainer = "no-maintainer"
 ppCheckExplanationId CIMissingFieldSynopsis = "no-synopsis"
@@ -643,6 +661,7 @@ ppCheckExplanationId CINoLicenseFile = "no-license-file"
 ppCheckExplanationId CIUnrecognisedSourceRepo = "unrecognised-repo-type"
 ppCheckExplanationId CIMissingType = "repo-no-type"
 ppCheckExplanationId CIMissingLocation = "repo-no-location"
+ppCheckExplanationId CIGitProtocol = "git-protocol"
 ppCheckExplanationId CIMissingModule = "repo-no-module"
 ppCheckExplanationId CIMissingTag = "repo-no-tag"
 ppCheckExplanationId CISubdirRelPath = "repo-relative-dir"
@@ -664,6 +683,7 @@ ppCheckExplanationId CIOptRts = "option-rtsopts"
 ppCheckExplanationId CIOptWithRts = "option-with-rtsopts"
 ppCheckExplanationId CICOptONumber = "option-opt-c"
 ppCheckExplanationId CICOptCPP = "cpp-options"
+ppCheckExplanationId CIOptJSPP = "jspp-options"
 ppCheckExplanationId CIOptAlternatives = "misplaced-c-opt"
 ppCheckExplanationId CIRelativeOutside = "relative-path-outside"
 ppCheckExplanationId CIAbsolutePath = "absolute-path"
@@ -679,6 +699,7 @@ ppCheckExplanationId CIFilePathEmpty = "empty-path"
 ppCheckExplanationId CICVTestSuite = "test-cabal-ver"
 ppCheckExplanationId CICVDefaultLanguage = "default-language"
 ppCheckExplanationId CICVDefaultLanguageComponent = "no-default-language"
+ppCheckExplanationId CICVDefaultLanguageComponentSoft = "add-language"
 ppCheckExplanationId CICVExtraDocFiles = "extra-doc-files"
 ppCheckExplanationId CICVMultiLib = "multilib"
 ppCheckExplanationId CICVReexported = "reexported-modules"
@@ -692,7 +713,7 @@ ppCheckExplanationId CICVVirtualModules = "virtual-modules"
 ppCheckExplanationId CICVSourceRepository = "source-repository"
 ppCheckExplanationId CICVExtensions = "incompatible-extension"
 ppCheckExplanationId CICVCustomSetup = "no-setup-depends"
-ppCheckExplanationId CICVExpliticDepsCustomSetup = "dependencies-setup"
+ppCheckExplanationId CICVExplicitDepsCustomSetup = "dependencies-setup"
 ppCheckExplanationId CICVAutogenPaths = "no-autogen-paths"
 ppCheckExplanationId CICVAutogenPackageInfo = "no-autogen-pinfo"
 ppCheckExplanationId CICVAutogenPackageInfoGuard = "autogen-guard"
@@ -704,6 +725,9 @@ ppCheckExplanationId CIUnknownArch = "unknown-arch"
 ppCheckExplanationId CIUnknownCompiler = "unknown-compiler"
 ppCheckExplanationId CIBaseNoUpperBounds = "missing-bounds-important"
 ppCheckExplanationId CIMissingUpperBounds = "missing-upper-bounds"
+ppCheckExplanationId CILEUpperBounds = "le-upper-bounds"
+ppCheckExplanationId CITrailingZeroUpperBounds = "tz-upper-bounds"
+ppCheckExplanationId CIGTLowerBounds = "gt-lower-bounds"
 ppCheckExplanationId CISuspiciousFlagName = "suspicious-flag"
 ppCheckExplanationId CIDeclaredUsedFlags = "unused-flag"
 ppCheckExplanationId CINonASCIICustomField = "non-ascii"
@@ -889,6 +913,11 @@ ppExplanation (DeprecatedExtensions ourDeprecatedExtensions) =
         ++ "'."
       | (ext, Just replacement) <- ourDeprecatedExtensions
       ]
+ppExplanation (FreeTextDotline field) =
+  "Empty lines with a dot '.' in field '"
+    ++ field
+    ++ "' are unnecessary for creating newlines "
+    ++ "(and treated literally) in cabal 3.0+"
 ppExplanation MissingFieldCategory = "No 'category' field."
 ppExplanation MissingFieldMaintainer = "No 'maintainer' field."
 ppExplanation MissingFieldSynopsis = "No 'synopsis' field."
@@ -905,7 +934,8 @@ ppExplanation ShortDesc =
     ++ "(e.g. 'cabal info', Haddock, Hackage) below the 'synopsis' which "
     ++ "serves as a headline. "
     ++ "Please refer to <https://cabal.readthedocs.io/en/stable/"
-    ++ "cabal-package.html#package-properties> for more details."
+    ++ "cabal-package-description-file.html#package-properties> "
+    ++ "for more details."
 ppExplanation (InvalidTestWith testedWithImpossibleRanges) =
   "Invalid 'tested-with' version range: "
     ++ commaSep (map prettyShow testedWithImpossibleRanges)
@@ -964,6 +994,10 @@ ppExplanation MissingType =
   "The source-repository 'type' is a required field."
 ppExplanation MissingLocation =
   "The source-repository 'location' is a required field."
+ppExplanation GitProtocol =
+  "Cloning over git:// might lead to an arbitrary code execution "
+    ++ "vulnerability. Furthermore, popular forges like GitHub do "
+    ++ "not support it. Use https:// or ssh:// instead."
 ppExplanation MissingModule =
   "For a CVS source-repository, the 'module' is a required field."
 ppExplanation MissingTag =
@@ -1065,6 +1099,8 @@ ppExplanation (COptONumber prefix label) =
     ++ " --disable-optimization flag."
 ppExplanation (COptCPP opt) =
   "'cpp-options: " ++ opt ++ "' is not a portable C-preprocessor flag."
+ppExplanation (OptJSPP opt) =
+  "'jspp-options: " ++ opt ++ "' is not a portable JavaScript-preprocessor flag."
 ppExplanation (OptAlternatives badField goodField flags) =
   "Instead of "
     ++ quote (badField ++ ": " ++ unwords badFlags)
@@ -1113,9 +1149,9 @@ ppExplanation (InvalidOnWin paths) =
     ++ quotes paths
     ++ " invalid on Windows, which "
     ++ "would cause portability problems for this package. Windows file "
-    ++ "names cannot contain any of the characters \":*?<>|\" and there "
-    ++ "a few reserved names including \"aux\", \"nul\", \"con\", "
-    ++ "\"prn\", \"com1-9\", \"lpt1-9\" and \"clock$\"."
+    ++ "names cannot contain any of the characters \":*?<>|\", and there "
+    ++ "are a few reserved names including \"aux\", \"nul\", \"con\", "
+    ++ "\"prn\", \"com{1-9}\", \"lpt{1-9}\" and \"clock$\"."
   where
     quotes [failed] = "path " ++ quote failed ++ " is"
     quotes failed =
@@ -1163,6 +1199,10 @@ ppExplanation CVDefaultLanguageComponent =
     ++ "Haskell98 or Haskell2010). If a component uses different languages "
     ++ "in different modules then list the other ones in the "
     ++ "'other-languages' field."
+ppExplanation CVDefaultLanguageComponentSoft =
+  "Without `default-language`, cabal will default to Haskell98, which is "
+    ++ "probably not what you want. Please add `default-language` to all "
+    ++ "targets."
 ppExplanation CVExtraDocFiles =
   "To use the 'extra-doc-files' field the package needs to specify "
     ++ "'cabal-version: 1.18' or higher."
@@ -1217,7 +1257,7 @@ ppExplanation CVCustomSetup =
     ++ "that specifies the dependencies of the Setup.hs script itself. "
     ++ "The 'setup-depends' field uses the same syntax as 'build-depends', "
     ++ "so a simple example would be 'setup-depends: base, Cabal'."
-ppExplanation CVExpliticDepsCustomSetup =
+ppExplanation CVExplicitDepsCustomSetup =
   "From version 1.24 cabal supports specifying explicit dependencies "
     ++ "for Custom setup scripts. Consider using 'cabal-version: 1.24' or "
     ++ "higher and adding a 'custom-setup' section with a 'setup-depends' "
@@ -1289,15 +1329,33 @@ ppExplanation BaseNoUpperBounds =
     ++ "version. For example if you have tested your package with 'base' "
     ++ "version 4.5 and 4.6 then use 'build-depends: base >= 4.5 && < 4.7'."
 ppExplanation (MissingUpperBounds ct names) =
-  let separator = "\n  - "
-   in "On "
-        ++ ppCET ct
-        ++ ", "
-        ++ "these packages miss upper bounds:"
-        ++ separator
-        ++ List.intercalate separator names
-        ++ "\n"
-        ++ "Please add them. There is more information at https://pvp.haskell.org/"
+  "On "
+    ++ ppCET ct
+    ++ ", "
+    ++ "these packages miss upper bounds:"
+    ++ listSep names
+    ++ "Please add them. There is more information at https://pvp.haskell.org/"
+ppExplanation (LEUpperBounds ct names) =
+  "On "
+    ++ ppCET ct
+    ++ ", "
+    ++ "these packages have less than or equals (<=) upper bounds:"
+    ++ listSep names
+    ++ "Please use less than (<) for upper bounds."
+ppExplanation (TrailingZeroUpperBounds ct names) =
+  "On "
+    ++ ppCET ct
+    ++ ", "
+    ++ "these packages have upper bounds with trailing zeros:"
+    ++ listSep names
+    ++ "Please avoid trailing zeros for upper bounds."
+ppExplanation (GTLowerBounds ct names) =
+  "On "
+    ++ ppCET ct
+    ++ ", "
+    ++ "these packages have greater than (>) lower bounds:"
+    ++ listSep names
+    ++ "Please use greater than or equals (>=) for lower bounds."
 ppExplanation (SuspiciousFlagName invalidFlagNames) =
   "Suspicious flag names: "
     ++ unwords invalidFlagNames
@@ -1414,7 +1472,8 @@ ppExplanation (UnknownFile fieldname file) =
     ++ quote (getSymbolicPath file)
     ++ " which does not exist."
 ppExplanation MissingSetupFile =
-  "The package is missing a Setup.hs or Setup.lhs script."
+  "The package is missing a Setup.hs or Setup.lhs or SetupHooks.hs "
+    ++ "or SetupHooks.lhs script."
 ppExplanation MissingConfigureScript =
   "The 'build-type' is 'Configure' but there is no 'configure' script. "
     ++ "You probably need to run 'autoreconf -i' to generate it."
@@ -1458,6 +1517,11 @@ ppExplanation (WrongFieldForExpectedDocFiles extraDocFileSupport field paths) =
         else "extra-source-files"
 
 -- * Formatting utilities
+
+listSep :: [String] -> String
+listSep names =
+  let separator = "\n  - "
+   in separator ++ List.intercalate separator names ++ "\n"
 
 commaSep :: [String] -> String
 commaSep = List.intercalate ", "

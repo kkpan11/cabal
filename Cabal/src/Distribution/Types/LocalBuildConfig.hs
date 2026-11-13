@@ -1,9 +1,5 @@
-{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DuplicateRecordFields #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE NamedFieldPuns #-}
-{-# LANGUAGE PatternSynonyms #-}
-{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE RecordWildCards #-}
 
 module Distribution.Types.LocalBuildConfig
@@ -21,9 +17,9 @@ module Distribution.Types.LocalBuildConfig
 import Distribution.Compat.Prelude
 import Prelude ()
 
-import Distribution.Types.ComponentId
 import Distribution.Types.ComponentLocalBuildInfo
 import Distribution.Types.ComponentRequestedSpec
+import Distribution.Types.GivenComponent
 import Distribution.Types.PackageDescription
 import Distribution.Types.UnitId
 
@@ -36,9 +32,10 @@ import Distribution.Simple.InstallDirs hiding
   , substPathTemplate
   )
 import Distribution.Simple.PackageIndex
-import Distribution.Simple.Program
+import Distribution.Simple.Program.Db (ProgramDb)
 import Distribution.Simple.Setup.Config
 import Distribution.System
+import Distribution.Utils.Path
 
 import Distribution.Compat.Graph (Graph)
 
@@ -57,7 +54,7 @@ data PackageBuildDescr = PackageBuildDescr
   -- ^ The compiler we're building with
   , hostPlatform :: Platform
   -- ^ The platform we're building for
-  , pkgDescrFile :: Maybe FilePath
+  , pkgDescrFile :: Maybe (SymbolicPath Pkg File)
   -- ^ the filename containing the .cabal file, if available
   , localPkgDescr :: PackageDescription
   -- ^ WARNING WARNING WARNING Be VERY careful about using
@@ -99,7 +96,7 @@ data ComponentBuildDescr = ComponentBuildDescr
   -- ^ A map from component name to all matching
   -- components.  These coincide with 'componentGraph'
   -- There may be more than one matching component because of backpack instantiations
-  , promisedPkgs :: Map (PackageName, ComponentName) ComponentId
+  , promisedPkgs :: Map (PackageName, ComponentName) PromisedComponent
   -- ^ The packages we were promised, but aren't already installed.
   -- MP: Perhaps this just needs to be a Set UnitId at this stage.
   , installedPkgs :: InstalledPackageIndex
@@ -149,11 +146,15 @@ data BuildOptions = BuildOptions
   { withVanillaLib :: Bool
   -- ^ Whether to build normal libs.
   , withProfLib :: Bool
+  -- ^ Whether to build normal libs.
+  , withProfLibShared :: Bool
   -- ^ Whether to build profiling versions of libs.
   , withSharedLib :: Bool
   -- ^ Whether to build shared versions of libs.
   , withStaticLib :: Bool
   -- ^ Whether to build static versions of libs (with all other libs rolled in)
+  , withBytecodeLib :: Bool
+  -- ^ Whether to build bytecode versions of libs
   , withDynExe :: Bool
   -- ^ Whether to link executables dynamically
   , withFullyStaticExe :: Bool
@@ -184,6 +185,10 @@ data BuildOptions = BuildOptions
   -- ^ Whether to enable library program coverage
   , relocatable :: Bool
   -- ^ Whether to build a relocatable package
+  , programPrefix :: Maybe PathTemplate
+  -- ^ Installed executable prefix
+  , programSuffix :: Maybe PathTemplate
+  -- ^ Installed executable suffix
   }
   deriving (Eq, Generic, Read, Show)
 
@@ -201,26 +206,30 @@ instance Structured BuildOptions
 buildOptionsConfigFlags :: BuildOptions -> ConfigFlags
 buildOptionsConfigFlags (BuildOptions{..}) =
   mempty
-    { configVanillaLib = toFlag $ withVanillaLib
-    , configSharedLib = toFlag $ withSharedLib
-    , configStaticLib = toFlag $ withStaticLib
-    , configDynExe = toFlag $ withDynExe
-    , configFullyStaticExe = toFlag $ withFullyStaticExe
-    , configGHCiLib = toFlag $ withGHCiLib
-    , configProfExe = toFlag $ withProfExe
-    , configProfLib = toFlag $ withProfLib
+    { configVanillaLib = toFlag withVanillaLib
+    , configSharedLib = toFlag withSharedLib
+    , configStaticLib = toFlag withStaticLib
+    , configBytecodeLib = toFlag withBytecodeLib
+    , configDynExe = toFlag withDynExe
+    , configFullyStaticExe = toFlag withFullyStaticExe
+    , configGHCiLib = toFlag withGHCiLib
+    , configProfExe = toFlag withProfExe
+    , configProfLib = toFlag withProfLib
+    , configProfShared = toFlag withProfLibShared
     , configProf = mempty
     , -- configProfDetail is for exe+lib, but overridden by configProfLibDetail
       -- so we specify both so we can specify independently
-      configProfDetail = toFlag $ withProfExeDetail
-    , configProfLibDetail = toFlag $ withProfLibDetail
-    , configCoverage = toFlag $ exeCoverage
+      configProfDetail = toFlag withProfExeDetail
+    , configProfLibDetail = toFlag withProfLibDetail
+    , configCoverage = toFlag exeCoverage
     , configLibCoverage = mempty
-    , configRelocatable = toFlag $ relocatable
-    , configOptimization = toFlag $ withOptimization
-    , configSplitSections = toFlag $ splitSections
-    , configSplitObjs = toFlag $ splitObjs
-    , configStripExes = toFlag $ stripExes
-    , configStripLibs = toFlag $ stripLibs
-    , configDebugInfo = toFlag $ withDebugInfo
+    , configRelocatable = toFlag relocatable
+    , configOptimization = toFlag withOptimization
+    , configSplitSections = toFlag splitSections
+    , configSplitObjs = toFlag splitObjs
+    , configStripExes = toFlag stripExes
+    , configStripLibs = toFlag stripLibs
+    , configDebugInfo = toFlag withDebugInfo
+    , configProgPrefix = maybeToFlag programPrefix
+    , configProgSuffix = maybeToFlag programSuffix
     }

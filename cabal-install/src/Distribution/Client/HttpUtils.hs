@@ -1,10 +1,3 @@
-{-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE CPP #-}
-
------------------------------------------------------------------------------
-
------------------------------------------------------------------------------
-
 -- | Separate module for HTTP actions, using a proxy server if one exists.
 module Distribution.Client.HttpUtils
   ( DownloadResult (..)
@@ -192,7 +185,7 @@ downloadURI transport verbosity uri path = do
   -- Only use the external http transports if we actually have to
   -- (or have been told to do so)
   let transport'
-        | uriScheme uri == "http:"
+        | isHttpURI uri
         , not (transportManuallySelected transport) =
             plainHttpTransport
         | otherwise =
@@ -241,29 +234,40 @@ downloadURI transport verbosity uri path = do
       _ <- P.string "#sha256="
       str <- some P.hexDigit
       let bs = Base16.decode (BS8.pack str)
-#if MIN_VERSION_base16_bytestring(1,0,0)
       either fail return bs
-#else
-      return (fst bs)
-#endif
 
 ------------------------------------------------------------------------------
 -- Utilities for repo url management
 --
 
+-- | If the remote repo is accessed over HTTPS, ensure that the transport
+-- supports HTTPS.
 remoteRepoCheckHttps :: Verbosity -> HttpTransport -> RemoteRepo -> IO ()
-remoteRepoCheckHttps verbosity transport repo
-  | uriScheme (remoteRepoURI repo) == "https:"
+remoteRepoCheckHttps verbosity transport repo =
+  transportCheckHttpsWithError verbosity transport (remoteRepoURI repo) $
+    RemoteRepoCheckHttps (unRepoName (remoteRepoName repo)) requiresHttpsErrorMessage
+
+-- | If the URI scheme is HTTPS, ensure the transport supports HTTPS.
+transportCheckHttps :: Verbosity -> HttpTransport -> URI -> IO ()
+transportCheckHttps verbosity transport uri =
+  transportCheckHttpsWithError verbosity transport uri $
+    TransportCheckHttps uri requiresHttpsErrorMessage
+
+-- | If the URI scheme is HTTPS, ensure the transport supports HTTPS.
+-- If not, fail with the given error.
+transportCheckHttpsWithError
+  :: Verbosity -> HttpTransport -> URI -> CabalInstallException -> IO ()
+transportCheckHttpsWithError verbosity transport uri err
+  | isHttpsURI uri
   , not (transportSupportsHttps transport) =
-      dieWithException verbosity $ RemoteRepoCheckHttps (unRepoName (remoteRepoName repo)) requiresHttpsErrorMessage
+      dieWithException verbosity err
   | otherwise = return ()
 
-transportCheckHttps :: Verbosity -> HttpTransport -> URI -> IO ()
-transportCheckHttps verbosity transport uri
-  | uriScheme uri == "https:"
-  , not (transportSupportsHttps transport) =
-      dieWithException verbosity $ TransportCheckHttps uri requiresHttpsErrorMessage
-  | otherwise = return ()
+isHttpsURI :: URI -> Bool
+isHttpsURI uri = uriScheme uri == "https:"
+
+isHttpURI :: URI -> Bool
+isHttpURI uri = uriScheme uri == "http:"
 
 requiresHttpsErrorMessage :: String
 requiresHttpsErrorMessage =
@@ -280,12 +284,12 @@ requiresHttpsErrorMessage =
 remoteRepoTryUpgradeToHttps :: Verbosity -> HttpTransport -> RemoteRepo -> IO RemoteRepo
 remoteRepoTryUpgradeToHttps verbosity transport repo
   | remoteRepoShouldTryHttps repo
-  , uriScheme (remoteRepoURI repo) == "http:"
+  , isHttpURI (remoteRepoURI repo)
   , not (transportSupportsHttps transport)
   , not (transportManuallySelected transport) =
       dieWithException verbosity $ TryUpgradeToHttps [name | (name, _, True, _) <- supportedTransports]
   | remoteRepoShouldTryHttps repo
-  , uriScheme (remoteRepoURI repo) == "http:"
+  , isHttpURI (remoteRepoURI repo)
   , transportSupportsHttps transport =
       return
         repo
@@ -408,7 +412,7 @@ configureTransport verbosity extraPath (Just name) =
 
   case find (\(name', _, _, _) -> name' == name) supportedTransports of
     Just (_, mprog, _tls, mkTrans) -> do
-      baseProgDb <- prependProgramSearchPath verbosity extraPath emptyProgramDb
+      baseProgDb <- prependProgramSearchPath verbosity extraPath [] emptyProgramDb
       progdb <- case mprog of
         Nothing -> return emptyProgramDb
         Just prog -> snd <$> requireProgram verbosity prog baseProgDb
@@ -424,7 +428,7 @@ configureTransport verbosity extraPath Nothing = do
 
   -- for all the transports except plain-http we need to try and find
   -- their external executable
-  baseProgDb <- prependProgramSearchPath verbosity extraPath emptyProgramDb
+  baseProgDb <- prependProgramSearchPath verbosity extraPath [] emptyProgramDb
   progdb <-
     configureAllKnownPrograms verbosity $
       addKnownPrograms
@@ -452,7 +456,6 @@ curlTransport prog =
   where
     gethttp verbosity uri etag destPath reqHeaders = do
       withTempFile
-        (takeDirectory destPath)
         "curl-headers.txt"
         $ \tmpFile tmpHandle -> do
           hClose tmpHandle
@@ -505,12 +508,18 @@ curlTransport prog =
             (Just (Left (uname, passwd)), _) -> Just $ Left (uname ++ ":" ++ passwd)
             (Nothing, Just a) -> Just $ Left a
             (Nothing, Nothing) -> Nothing
+      let authnSchemeArg
+            -- When using TLS, we can accept Basic authentication.  Let curl
+            -- decide based on the scheme(s) offered by the server.
+            | isHttpsURI uri = "--anyauth"
+            -- When not using TLS, force Digest scheme
+            | otherwise = "--digest"
       case mbAuthStringToken of
         Just (Left up) ->
           progInvocation
             { progInvokeInput =
                 Just . IODataText . unlines $
-                  [ "--digest"
+                  [ authnSchemeArg
                   , "--user " ++ up
                   ]
             , progInvokeArgs = ["--config", "-"] ++ progInvokeArgs progInvocation
@@ -529,7 +538,7 @@ curlTransport prog =
             , "--form"
             , "package=@" ++ path
             , "--write-out"
-            , "\n%{http_code}"
+            , "%{http_code}"
             , "--user-agent"
             , userAgent
             , "--silent"
@@ -555,7 +564,7 @@ curlTransport prog =
             , "--data-binary"
             , "@" ++ path
             , "--write-out"
-            , "\n%{http_code}"
+            , "%{http_code}"
             , "--user-agent"
             , userAgent
             , "--silent"
@@ -577,21 +586,21 @@ curlTransport prog =
       (code, err, _etag) <- parseResponse verbosity uri resp ""
       return (code, err)
 
-    -- on success these curl invocations produces an output like "200"
-    -- and on failure it has the server error response first
+    -- On success these curl invocations produce an output like "200" (or body ending in "200"),
+    -- and on failure it has the server error response first followed by the HTTP status code.
+    -- The --write-out option appends the 3-digit HTTP status code directly to
+    -- the response body (e.g. "<body>200"). We extract the last 3 characters as the status code.
     parseResponse :: Verbosity -> URI -> String -> String -> IO (Int, String, Maybe ETag)
     parseResponse verbosity uri resp headers =
-      let codeerr =
-            case reverse (lines resp) of
-              (codeLine : rerrLines) ->
-                case readMaybe (trim codeLine) of
-                  Just i ->
-                    let errstr = mkErrstr rerrLines
-                     in Just (i, errstr)
-                  Nothing -> Nothing
-              [] -> Nothing
+      let respLen = length resp
+          codeerr
+            | respLen >= 3
+            , let (body, codeStr) = splitAt (respLen - 3) resp
+            , Just code <- readMaybe codeStr =
+                Just (code, mkErrstr body)
+            | otherwise = Nothing
 
-          mkErrstr = unlines . reverse . dropWhile (all isSpace)
+          mkErrstr = unlines . reverse . dropWhile (all isSpace) . reverse . lines
 
           mb_etag :: Maybe ETag
           mb_etag =
@@ -624,7 +633,7 @@ wgetTransport prog =
               ++ " Note that the 'plain-http' transport doesn't"
               ++ " support HTTPS.\n"
 
-      when (hasRangeHeader) $ warn verbosity warningMsg
+      when hasRangeHeader $ warn verbosity warningMsg
       (code, etag') <- parseOutput verbosity uri resp
       return (code, etag')
       where
@@ -641,7 +650,7 @@ wgetTransport prog =
               ]
             ++ [ "--header=" ++ show name ++ ": " ++ value
                | hdr@(Header name value) <- reqHeaders
-               , (not (isRangeHeader hdr))
+               , not (isRangeHeader hdr)
                ]
 
         -- wget doesn't support range requests.
@@ -654,10 +663,9 @@ wgetTransport prog =
 
     posthttpfile verbosity uri path auth =
       withTempFile
-        (takeDirectory path)
         (takeFileName path)
         $ \tmpFile tmpHandle ->
-          withTempFile (takeDirectory path) "response" $
+          withTempFile "response" $
             \responseFile responseHandle -> do
               hClose responseHandle
               (body, boundary) <- generateMultipartBody path
@@ -681,7 +689,7 @@ wgetTransport prog =
                 evaluate $ force (code, resp)
 
     puthttpfile verbosity uri path auth headers =
-      withTempFile (takeDirectory path) "response" $
+      withTempFile "response" $
         \responseFile responseHandle -> do
           hClose responseHandle
           let args =
@@ -765,8 +773,8 @@ powershellTransport prog =
         runPowershellScript verbosity $
           webclientScript
             (escape (show uri))
-            ( ("$targetStream = New-Object -TypeName System.IO.FileStream -ArgumentList " ++ (escape destPath) ++ ", Create")
-                : (setupHeaders ((useragentHeader : etagHeader) ++ reqHeaders))
+            ( ("$targetStream = New-Object -TypeName System.IO.FileStream -ArgumentList " ++ escape destPath ++ ", Create")
+                : setupHeaders ((useragentHeader : etagHeader) ++ reqHeaders)
             )
             [ "$response = $request.GetResponse()"
             , "$responseStream = $response.GetResponseStream()"
@@ -790,8 +798,8 @@ powershellTransport prog =
         parseResponse :: String -> IO (HttpCode, Maybe ETag)
         parseResponse x =
           case lines $ trim x of
-            (code : etagv : _) -> fmap (\c -> (c, Just etagv)) $ parseCode code x
-            (code : _) -> fmap (\c -> (c, Nothing)) $ parseCode code x
+            (code : etagv : _) -> (,Just etagv) <$> parseCode code x
+            (code : _) -> (,Nothing) <$> parseCode code x
             _ -> statusParseFail verbosity uri x
         parseCode :: String -> String -> IO HttpCode
         parseCode code x = case readMaybe code of
@@ -803,7 +811,6 @@ powershellTransport prog =
 
     posthttpfile verbosity uri path auth =
       withTempFile
-        (takeDirectory path)
         (takeFileName path)
         $ \tmpFile tmpHandle -> do
           (body, boundary) <- generateMultipartBody path
@@ -998,7 +1005,7 @@ plainHttpTransport =
                 HdrContentType
                 ("multipart/form-data; boundary=" ++ boundary)
             , Header HdrContentLength (show (LBS8.length body))
-            , Header HdrAccept ("text/plain")
+            , Header HdrAccept "text/plain"
             ]
               ++ maybeToList (authTokenHeader auth)
           req =

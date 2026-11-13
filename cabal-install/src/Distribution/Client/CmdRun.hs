@@ -1,8 +1,4 @@
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE TupleSections #-}
 
 -- | cabal-install CLI command: run
 module Distribution.Client.CmdRun
@@ -22,7 +18,6 @@ module Distribution.Client.CmdRun
 import Distribution.Client.Compat.Prelude hiding (toList)
 import Prelude ()
 
-import Data.List (group)
 import qualified Data.Set as Set
 import Distribution.Client.CmdErrorMessages
   ( plural
@@ -45,6 +40,7 @@ import Distribution.Client.InstallPlan
   )
 import Distribution.Client.NixStyleOptions
   ( NixStyleFlags (..)
+  , cfgVerbosity
   , defaultNixStyleFlags
   , nixStyleOptions
   )
@@ -52,14 +48,16 @@ import Distribution.Client.ProjectConfig.Types
   ( ProjectConfig (projectConfigShared)
   , ProjectConfigShared (projectConfigProgPathExtra)
   )
-import Distribution.Client.ProjectOrchestration
+import Distribution.Client.ProjectOrchestration hiding (targetsMap)
+import qualified Distribution.Client.ProjectOrchestration as Orchestration (targetsMap)
 import Distribution.Client.ProjectPlanning
   ( ElaboratedConfiguredPackage (..)
   , ElaboratedInstallPlan
   , binDirectoryFor
   )
 import Distribution.Client.ProjectPlanning.Types
-  ( dataDirsEnvironmentForPlan
+  ( ElaboratedPackageOrComponent (..)
+  , dataDirsEnvironmentForPlan
   , elabExeDependencyPaths
   )
 import Distribution.Client.ScriptUtils
@@ -70,8 +68,7 @@ import Distribution.Client.ScriptUtils
   , withContextAndSelectors
   )
 import Distribution.Client.Setup
-  ( ConfigFlags (..)
-  , GlobalFlags (..)
+  ( GlobalFlags (..)
   )
 import Distribution.Client.TargetProblem
   ( TargetProblem (..)
@@ -80,12 +77,13 @@ import Distribution.Client.Utils
   ( giveRTSWarning
   , occursOnlyOrBefore
   )
+
+import Distribution.Simple.BuildToolDepends
+  ( getAllInternalToolDependencies
+  )
 import Distribution.Simple.Command
   ( CommandUI (..)
   , usageAlternatives
-  )
-import Distribution.Simple.Flag
-  ( fromFlagOrDefault
   )
 import Distribution.Simple.Program.Find
   ( ProgramSearchPathEntry (ProgramSearchPathDir)
@@ -102,12 +100,20 @@ import Distribution.Simple.Utils
   ( dieWithException
   , info
   , notice
-  , safeHead
+  , sortNub
   , warn
   , wrapText
   )
+
 import Distribution.Types.ComponentName
   ( componentNameRaw
+  )
+import qualified Distribution.Types.Executable as PD
+  ( buildInfo
+  , exeName
+  )
+import qualified Distribution.Types.PackageDescription as PD
+  ( executables
   )
 import Distribution.Types.UnitId
   ( UnitId
@@ -192,21 +198,22 @@ runCommand =
 -- For more details on how this works, see the module
 -- "Distribution.Client.ProjectOrchestration"
 runAction :: NixStyleFlags () -> [String] -> GlobalFlags -> IO ()
-runAction flags@NixStyleFlags{..} targetAndArgs globalFlags =
-  withContextAndSelectors RejectNoTargets (Just ExeKind) flags targetStr globalFlags OtherCommand $ \targetCtx ctx targetSelectors -> do
+runAction flags targetAndArgs globalFlags = do
+  fullArgs <- getFullArgs
+  let (targetStr, args) = splitTargetAndArgs fullArgs targetAndArgs
+  withContextAndSelectors (cfgVerbosity normal flags) RejectNoTargets (Just ExeKind) flags targetStr globalFlags OtherCommand $ \targetCtx ctx targetSelectors -> do
     (baseCtx, defaultVerbosity) <- case targetCtx of
       ProjectContext -> return (ctx, normal)
       GlobalContext -> return (ctx, normal)
       ScriptContext path exemeta -> (,silent) <$> updateContextAndWriteProjectFile ctx path exemeta
 
-    let verbosity = fromFlagOrDefault defaultVerbosity (configVerbosity configFlags)
+    let verbosity = cfgVerbosity defaultVerbosity flags
 
     buildCtx <-
       runProjectPreBuildPhase verbosity baseCtx $ \elaboratedPlan -> do
         when (buildSettingOnlyDeps (buildSettings baseCtx)) $
           dieWithException verbosity NoSupportForRunCommand
 
-        fullArgs <- getFullArgs
         when (occursOnlyOrBefore fullArgs "+RTS" "--") $
           warn verbosity $
             giveRTSWarning "run"
@@ -215,7 +222,7 @@ runAction flags@NixStyleFlags{..} targetAndArgs globalFlags =
         -- (as opposed to say repl or haddock targets).
         targets <-
           either (reportTargetProblems verbosity) return $
-            resolveTargets
+            resolveTargetsFromSolver
               selectPackageTargets
               selectComponentTarget
               elaboratedPlan
@@ -249,7 +256,7 @@ runAction flags@NixStyleFlags{..} targetAndArgs globalFlags =
       singleExeOrElse
         ( dieWithException verbosity RunPhaseReached
         )
-        $ targetsMap buildCtx
+        $ Orchestration.targetsMap buildCtx
 
     printPlan verbosity baseCtx buildCtx
 
@@ -302,17 +309,34 @@ runAction flags@NixStyleFlags{..} targetAndArgs globalFlags =
           buildSettingDryRun (buildSettings baseCtx)
             || buildSettingOnlyDownload (buildSettings baseCtx)
 
-    let extraPath =
-          elabExeDependencyPaths pkg
-            ++ ( fromNubList
-                  . projectConfigProgPathExtra
-                  . projectConfigShared
-                  . projectConfig
-                  $ baseCtx
-               )
+    let
+      -- HACK alert: when doing a per-package build (e.g. with a Custom setup),
+      -- 'elabExeDependencyPaths' will not contain any internal executables
+      -- (they are deliberately filtered out; and even if they weren't, they have the wrong paths).
+      -- We add them back in here to ensure that any "build-tool-depends" of
+      -- the current executable is available in PATH at runtime.
+      internalToolDepsOfThisExe
+        | ElabPackage{} <- elabPkgOrComp pkg
+        , let pkg_descr = elabPkgDescription pkg
+        , thisExe : _ <- filter ((== exeName) . unUnqualComponentName . PD.exeName) $ PD.executables pkg_descr
+        , let thisExeBI = PD.buildInfo thisExe =
+            [ binDirectoryFor (distDirLayout baseCtx) (elaboratedShared buildCtx) pkg depExeNm
+            | depExe <- getAllInternalToolDependencies pkg_descr thisExeBI
+            , let depExeNm = unUnqualComponentName depExe
+            ]
+        | otherwise =
+            []
+      extraPath =
+        elabExeDependencyPaths pkg
+          ++ ( fromNubList
+                . projectConfigProgPathExtra
+                . projectConfigShared
+                . projectConfig
+                $ baseCtx
+             )
+          ++ internalToolDepsOfThisExe
 
     logExtraProgramSearchPath verbosity extraPath
-
     progPath <- programSearchPathAsPATHVar (map ProgramSearchPathDir extraPath ++ defaultProgramSearchPath)
 
     if dryRun
@@ -324,13 +348,67 @@ runAction flags@NixStyleFlags{..} targetAndArgs globalFlags =
             { progInvokePath = exePath
             , progInvokeArgs = args
             , progInvokeEnv =
-                ("PATH", Just $ progPath)
+                ("PATH", Just progPath)
                   : dataDirsEnvironmentForPlan
                     (distDirLayout baseCtx)
                     elaboratedPlan
             }
-  where
-    (targetStr, args) = splitAt 1 targetAndArgs
+
+-- | Split @cabal run@ arguments (@exe cmd@ arguments in the examples) into
+-- target selectors and target executable arguments.
+--
+-- When a target is given it appears in both lists:
+--
+-- >>> splitTargetAndArgs ["exe", "cmd", "target"] ["target"]
+-- (["target"],[])
+--
+-- The @+RTS@ argument is passed to the executable so only appears in the first
+-- list:
+--
+-- >>> splitTargetAndArgs ["exe", "cmd", "target", "+RTS"] ["target"]
+-- (["target"],[])
+--
+-- The @--@ follows the @+RTS@ argument, so @+RTS@ is passed to the executable
+-- and only appears in the first list:
+--
+-- >>> splitTargetAndArgs ["exe", "cmd", "target", "+RTS", "--"] ["target"]
+-- (["target"],[])
+--
+-- The @--@ precedes the @+RTS@ argument, so @+RTS@ is included in the
+-- 'targetAndArgs' list as well:
+--
+-- >>> splitTargetAndArgs ["exe", "cmd", "target", "--", "+RTS"] ["target", "+RTS"]
+-- (["target"],["+RTS"])
+--
+-- Same examples as above but when no target is given:
+--
+-- >>> splitTargetAndArgs ["exe", "cmd"] []
+-- ([],[])
+-- >>> splitTargetAndArgs ["exe", "cmd", "+RTS"] []
+-- ([],[])
+-- >>> splitTargetAndArgs ["exe", "cmd", "+RTS", "--"] []
+-- ([],[])
+-- >>> splitTargetAndArgs ["exe", "cmd", "--", "+RTS"] ["+RTS"]
+-- ([],["+RTS"])
+splitTargetAndArgs
+  :: [String]
+  -- ^ Full command line arguments, the original command line from
+  -- 'getFullArgs', which is only used to detect whether a @--@ separator was
+  -- present so that @cabal run -- ...@ keeps the target empty.
+  -> [String]
+  -- ^ The second argument is the parser-produced list that combines targets and
+  -- their arguments.  These arguments do not include those passed to @cabal@
+  -- such as @+RTS@ preceding the @--@ separator.
+  -> ([String], [String])
+splitTargetAndArgs fullArgs targetAndArgs = case dropWhile (/= "--") fullArgs of
+  ("--" : exeArgs) ->
+    -- targetAndArgs contains targets (>=0) and args; exeArgs contains only args; so
+    -- the difference (>=0) is the number of targets
+    let numTargets = length targetAndArgs - length exeArgs
+     in splitAt numTargets targetAndArgs
+  _ ->
+    -- No '--': first element (if any) is the target.
+    splitAt 1 targetAndArgs
 
 -- | Used by the main CLI parser as heuristic to decide whether @cabal@ was
 -- invoked as a script interpreter, i.e. via
@@ -374,16 +452,15 @@ matchingPackagesByUnitId
   -> ElaboratedInstallPlan
   -> [ElaboratedConfiguredPackage]
 matchingPackagesByUnitId uid =
-  catMaybes
-    . fmap
-      ( foldPlanPackage
-          (const Nothing)
-          ( \x ->
-              if elabUnitId x == uid
-                then Just x
-                else Nothing
-          )
-      )
+  mapMaybe
+    ( foldPlanPackage
+        (const Nothing)
+        ( \x ->
+            if elabUnitId x == uid
+              then Just x
+              else Nothing
+        )
+    )
     . toList
 
 -- | This defines what a 'TargetSelector' means for the @run@ command.
@@ -531,14 +608,10 @@ renderRunProblem (TargetProblemMatchesMultiple targetSelector targets) =
       ( (\(label, xs) -> "- " ++ label ++ ": " ++ renderListPretty xs)
           <$> zip
             ["executables", "test-suites", "benchmarks"]
-            ( filter (not . null) . map removeDuplicates $
-                map (componentNameRaw . availableTargetComponentName)
-                  <$> (flip filterTargetsKind $ targets)
-                  <$> [ExeKind, TestKind, BenchKind]
+            ( filter (not . null) . map sortNub $
+                (map (componentNameRaw . availableTargetComponentName) . (`filterTargetsKind` targets) <$> [ExeKind, TestKind, BenchKind])
             )
       )
-  where
-    removeDuplicates = catMaybes . map safeHead . group . sort
 renderRunProblem (TargetProblemMultipleTargets selectorMap) =
   "The run command is for running a single executable at once. The targets "
     ++ renderListCommaAnd

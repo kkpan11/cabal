@@ -61,10 +61,6 @@ import Distribution.Package
   , packageVersion
   )
 import Distribution.Simple.Compiler
-  ( Compiler
-  , PackageDBStack
-  , compilerInfo
-  )
 import Distribution.Simple.PackageIndex (InstalledPackageIndex)
 import Distribution.Simple.Program
   ( ProgramDb
@@ -84,6 +80,7 @@ import Distribution.Simple.Utils
 import Distribution.System
   ( Platform
   )
+import Distribution.Verbosity (verbosityLevel)
 import Distribution.Version
   ( thisVersion
   )
@@ -98,7 +95,7 @@ import Distribution.Version
 -- constraining each dependency to an exact version.
 freeze
   :: Verbosity
-  -> PackageDBStack
+  -> PackageDBStackCWD
   -> RepoContext
   -> Compiler
   -> Platform
@@ -146,7 +143,7 @@ freeze
 -- command.
 getFreezePkgs
   :: Verbosity
-  -> PackageDBStack
+  -> PackageDBStackCWD
   -> RepoContext
   -> Compiler
   -> Platform
@@ -187,7 +184,7 @@ getFreezePkgs
     where
       sanityCheck :: [PackageSpecifier UnresolvedSourcePackage] -> IO ()
       sanityCheck pkgSpecifiers = do
-        when (not . null $ [n | n@(NamedPackage _ _) <- pkgSpecifiers]) $
+        unless (null [n | n@(NamedPackage _ _) <- pkgSpecifiers]) $
           dieWithException verbosity UnexpectedNamedPkgSpecifiers
         when (length pkgSpecifiers /= 1) $
           dieWithException verbosity UnexpectedSourcePkgSpecifiers
@@ -199,7 +196,7 @@ planPackages
   -> FreezeFlags
   -> InstalledPackageIndex
   -> SourcePackageDb
-  -> PkgConfigDb
+  -> Maybe PkgConfigDb
   -> [PackageSpecifier UnresolvedSourcePackage]
   -> IO [SolverPlanPackage]
 planPackages
@@ -239,7 +236,7 @@ planPackages
           . setStrongFlags strongFlags
           . setAllowBootLibInstalls allowBootLibInstalls
           . setOnlyConstrained onlyConstrained
-          . setSolverVerbosity verbosity
+          . setSolverVerbosity (verbosityLevel verbosity)
           . addConstraints
             [ let pkg = pkgSpecifierTarget pkgSpecifier
                   pc =
@@ -303,8 +300,8 @@ pruneInstallPlan installPlan pkgSpecifiers =
 freezePackages :: Package pkg => Verbosity -> GlobalFlags -> [pkg] -> IO ()
 freezePackages verbosity globalFlags pkgs = do
   pkgEnv <-
-    fmap (createPkgEnv . addFrozenConstraints) $
-      loadUserConfig
+    createPkgEnv . addFrozenConstraints
+      <$> loadUserConfig
         verbosity
         ""
         (flagToMaybe . globalConstraintsFile $ globalFlags)

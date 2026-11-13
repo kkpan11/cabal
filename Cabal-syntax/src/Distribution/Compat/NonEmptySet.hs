@@ -1,6 +1,3 @@
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE DeriveDataTypeable #-}
-
 module Distribution.Compat.NonEmptySet
   ( NonEmptySet
 
@@ -12,6 +9,7 @@ module Distribution.Compat.NonEmptySet
 
     -- * Deletion
   , delete
+  , filter
 
     -- * Conversions
   , toNonEmpty
@@ -28,11 +26,11 @@ module Distribution.Compat.NonEmptySet
 
 import Prelude (Bool (..), Eq, Maybe (..), Ord (..), Read, Show (..), String, error, otherwise, return, showParen, showString, ($), (++), (.))
 
+import Control.Applicative (empty)
 import Control.DeepSeq (NFData (..))
 import Data.Data (Data)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Semigroup (Semigroup (..))
-import Data.Typeable (Typeable)
 
 import qualified Data.Foldable as F
 import qualified Data.Set as Set
@@ -40,15 +38,9 @@ import qualified Data.Set as Set
 import Distribution.Compat.Binary (Binary (..))
 import Distribution.Utils.Structured
 
-#if MIN_VERSION_binary(0,6,0)
-import Control.Applicative (empty)
-#else
-import Control.Monad (fail)
-#endif
-
 -- | @since 3.4.0.0
 newtype NonEmptySet a = NES (Set.Set a)
-  deriving (Eq, Ord, Typeable, Data, Read)
+  deriving (Eq, Ord, Data, Read)
 
 -------------------------------------------------------------------------------
 -- Instances
@@ -60,19 +52,13 @@ instance Show a => Show (NonEmptySet a) where
       showString "fromNonEmpty "
         . showsPrec 11 (toNonEmpty s)
 
-{- FOURMOLU_DISABLE -}
 instance Binary a => Binary (NonEmptySet a) where
   put (NES s) = put s
   get = do
-      xs <- get
-      if Set.null xs
-#if MIN_VERSION_binary(0,6,0)
+    xs <- get
+    if Set.null xs
       then empty
-#else
-      then fail "NonEmptySet: empty"
-#endif
       else return (NES xs)
-{- FOURMOLU_ENABLE -}
 
 instance Structured a => Structured (NonEmptySet a) where
   structure = containerStructure
@@ -87,12 +73,9 @@ instance Ord a => Semigroup (NonEmptySet a) where
 instance F.Foldable NonEmptySet where
   foldMap f (NES s) = F.foldMap f s
   foldr f z (NES s) = F.foldr f z s
-
-#if MIN_VERSION_base(4,8,0)
-  toList         = toList
-  null _         = False
+  toList = toList
+  null _ = False
   length (NES s) = F.length s
-#endif
 
 -------------------------------------------------------------------------------
 -- Constructors
@@ -118,6 +101,9 @@ delete x (NES xs)
   | otherwise = Just (NES xs)
   where
     res = Set.delete x xs
+
+filter :: (a -> Bool) -> NonEmptySet a -> Set.Set a
+filter predicate (NES set) = Set.filter predicate set
 
 -------------------------------------------------------------------------------
 -- Conversions
@@ -148,16 +134,12 @@ member x (NES xs) = Set.member x xs
 -- Map
 -------------------------------------------------------------------------------
 
-{- FOURMOLU_DISABLE -}
 map
-    :: ( Ord b
-#if !MIN_VERSION_containers(0,5,2)
-       , Ord a
-#endif
-       )
-    => (a -> b) -> NonEmptySet a -> NonEmptySet b
+  :: Ord b
+  => (a -> b)
+  -> NonEmptySet a
+  -> NonEmptySet b
 map f (NES x) = NES (Set.map f x)
-{- FOURMOLU_ENABLE -}
 
 -------------------------------------------------------------------------------
 -- Internal

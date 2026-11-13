@@ -1,6 +1,3 @@
-{-# LANGUAGE DeriveFunctor #-}
-{-# LANGUAGE DeriveGeneric #-}
------------------------------------------------------------------------------
 -- |
 -- Module      :  Distribution.Solver.Types.PackageIndex
 -- Copyright   :  (c) David Himmelstrup 2005,
@@ -22,6 +19,8 @@ module Distribution.Solver.Types.PackageIndex (
   -- * Updates
   merge,
   override,
+  OverrideOrMerge(..),
+  overrideOrMerge,
   insert,
   deletePackageName,
   deletePackageId,
@@ -86,10 +85,9 @@ instance Package pkg => Semigroup (PackageIndex pkg) where
 
 instance Package pkg => Monoid (PackageIndex pkg) where
   mempty  = PackageIndex Map.empty
-  mappend = (<>)
-  --save one mappend with empty in the common case:
+  --save one (<>) with empty in the common case:
   mconcat [] = mempty
-  mconcat xs = Prelude.foldr1 mappend xs
+  mconcat xs = Prelude.foldr1 (<>) xs
 
 instance Binary pkg => Binary (PackageIndex pkg)
 
@@ -120,7 +118,7 @@ internalError name = error ("PackageIndex." ++ name ++ ": internal error")
 -- case-sensitively.
 --
 lookup :: PackageIndex pkg -> PackageName -> [pkg]
-lookup (PackageIndex m) name = fromMaybe [] $ Map.lookup name m
+lookup (PackageIndex m) name = Map.findWithDefault [] name m
 
 --
 -- * Construction
@@ -181,9 +179,31 @@ override i1@(PackageIndex m1) i2@(PackageIndex m2) =
   expensiveAssert (invariant i1 && invariant i2) $
     mkPackageIndex (Map.unionWith (\_l r -> r) m1 m2)
 
+data OverrideOrMerge = Override | Merge
+  deriving (Eq, Show)
+
+-- | Combined override-or-merge of two indexes.
+--
+-- For any package, either 'override' or 'merge' the packages from the second
+-- index into the first based on the supplied predicate.
+--
+overrideOrMerge ::
+     Package pkg
+  => (PackageName -> OverrideOrMerge)
+  -> PackageIndex pkg
+  -> PackageIndex pkg
+  -> PackageIndex pkg
+overrideOrMerge strategy i1@(PackageIndex m1) i2@(PackageIndex m2) =
+  expensiveAssert (invariant i1 && invariant i2) $
+    mkPackageIndex (Map.unionWithKey overridePkg m1 m2)
+  where
+    overridePkg name l r = case strategy name of
+      Override -> r
+      Merge -> mergeBuckets l r
+
 -- | Inserts a single package into the index.
 --
--- This is equivalent to (but slightly quicker than) using 'mappend' or
+-- This is equivalent to (but slightly quicker than) using '(<>)' or
 -- 'merge' with a singleton index.
 --
 insert :: Package pkg => pkg -> PackageIndex pkg -> PackageIndex pkg
@@ -227,8 +247,8 @@ deletePackageName name =
 deleteDependency :: Package pkg
                  => PackageName -> VersionRange -> PackageIndex pkg
                  -> PackageIndex pkg
-deleteDependency name verstionRange =
-  delete name (\pkg -> packageVersion pkg `withinRange` verstionRange)
+deleteDependency name versionRange =
+  delete name (\pkg -> packageVersion pkg `withinRange` versionRange)
 
 --
 -- * Bulk queries

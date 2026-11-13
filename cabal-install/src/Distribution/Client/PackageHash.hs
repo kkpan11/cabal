@@ -1,6 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE RecordWildCards #-}
 
 -- | Functions to calculate nix-style hashes for package ids.
@@ -44,7 +41,7 @@ import Distribution.Simple.Compiler
   , CompilerId
   , DebugInfoLevel (..)
   , OptimisationLevel (..)
-  , PackageDB
+  , PackageDBCWD
   , ProfDetailLevel (..)
   , showProfDetailLevel
   )
@@ -207,6 +204,7 @@ data PackageHashConfigInputs = PackageHashConfigInputs
   , pkgHashProfExe :: Bool
   , pkgHashProfLibDetail :: ProfDetailLevel
   , pkgHashProfExeDetail :: ProfDetailLevel
+  , pkgHashBytecodeLib :: Bool
   , pkgHashCoverage :: Bool
   , pkgHashOptimization :: OptimisationLevel
   , pkgHashSplitObjs :: Bool
@@ -221,7 +219,7 @@ data PackageHashConfigInputs = PackageHashConfigInputs
   , pkgHashExtraIncludeDirs :: [FilePath]
   , pkgHashProgPrefix :: Maybe PathTemplate
   , pkgHashProgSuffix :: Maybe PathTemplate
-  , pkgHashPackageDbs :: [Maybe PackageDB]
+  , pkgHashPackageDbs :: [Maybe PackageDBCWD]
   , -- Haddock options
     pkgHashDocumentation :: Bool
   , pkgHashHaddockHoogle :: Bool
@@ -238,8 +236,9 @@ data PackageHashConfigInputs = PackageHashConfigInputs
   , pkgHashHaddockContents :: Maybe PathTemplate
   , pkgHashHaddockIndex :: Maybe PathTemplate
   , pkgHashHaddockBaseUrl :: Maybe String
-  , pkgHashHaddockLib :: Maybe String
+  , pkgHashHaddockResourcesDir :: Maybe String
   , pkgHashHaddockOutputDir :: Maybe FilePath
+  , pkgHashHaddockUseUnicode :: Bool
   --     TODO: [required eventually] pkgHashToolsVersions     ?
   --     TODO: [required eventually] pkgHashToolsExtraOptions ?
   }
@@ -318,6 +317,7 @@ renderPackageHashInputs
           , opt "prof-exe" False prettyShow pkgHashProfExe
           , opt "prof-lib-detail" ProfDetailDefault showProfDetailLevel pkgHashProfLibDetail
           , opt "prof-exe-detail" ProfDetailDefault showProfDetailLevel pkgHashProfExeDetail
+          , opt "bytecode-lib" False prettyShow pkgHashBytecodeLib
           , opt "hpc" False prettyShow pkgHashCoverage
           , opt "optimisation" NormalOptimisation (show . fromEnum) pkgHashOptimization
           , opt "split-objs" False prettyShow pkgHashSplitObjs
@@ -347,8 +347,9 @@ renderPackageHashInputs
           , opt "haddock-contents-location" Nothing (maybe "" fromPathTemplate) pkgHashHaddockContents
           , opt "haddock-index-location" Nothing (maybe "" fromPathTemplate) pkgHashHaddockIndex
           , opt "haddock-base-url" Nothing (fromMaybe "") pkgHashHaddockBaseUrl
-          , opt "haddock-lib" Nothing (fromMaybe "") pkgHashHaddockLib
+          , opt "haddock-resources-dir" Nothing (fromMaybe "") pkgHashHaddockResourcesDir
           , opt "haddock-output-dir" Nothing (fromMaybe "") pkgHashHaddockOutputDir
+          , opt "haddock-use-unicode" False prettyShow pkgHashHaddockUseUnicode
           ]
             ++ Map.foldrWithKey (\prog args acc -> opt (prog ++ "-options") [] unwords args : acc) [] pkgHashProgramArgs
     where

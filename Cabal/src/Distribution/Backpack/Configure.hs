@@ -1,9 +1,5 @@
-{-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE NondecreasingIndentation #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE PatternGuards #-}
-{-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE NoMonoLocalBinds #-}
 
@@ -33,11 +29,12 @@ import qualified Distribution.Compat.Graph as Graph
 import Distribution.InstalledPackageInfo
   ( InstalledPackageInfo
   , emptyInstalledPackageInfo
+  , requiredSignatures
   )
 import qualified Distribution.InstalledPackageInfo as Installed
 import Distribution.ModuleName
 import Distribution.Package
-import Distribution.PackageDescription
+import Distribution.PackageDescription (FlagAssignment, PackageDescription (..), libName)
 import Distribution.Simple.Compiler
 import Distribution.Simple.Flag
 import Distribution.Simple.LocalBuildInfo
@@ -70,7 +67,7 @@ configureComponentLocalBuildInfos
   -> Flag String -- configIPID
   -> Flag ComponentId -- configCID
   -> PackageDescription
-  -> ([PreExistingComponent], [PromisedComponent])
+  -> ([PreExistingComponent], [ConfiguredPromisedComponent])
   -> FlagAssignment -- configConfigurationsFlags
   -> [(ModuleName, Module)] -- configInstantiateWith
   -> InstalledPackageIndex
@@ -103,6 +100,8 @@ configureComponentLocalBuildInfos
     let conf_pkg_map =
           Map.fromListWith
             Map.union
+            $
+            -- Normal dependencies
             [ ( pc_pkgname pkg
               , Map.singleton
                   (pc_compname pkg)
@@ -115,10 +114,10 @@ configureComponentLocalBuildInfos
               )
             | pkg <- prePkgDeps
             ]
-            `Map.union` Map.fromListWith
-              Map.union
+              ++
+              -- Promised dependencies
               [ (pkg, Map.singleton (ann_cname aid) aid)
-              | PromisedComponent pkg aid <- promisedPkgDeps
+              | ConfiguredPromisedComponent pkg aid <- promisedPkgDeps
               ]
     graph1 <-
       toConfiguredComponents
@@ -151,7 +150,7 @@ configureComponentLocalBuildInfos
                   , emptyModuleShape
                   )
                 )
-              | PromisedComponent _ aid <- promisedPkgDeps
+              | ConfiguredPromisedComponent _ aid <- promisedPkgDeps
               ]
         uid_lookup def_uid
           | Just pkg <- PackageIndex.lookupUnitId installedPackageSet uid =
@@ -208,7 +207,7 @@ configureComponentLocalBuildInfos
 toComponentLocalBuildInfos
   :: Compiler
   -> InstalledPackageIndex -- FULL set
-  -> [PromisedComponent]
+  -> [ConfiguredPromisedComponent]
   -> PackageDescription
   -> [PreExistingComponent] -- external package deps
   -> [ReadyComponent]
@@ -261,6 +260,19 @@ toComponentLocalBuildInfos
       packageDependsIndex = PackageIndex.fromList (lefts local_graph)
       fullIndex = Graph.fromDistinctList local_graph
 
+    let
+      -- Map from dependency UnitId to its PackageId, built from includes
+      -- of all ready components.  Used to resolve opaque hashed UnitIds
+      -- in broken-package error messages.
+      depPkgMap :: Map UnitId PackageId
+      depPkgMap =
+        Map.fromList
+          [ (unDefUnitId (ci_id ci), ci_pkgid ci)
+          | rc <- graph
+          , Right instc <- [rc_i rc]
+          , ci <- instc_includes instc
+          ]
+
     case Graph.broken fullIndex of
       [] -> return ()
       -- If there are promised dependencies, we don't know what the dependencies
@@ -270,26 +282,33 @@ toComponentLocalBuildInfos
       broken
         | not (null promisedPkgDeps) -> return ()
         | otherwise ->
-            -- TODO: ppr this
-            dieProgress . text $
-              "The following packages are broken because other"
-                ++ " packages they depend on are missing. These broken "
-                ++ "packages must be rebuilt before they can be used.\n"
-                -- TODO: Undupe.
-                ++ unlines
-                  [ "installed package "
-                    ++ prettyShow (packageId pkg)
-                    ++ " is broken due to missing package "
-                    ++ intercalate ", " (map prettyShow deps)
-                  | (Left pkg, deps) <- broken
-                  ]
-                ++ unlines
-                  [ "planned package "
-                    ++ prettyShow (packageId pkg)
-                    ++ " is broken due to missing package "
-                    ++ intercalate ", " (map prettyShow deps)
-                  | (Right pkg, deps) <- broken
-                  ]
+            dieProgress $
+              text "The following packages are broken because other"
+                <+> text "packages they depend on are missing. These broken"
+                <+> text "packages must be rebuilt before they can be used."
+                $$ nest
+                  2
+                  ( vcat $
+                      [ hang
+                        (text "installed package" <+> pretty (packageId pkg))
+                        4
+                        ( text "is broken due to missing package"
+                            <+> hsep (punctuate comma (map pretty (toList deps)))
+                        )
+                      | (Left pkg, deps) <- broken
+                      ]
+                        ++ [ hang
+                            (text "planned package" <+> pretty (packageId pkg))
+                            4
+                            ( vcat $
+                                text "is broken due to missing package"
+                                  : [ nest 2 (dispMissingDep installedPackageSet depPkgMap dep)
+                                    | dep <- toList deps
+                                    ]
+                            )
+                           | (Right pkg, deps) <- broken
+                           ]
+                  )
 
     -- In this section, we'd like to look at the 'packageDependsIndex'
     -- and see if we've picked multiple versions of the same
@@ -338,6 +357,48 @@ toComponentLocalBuildInfos
     -- forM clbis $ \(clbi,deps) -> info verbosity $ "UNIT" ++ hashUnitId (componentUnitId clbi) ++ "\n" ++ intercalate "\n" (map hashUnitId deps)
     return (clbis, packageDependsIndex)
 
+-- | Pretty-print a missing dependency, resolving opaque hashed 'UnitId's
+-- to their human-readable package id and signature info when possible.
+--
+-- When an indefinite Backpack package is installed separately (e.g. via
+-- nix callCabal2nix), only the indefinite variant (with unfilled signatures)
+-- exists in the package DB.  The consumer needs an instantiated variant
+-- which was never built.  The fix is to add both packages to the same
+-- cabal project so cabal can fill the signatures.
+dispMissingDep
+  :: InstalledPackageIndex
+  -- ^ all installed packages
+  -> Map UnitId PackageId
+  -- ^ dep UnitId to its PackageId (from includes)
+  -> UnitId
+  -- ^ the missing dependency
+  -> Doc
+dispMissingDep installedPkgSet depPkgMap uid =
+  case Map.lookup uid depPkgMap of
+    Just pkgid ->
+      let ipiSigs =
+            [ sigs
+            | ipi <- PackageIndex.lookupSourcePackageId installedPkgSet pkgid
+            , let sigs = requiredSignatures ipi
+            , not (Set.null sigs)
+            ]
+       in case ipiSigs of
+            (sigs : _) ->
+              pretty pkgid
+                <+> parens
+                  ( text "has unfilled"
+                      <+> (if Set.size sigs > 1 then text "signatures:" else text "signature:")
+                      <+> hsep (punctuate comma (map pretty (Set.toList sigs)))
+                  )
+                $$ nest
+                  2
+                  ( text "The package is installed as indefinite."
+                      $$ text "To use it, rebuild it in the same cabal project as the"
+                      <+> text "consumer so cabal can fill the signatures."
+                  )
+            [] -> pretty pkgid <+> parens (pretty uid)
+    Nothing -> pretty uid
+
 -- Build ComponentLocalBuildInfo for each component we are going
 -- to build.
 --
@@ -353,7 +414,7 @@ mkLinkedComponentsLocalBuildInfo comp rcs = map go rcs
     go rc =
       case rc_component rc of
         CLib lib ->
-          let convModuleExport (modname', (Module uid modname))
+          let convModuleExport (modname', Module uid modname)
                 | this_uid == unDefUnitId uid
                 , modname' == modname =
                     Installed.ExposedModule modname' Nothing

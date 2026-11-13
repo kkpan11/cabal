@@ -1,6 +1,4 @@
-{-# LANGUAGE FlexibleInstances   #-}
 {-# LANGUAGE OverloadedStrings   #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 module Distribution.Described (
     Described (..),
     describeDoc,
@@ -13,7 +11,6 @@ module Distribution.Described (
     reMunch1CS,
     -- * Variables
     reVar0,
-    reVar1,
     -- * Special expressions
     reDot,
     reComma,
@@ -40,21 +37,22 @@ module Distribution.Described (
 
 import Prelude
        ( Bool (..), Char, Either (..), Enum (..), Eq (..), Ord (..), Show (..), String
-       , elem, fmap, foldr, id, map, maybe, otherwise, return, reverse, undefined
+       , elem, fmap, foldr, id, map, maybe, otherwise, return, reverse
        , ($), (.), (<$>)
        )
 
+import Data.Coerce           (Coercible)
 import Data.Functor.Identity (Identity (..))
 import Data.Maybe            (fromMaybe)
 import Data.Proxy            (Proxy (..))
 import Data.String           (IsString (..))
-import Data.Typeable         (Typeable, typeOf)
+import Data.Typeable         (Typeable, typeRep)
 import Data.Void             (Void, vacuous)
 import Test.QuickCheck       (Arbitrary (..), Property, counterexample)
 import Test.Tasty            (TestTree, testGroup)
 import Test.Tasty.QuickCheck (testProperty)
 
-import Distribution.Compat.Semigroup (Semigroup (..))
+import Data.Semigroup                (Semigroup (..))
 import Distribution.Parsec           (Parsec, eitherParsec)
 import Distribution.Pretty           (Pretty, prettyShow)
 
@@ -66,9 +64,8 @@ import qualified Text.PrettyPrint           as PP
 import Distribution.Utils.GrammarRegex
 
 -- Types
-import Distribution.Compat.Newtype
 import Distribution.Compiler                       (CompilerFlavor, CompilerId, knownCompilerFlavors)
-import Distribution.PackageDescription.FieldGrammar (CompatFilePath, CompatLicenseFile)
+import Distribution.PackageDescription.FieldGrammar (CompatLicenseFile, CompatDataDir)
 import Distribution.FieldGrammar.Newtypes
 import Distribution.ModuleName                     (ModuleName)
 import Distribution.System                         (Arch, OS, knownArches, knownOSs)
@@ -99,8 +96,8 @@ import Distribution.Types.SourceRepo               (RepoType)
 import Distribution.Types.TestType                 (TestType)
 import Distribution.Types.UnitId                   (UnitId)
 import Distribution.Types.UnqualComponentName      (UnqualComponentName)
-import Distribution.Utils.Path                     (LicenseFile, PackageDir, SourceDir, SymbolicPath)
-import Distribution.Verbosity                      (Verbosity)
+import Distribution.Utils.Path                     (SymbolicPath, RelativePath)
+import Distribution.Verbosity                      (VerbosityFlags)
 import Distribution.Version                        (Version, VersionRange)
 import Language.Haskell.Extension                  (Extension, Language, knownLanguages)
 
@@ -168,8 +165,8 @@ reUnqualComponent = RENamed "unqual-name" $
         -- currently the parser accepts "csAlphaNum `difference` "0123456789"
         -- which is larger set than CS.alpha
         --
-        -- Hackage rejects non ANSI names, so it's not so relevant.
-        <> RECharSet CS.alpha
+        -- Hackage, however, rejects non ANSI names.
+        <> RECharSet csAlphaNumNotDigit
         <> REMunch reEps (RECharSet csAlphaNum)
 
 reDot :: GrammarRegex a
@@ -193,6 +190,9 @@ csAlpha = CS.alpha
 
 csAlphaNum :: CS.CharSet
 csAlphaNum = CS.alphanum
+
+csAlphaNumNotDigit :: CS.CharSet
+csAlphaNumNotDigit = CS.alphanumNotDigit
 
 csUpper :: CS.CharSet
 csUpper = CS.upper
@@ -292,7 +292,7 @@ testDescribed _ = testGroup name
     , testProperty "roundtrip" propRoundtrip
     ]
   where
-    name = show (typeOf (undefined :: a))
+    name = show (typeRep (Proxy :: Proxy a))
 
     propParsec :: Ex a -> Property
     propParsec (Example str) = counterexample (show res) $ case res of
@@ -355,7 +355,7 @@ instance Described BenchmarkType where
     describe _ = "exitcode-stdio-1.0"
 
 instance Described BuildType where
-    describe _ = REUnion ["Simple","Configure","Custom","Make","Default"]
+    describe _ = REUnion ["Simple","Configure","Custom","Hooks","Make","Default"]
 
 instance Described CompilerFlavor where
     describe _ = REUnion
@@ -424,7 +424,7 @@ instance Described IncludeRenaming where
         mr = describe (Proxy :: Proxy ModuleRenaming)
 
 instance Described Language where
-    describe _ = REUnion $ (REString . show) <$> reverse knownLanguages
+    describe _ = REUnion $ REString . show <$> reverse knownLanguages
 
 instance Described LegacyExeDependency where
     describe _ = RETodo
@@ -491,7 +491,7 @@ instance Described RepoType where
 instance Described TestType where
     describe _ = REUnion ["exitcode-stdio-1.0", "detailed-0.9"]
 
-instance Described Verbosity where
+instance Described VerbosityFlags where
     describe _ = REUnion
         [ REUnion ["0", "1", "2", "3"]
         , REUnion ["silent", "normal", "verbose", "debug", "deafening"]
@@ -553,10 +553,10 @@ instance DescribeSep VCat        where describeSep _ = reCommaList
 instance DescribeSep FSep        where describeSep _ = reOptCommaList
 instance DescribeSep NoCommaFSep where describeSep _ = reSpacedList
 
-instance (Newtype a b, DescribeSep sep, Described b) => Described (List sep b a) where
+instance (Coercible a b, DescribeSep sep, Described b) => Described (List sep b a) where
     describe _ = describeSep (Proxy :: Proxy sep) (describe (Proxy :: Proxy b))
 
-instance (Newtype a b, Ord a, DescribeSep sep, Described b) => Described (Set' sep b a) where
+instance (Coercible a b, Ord a, DescribeSep sep, Described b) => Described (Set' sep b a) where
     describe _ = describeSep (Proxy :: Proxy sep) (describe (Proxy :: Proxy b))
 
 instance Described Token where
@@ -578,17 +578,24 @@ instance Described SpecLicense where
 instance Described TestedWith where
     describe _ = RETodo
 
-instance Described FilePathNT where
+
+instance Described (SymbolicPath from to) where
     describe _ = describe ([] :: [Token])
 
-instance Described (SymbolicPath PackageDir SourceDir) where
+instance Described (RelativePath from to) where
     describe _ = describe ([] :: [Token])
 
-instance Described (SymbolicPath PackageDir LicenseFile) where
+instance Described (SymbolicPathNT from to) where
+    describe _ = describe ([] :: [Token])
+
+instance Described (RelativePathNT from to) where
     describe _ = describe ([] :: [Token])
 
 instance Described CompatLicenseFile where
     describe _ = describe ([] :: [Token])
 
-instance Described CompatFilePath where
+instance Described CompatDataDir where
+    describe _ = describe ([] :: [Token])
+
+instance Described FilePathNT where
     describe _ = describe ([] :: [Token])

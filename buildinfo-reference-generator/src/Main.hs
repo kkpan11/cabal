@@ -1,16 +1,16 @@
-{-# LANGUAGE DeriveFunctor         #-}
-{-# LANGUAGE DeriveGeneric         #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
 module Main (main) where
 
 import Data.Map.Strict (Map)
 
 import Data.Bifunctor                  (first)
+import Data.Coerce                     (Coercible, coerce)
+import Data.Functor.Identity           (Identity(..))
 import Data.Proxy                      (Proxy (..))
 import Data.Void                       (Void)
 import Distribution.CabalSpecVersion   (CabalSpecVersion, showCabalSpecVersion)
-import Distribution.Compat.Newtype     (pack')
+import Distribution.Compat.Lens        (ALens')
 import Distribution.FieldGrammar.Class (FieldGrammar (..))
+import Distribution.FieldGrammar.Newtypes (MQuoted (..), RelativePathNT (..), SymbolicPathNT (..), TestedWith (..), Token (..), Token' (..))
 import Distribution.Fields.Field       (FieldName)
 import Distribution.Pretty             (pretty)
 import Distribution.Simple.Utils       (fromUTF8BS)
@@ -52,8 +52,8 @@ main = do
                         "String as in Haskell; it's recommended to avoid using Haskell-specific escapes."
                     , zproduction "unqual-name"     reUnqualComponent $ unwords
                         [ "Unqualified component names are used for package names, component names etc. but not flag names."
-                        , "Unqualified component name consist of components separated by dash, each component is non-empty alphanumeric string, with at least one alphabetic character."
-                        , "In other words, component may not look like a number."
+                        , "An unqualified component name consists of components separated by a hyphen, each component is a non-empty alphanumeric string, with at least one character that is not the digits ``0`` to ``9``."
+                        , "In other words, a component may not look like a number."
                         ]
 
                     , zproduction "module-name"     (describe (Proxy :: Proxy ModuleName))
@@ -249,15 +249,17 @@ instance FieldGrammar Described Reference where
     optionalFieldAla fn pack _l =
         reference fn $ OptionalFieldAla (describeDoc pack)
 
+    optionalFieldDefAla
+        :: forall s proxy a b. (Coercible a b, Described b)
+        => FieldName -> proxy a b -> ALens' s a -> a -> Reference s a
     optionalFieldDefAla fn pack _l def =
         reference fn $ OptionalFieldDefAla
             (describeDoc pack)
-            (pretty $ pack' pack def)
+            (pretty $ coerce @a @b def)
 
     freeTextField fn _l = reference fn FreeTextField
 
     freeTextFieldDef   fn _l = reference fn FreeTextField
-    freeTextFieldDefST fn _l = reference fn FreeTextField
 
     monoidalFieldAla fn pack _l =
         reference fn (MonoidalFieldAla (describeDoc pack))

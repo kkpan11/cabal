@@ -1,3 +1,5 @@
+{-# LANGUAGE LambdaCase #-}
+
 -- |
 -- Module      :  Distribution.PackageDescription.Check.Target
 -- Copyright   :  Lennart Kolmodin 2008, Francesco Ariis 2023
@@ -40,7 +42,8 @@ import Language.Haskell.Extension
 import System.FilePath (takeExtension)
 
 import Control.Monad
-
+import Data.Bifunctor
+import qualified Data.Text as T
 import qualified Distribution.Types.BuildInfo.Lens as L
 
 checkLibrary
@@ -77,7 +80,7 @@ checkLibrary
     checkP
       ( not $
           all
-            (flip elem (explicitLibModules lib))
+            (`elem` explicitLibModules lib)
             (libModulesAutogen lib)
       )
       (PackageBuildImpossible AutogenNotExposed)
@@ -86,10 +89,10 @@ checkLibrary
     checkP
       ( not $
           all
-            (flip elem (allExplicitIncludes lib))
+            (flip elem (allExplicitIncludes lib) . getSymbolicPath)
             (view L.autogenIncludes lib)
       )
-      $ (PackageBuildImpossible AutogenIncludesNotIncluded)
+      (PackageBuildImpossible AutogenIncludesNotIncluded)
 
     -- § Build infos.
     checkBuildInfo
@@ -107,8 +110,8 @@ checkLibrary
     where
       allExplicitIncludes :: L.HasBuildInfo a => a -> [FilePath]
       allExplicitIncludes x =
-        view L.includes x
-          ++ view L.installIncludes x
+        map getSymbolicPath (view L.includes x)
+          ++ map getSymbolicPath (view L.installIncludes x)
 
 checkForeignLib :: Monad m => ForeignLib -> CheckM m ()
 checkForeignLib
@@ -136,12 +139,13 @@ checkExecutable
   ads
   exe@( Executable
           exeName_
-          modulePath_
+          symbolicModulePath_
           _exeScope_
           buildInfo_
         ) = do
     -- Target type/name (exe).
     let cet = CETExecutable exeName_
+        modulePath_ = getSymbolicPath symbolicModulePath_
 
     -- § Exe specific checks
     checkP
@@ -152,7 +156,7 @@ checkExecutable
     checkP
       ( pid /= fakePackageId
           && not (null modulePath_)
-          && not (fileExtensionSupportedLanguage $ modulePath_)
+          && not (fileExtensionSupportedLanguage modulePath_)
       )
       (PackageBuildImpossible NoHsLhsMain)
 
@@ -167,12 +171,12 @@ checkExecutable
     -- Alas exeModules ad exeModulesAutogen (exported from
     -- Distribution.Types.Executable) take `Executable` as a parameter.
     checkP
-      (not $ all (flip elem (exeModules exe)) (exeModulesAutogen exe))
+      (not $ all (`elem` exeModules exe) (exeModulesAutogen exe))
       (PackageBuildImpossible $ AutogenNoOther cet)
     checkP
       ( not $
           all
-            (flip elem (view L.includes exe))
+            (flip elem (view L.includes exe) . relativeSymbolicPath)
             (view L.autogenIncludes exe)
       )
       (PackageBuildImpossible AutogenIncludesNotIncludedExe)
@@ -210,14 +214,14 @@ checkTestSuite
     checkP
       ( not $
           all
-            (flip elem (testModules ts))
+            (`elem` testModules ts)
             (testModulesAutogen ts)
       )
       (PackageBuildImpossible $ AutogenNoOther cet)
     checkP
       ( not $
           all
-            (flip elem (view L.includes ts))
+            (flip elem (view L.includes ts) . relativeSymbolicPath)
             (view L.autogenIncludes ts)
       )
       (PackageBuildImpossible AutogenIncludesNotIncludedExe)
@@ -233,12 +237,12 @@ checkTestSuite
     where
       mainIsWrongExt =
         case testInterface_ of
-          TestSuiteExeV10 _ f -> not (fileExtensionSupportedLanguage f)
+          TestSuiteExeV10 _ f -> not (fileExtensionSupportedLanguage $ getSymbolicPath f)
           _ -> False
 
       mainIsNotHsExt =
         case testInterface_ of
-          TestSuiteExeV10 _ f -> takeExtension f `notElem` [".hs", ".lhs"]
+          TestSuiteExeV10 _ f -> takeExtension (getSymbolicPath f) `notElem` [".hs", ".lhs"]
           _ -> False
 
 checkBenchmark
@@ -270,7 +274,7 @@ checkBenchmark
     checkP
       ( not $
           all
-            (flip elem (benchmarkModules bm))
+            (`elem` benchmarkModules bm)
             (benchmarkModulesAutogen bm)
       )
       (PackageBuildImpossible $ AutogenNoOther cet)
@@ -278,7 +282,7 @@ checkBenchmark
     checkP
       ( not $
           all
-            (flip elem (view L.includes bm))
+            (flip elem (view L.includes bm) . relativeSymbolicPath)
             (view L.autogenIncludes bm)
       )
       (PackageBuildImpossible AutogenIncludesNotIncludedExe)
@@ -290,7 +294,7 @@ checkBenchmark
       -- they are different.
       mainIsWrongExt =
         case benchmarkInterface_ of
-          BenchmarkExeV10 _ f -> takeExtension f `notElem` [".hs", ".lhs"]
+          BenchmarkExeV10 _ f -> takeExtension (getSymbolicPath f) `notElem` [".hs", ".lhs"]
           _ -> False
 
 -- ------------------------------------------------------------
@@ -330,30 +334,43 @@ checkBuildInfo cet ams ads bi = do
   checkAutogenModules ams bi
 
   -- PVP: we check for base and all other deps.
+  let ds = mergeDependencies $ targetBuildDepends bi
   (ids, rds) <-
     partitionDeps
       ads
       [mkUnqualComponentName "base"]
-      (mergeDependencies $ targetBuildDepends bi)
+      ds
   let ick = const (PackageDistInexcusable BaseNoUpperBounds)
       rck = PackageDistSuspiciousWarn . MissingUpperBounds cet
-  checkPVP ick ids
+      leuck = PackageDistSuspiciousWarn . LEUpperBounds cet
+      tzuck = PackageDistSuspiciousWarn . TrailingZeroUpperBounds cet
+      gtlck = PackageDistSuspiciousWarn . GTLowerBounds cet
+  checkPVP (checkDependencyVersionRange $ not . hasUpperBound) ick ids
   unless
     (isInternalTarget cet)
-    (checkPVPs rck rds)
+    (checkPVPs (checkDependencyVersionRange $ not . hasUpperBound) rck rds)
+  unless
+    (isInternalTarget cet)
+    (checkPVPs (checkDependencyVersionRange hasLEUpperBound) leuck ds)
+  unless
+    (isInternalTarget cet)
+    (checkPVPs (checkDependencyVersionRange hasTrailingZeroUpperBound) tzuck ds)
+  unless
+    (isInternalTarget cet)
+    (checkPVPs (checkDependencyVersionRange hasGTLowerBound) gtlck ds)
 
   -- Custom fields well-formedness (ASCII).
-  mapM_ checkCustomField (customFieldsBI bi)
+  mapM_ (checkCustomField . bimap T.unpack T.unpack) (customFieldsBI bi)
 
   -- Content.
-  mapM_ (checkLocalPathExist "extra-lib-dirs") (extraLibDirs bi)
+  mapM_ (checkLocalPathExist "extra-lib-dirs" . getSymbolicPath) (extraLibDirs bi)
   mapM_
-    (checkLocalPathExist "extra-lib-dirs-static")
+    (checkLocalPathExist "extra-lib-dirs-static" . getSymbolicPath)
     (extraLibDirsStatic bi)
   mapM_
-    (checkLocalPathExist "extra-framework-dirs")
+    (checkLocalPathExist "extra-framework-dirs" . getSymbolicPath)
     (extraFrameworkDirs bi)
-  mapM_ (checkLocalPathExist "include-dirs") (includeDirs bi)
+  mapM_ (checkLocalPathExist "include-dirs" . getSymbolicPath) (includeDirs bi)
   mapM_
     (checkLocalPathExist "hs-source-dirs" . getSymbolicPath)
     (hsSourceDirs bi)
@@ -367,7 +384,7 @@ checkBuildInfoPathsContent bi = do
   mapM_ checkIntDep (targetBuildDepends bi)
   df <- asksCM ccDesugar
   -- This way we can use the same function for legacy&non exedeps.
-  let ds = buildToolDepends bi ++ catMaybes (map df $ buildTools bi)
+  let ds = buildToolDepends bi ++ mapMaybe df (buildTools bi)
   mapM_ checkBTDep ds
   where
     checkLang :: Monad m => Language -> CheckM m ()
@@ -431,29 +448,29 @@ checkBuildInfoPathsContent bi = do
 -- Paths well-formedness check for BuildInfo.
 checkBuildInfoPathsWellFormedness :: Monad m => BuildInfo -> CheckM m ()
 checkBuildInfoPathsWellFormedness bi = do
-  mapM_ (checkPath False "asm-sources" PathKindFile) (asmSources bi)
-  mapM_ (checkPath False "cmm-sources" PathKindFile) (cmmSources bi)
-  mapM_ (checkPath False "c-sources" PathKindFile) (cSources bi)
-  mapM_ (checkPath False "cxx-sources" PathKindFile) (cxxSources bi)
-  mapM_ (checkPath False "js-sources" PathKindFile) (jsSources bi)
+  mapM_ (checkPath False "asm-sources" PathKindFile . getSymbolicPath) (asmSources bi)
+  mapM_ (checkPath False "cmm-sources" PathKindFile . getSymbolicPath) (cmmSources bi)
+  mapM_ (checkPath False "c-sources" PathKindFile . getSymbolicPath) (cSources bi)
+  mapM_ (checkPath False "cxx-sources" PathKindFile . getSymbolicPath) (cxxSources bi)
+  mapM_ (checkPath False "js-sources" PathKindFile . getSymbolicPath) (jsSources bi)
   mapM_
-    (checkPath False "install-includes" PathKindFile)
+    (checkPath False "install-includes" PathKindFile . getSymbolicPath)
     (installIncludes bi)
   mapM_
     (checkPath False "hs-source-dirs" PathKindDirectory . getSymbolicPath)
     (hsSourceDirs bi)
   -- Possibly absolute paths.
-  mapM_ (checkPath True "includes" PathKindFile) (includes bi)
+  mapM_ (checkPath True "includes" PathKindFile . getSymbolicPath) (includes bi)
   mapM_
-    (checkPath True "include-dirs" PathKindDirectory)
+    (checkPath True "include-dirs" PathKindDirectory . getSymbolicPath)
     (includeDirs bi)
   mapM_
-    (checkPath True "extra-lib-dirs" PathKindDirectory)
+    (checkPath True "extra-lib-dirs" PathKindDirectory . getSymbolicPath)
     (extraLibDirs bi)
   mapM_
-    (checkPath True "extra-lib-dirs-static" PathKindDirectory)
+    (checkPath True "extra-lib-dirs-static" PathKindDirectory . getSymbolicPath)
     (extraLibDirsStatic bi)
-  mapM_ checkOptionPath (perCompilerFlavorToList $ options bi)
+  mapM_ (checkOptionPath . fmap (map T.unpack)) (perCompilerFlavorToList $ options bi)
   where
     checkOptionPath
       :: Monad m
@@ -483,12 +500,7 @@ checkBuildInfoFeatures bi sv = do
     (isJust $ defaultLanguage bi)
     (PackageBuildWarning CVDefaultLanguage)
   -- CheckSpecVer sv.
-  checkP
-    ( sv >= CabalSpecV1_10
-        && sv < CabalSpecV3_4
-        && isNothing (defaultLanguage bi)
-    )
-    (PackageBuildWarning CVDefaultLanguageComponent)
+  checkDefaultLanguage
   -- Check use of 'extra-framework-dirs' field.
   checkSpecVer
     CabalSpecV1_24
@@ -506,19 +518,18 @@ checkBuildInfoFeatures bi sv = do
     (PackageBuildWarning CVExtensionsDeprecated)
 
   -- asm-sources, cmm-sources and friends only w/ spec ≥ 1.10
-  checkCVSources (asmSources bi)
-  checkCVSources (cmmSources bi)
-  checkCVSources (extraBundledLibs bi)
-  checkCVSources (extraLibFlavours bi)
+  checkCVSources (map getSymbolicPath $ asmSources bi)
+  checkCVSources (map getSymbolicPath $ cmmSources bi)
+  checkCVSources (map T.unpack $ extraBundledLibs bi)
+  checkCVSources (map T.unpack $ extraLibFlavours bi)
 
   -- extra-dynamic-library-flavours requires ≥ 3.0
   checkSpecVer
     CabalSpecV3_0
     (not . null $ extraDynLibFlavours bi)
-    (PackageDistInexcusable $ CVExtraDynamic [extraDynLibFlavours bi])
+    (PackageDistInexcusable $ CVExtraDynamic [map T.unpack (extraDynLibFlavours bi)])
   -- virtual-modules requires ≥ 2.2
-  checkSpecVer CabalSpecV2_2 (not . null $ virtualModules bi) $
-    (PackageDistInexcusable CVVirtualModules)
+  checkSpecVer CabalSpecV2_2 (not . null $ virtualModules bi) (PackageDistInexcusable CVVirtualModules)
   -- Check use of thinning and renaming.
   checkSpecVer
     CabalSpecV2_0
@@ -534,12 +545,23 @@ checkBuildInfoFeatures bi sv = do
         (not . null $ cvs)
         (PackageDistInexcusable CVSources)
 
+    checkDefaultLanguage :: Monad m => CheckM m ()
+    checkDefaultLanguage = do
+      -- < 1.10 has no `default-language` field.
+      when
+        (sv >= CabalSpecV1_10 && isNothing (defaultLanguage bi))
+        -- < 3.4 mandatory, after just a suggestion.
+        ( if sv < CabalSpecV3_4
+            then tellP (PackageBuildWarning CVDefaultLanguageComponent)
+            else tellP (PackageDistInexcusable CVDefaultLanguageComponentSoft)
+        )
+
 -- Tests for extensions usage which can break Cabal < 1.4.
 checkBuildInfoExtensions :: Monad m => BuildInfo -> CheckM m ()
 checkBuildInfoExtensions bi = do
   let exts = allExtensions bi
-      extCabal1_2 = nub $ filter (`elem` compatExtensionsExtra) exts
-      extCabal1_4 = nub $ filter (`notElem` compatExtensions) exts
+      extCabal1_2 = ordNub $ filter (`elem` compatExtensionsExtra) exts
+      extCabal1_4 = ordNub $ filter (`notElem` compatExtensions) exts
   -- As of Cabal-1.4 we can add new extensions without worrying
   -- about breaking old versions of cabal.
   checkSpecVer
@@ -621,9 +643,7 @@ checkBuildInfoExtensions bi = do
         , DeriveDataTypeable
         , ConstrainedClassMethods
         ]
-        ++ map
-          DisableExtension
-          [MonoPatBinds]
+        ++ [DisableExtension MonoPatBinds]
 
 -- Autogenerated modules (Paths_, PackageInfo_) checks. We could pass this
 -- function something more specific than the whole BuildInfo, but it would be
@@ -658,7 +678,7 @@ checkAutogenModules ams bi = do
   -- PackageBuildImpossible and not merely PackageDistInexcusable.
   checkSpecVer
     CabalSpecV3_12
-    (elem autoInfoModuleName allModsForAuto)
+    (autoInfoModuleName `elem` allModsForAuto)
     (PackageBuildImpossible CVAutogenPackageInfoGuard)
   where
     allModsForAuto :: [ModuleName]
@@ -773,13 +793,14 @@ cet2bit CETSetup = BITOther
 -- General check on all options (ghc, C, C++, …) for common inaccuracies.
 checkBuildInfoOptions :: Monad m => BITarget -> BuildInfo -> CheckM m ()
 checkBuildInfoOptions t bi = do
-  checkGHCOptions "ghc-options" t (hcOptions GHC bi)
-  checkGHCOptions "ghc-prof-options" t (hcProfOptions GHC bi)
-  checkGHCOptions "ghc-shared-options" t (hcSharedOptions GHC bi)
+  checkGHCOptions "ghc-options" t (map T.unpack (hcOptions GHC bi))
+  checkGHCOptions "ghc-prof-options" t (map T.unpack (hcProfOptions GHC bi))
+  checkGHCOptions "ghc-shared-options" t (map T.unpack (hcSharedOptions GHC bi))
   let ldOpts = ldOptions bi
-  checkCLikeOptions LangC "cc-options" (ccOptions bi) ldOpts
-  checkCLikeOptions LangCPlusPlus "cxx-options" (cxxOptions bi) ldOpts
-  checkCPPOptions (cppOptions bi)
+  checkCLikeOptions LangC "cc-options" (map T.unpack (ccOptions bi)) (map T.unpack ldOpts)
+  checkCLikeOptions LangCPlusPlus "cxx-options" (map T.unpack (cxxOptions bi)) (map T.unpack ldOpts)
+  checkCPPOptions (map T.unpack (cppOptions bi))
+  checkJSPOptions (map T.unpack (jsppOptions bi))
 
 -- | Checks GHC options for commonly misused or non-portable flags.
 checkGHCOptions
@@ -818,9 +839,10 @@ checkGHCOptions title t opts = do
       checkFlags
         ["-prof"]
         (PackageBuildWarning $ OptProf title)
-      -- Does not apply to scripts.
-      -- Why do we need this? See #8963.
       pid <- asksCM (pnPackageId . ccNames)
+      -- Scripts add the -o flag in the fake-package.cabal in order to have the
+      -- executable name match the script name even when there are characters
+      -- in the script name which are illegal to have as a target name.
       unless (pid == fakePackageId) $
         checkFlags
           ["-o"]
@@ -852,20 +874,26 @@ checkGHCOptions title t opts = do
       let ghcNoRts = rmRtsOpts opts
       checkAlternatives
         title
-        "extensions"
+        "default-extensions"
         [ (flag, prettyShow extension)
         | flag <- ghcNoRts
         , Just extension <- [ghcExtension flag]
         ]
       checkAlternatives
         title
-        "extensions"
+        "default-extensions"
         [ (flag, extension)
         | flag@('-' : 'X' : extension) <- ghcNoRts
         ]
       checkAlternatives
         title
         "cpp-options"
+        ( [(flag, flag) | flag@('-' : 'D' : _) <- ghcNoRts]
+            ++ [(flag, flag) | flag@('-' : 'U' : _) <- ghcNoRts]
+        )
+      checkAlternatives
+        title
+        "jspp-options"
         ( [(flag, flag) | flag@('-' : 'D' : _) <- ghcNoRts]
             ++ [(flag, flag) | flag@('-' : 'U' : _) <- ghcNoRts]
         )
@@ -928,7 +956,7 @@ checkGHCOptions title t opts = do
         )
         (PackageDistInexcusable . DynamicUnneeded)
       checkFlagsP
-        ( \opt -> case opt of
+        ( \case
             "-j" -> True
             ('-' : 'j' : d : _) -> isDigit d
             _ -> False
@@ -1056,5 +1084,22 @@ checkCPPOptions opts = do
         checkP
           (not $ any (`isPrefixOf` opt) ["-D", "-U", "-I"])
           (PackageBuildWarning (COptCPP opt))
+    )
+    opts
+
+checkJSPOptions
+  :: Monad m
+  => [String] -- Options in String form.
+  -> CheckM m ()
+checkJSPOptions opts = do
+  checkAlternatives
+    "jspp-options"
+    "include-dirs"
+    [(flag, dir) | flag@('-' : 'I' : dir) <- opts]
+  mapM_
+    ( \opt ->
+        checkP
+          (not $ any (`isPrefixOf` opt) ["-D", "-U", "-I"])
+          (PackageBuildWarning (OptJSPP opt))
     )
     opts

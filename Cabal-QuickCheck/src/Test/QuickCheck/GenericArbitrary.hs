@@ -1,7 +1,4 @@
-{-# LANGUAGE CPP              #-}
-{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs            #-}
-{-# LANGUAGE TypeOperators #-}
 module Test.QuickCheck.GenericArbitrary (
     genericArbitrary,
     GArbitrary,
@@ -9,10 +6,6 @@ module Test.QuickCheck.GenericArbitrary (
 
 import GHC.Generics
 import Test.QuickCheck
-
-#if !MIN_VERSION_base(4,8,0)
-import Control.Applicative (pure, (<$>), (<*>))
-#endif
 
 -- Generic arbitrary for non-recursive types
 genericArbitrary :: (Generic a, GArbitrary (Rep a)) => Gen a

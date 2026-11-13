@@ -1,5 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Distribution.Types.TestType
@@ -25,12 +23,12 @@ data TestType
     TestTypeLib Version
   | -- | Some unknown test type e.g. \"type: foo\"
     TestTypeUnknown String Version
-  deriving (Generic, Show, Read, Eq, Ord, Typeable, Data)
+  deriving (Generic, Show, Read, Eq, Ord, Data)
 
 instance Binary TestType
 instance Structured TestType
 
-instance NFData TestType where rnf = genericRnf
+instance NFData TestType
 
 knownTestTypes :: [TestType]
 knownTestTypes =

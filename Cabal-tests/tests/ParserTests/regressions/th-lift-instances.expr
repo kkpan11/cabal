@@ -37,7 +37,7 @@ GenericPackageDescription {
     synopsis =
     "Lift instances for template-haskell for common data types.",
     description =
-    concat
+    T.concat
       [
         "Most data types in haskell platform do not have Lift instances. This package provides orphan instances\n",
         "for containers, text, bytestring and vector."],
@@ -53,15 +53,16 @@ GenericPackageDescription {
     testSuites = [],
     benchmarks = [],
     dataFiles = [],
-    dataDir = ".",
+    dataDir = SymbolicPath ".",
     extraSrcFiles = [
-      ".ghci",
-      ".gitignore",
-      ".travis.yml",
-      ".vim.custom",
-      "README.md"],
+      SymbolicPath ".ghci",
+      SymbolicPath ".gitignore",
+      SymbolicPath ".travis.yml",
+      SymbolicPath ".vim.custom",
+      SymbolicPath "README.md"],
     extraTmpFiles = [],
-    extraDocFiles = []},
+    extraDocFiles = [],
+    extraFiles = []},
   gpdScannedVersion = Nothing,
   genPackageFlags = [],
   condLibrary = Just
@@ -84,6 +85,7 @@ GenericPackageDescription {
           cmmOptions = [],
           ccOptions = [],
           cxxOptions = [],
+          jsppOptions = [],
           ldOptions = [],
           hsc2hsOptions = [],
           pkgconfigDepends = [],
@@ -126,6 +128,8 @@ GenericPackageDescription {
             []
             [],
           sharedOptions =
+          PerCompilerFlavor [] [],
+          profSharedOptions =
           PerCompilerFlavor [] [],
           staticOptions =
           PerCompilerFlavor [] [],
@@ -181,56 +185,6 @@ GenericPackageDescription {
                   (mkVersion [0, 11])))
               mainLibSet],
           mixins = []}},
-      condTreeConstraints = [
-        Dependency
-          (PackageName "base")
-          (IntersectVersionRanges
-            (OrLaterVersion
-              (mkVersion [4, 4]))
-            (EarlierVersion
-              (mkVersion [5])))
-          mainLibSet,
-        Dependency
-          (PackageName "template-haskell")
-          (EarlierVersion
-            (mkVersion [2, 10]))
-          mainLibSet,
-        Dependency
-          (PackageName "th-lift")
-          (OrLaterVersion (mkVersion [0]))
-          mainLibSet,
-        Dependency
-          (PackageName "containers")
-          (IntersectVersionRanges
-            (OrLaterVersion
-              (mkVersion [0, 4]))
-            (EarlierVersion
-              (mkVersion [0, 6])))
-          mainLibSet,
-        Dependency
-          (PackageName "vector")
-          (IntersectVersionRanges
-            (OrLaterVersion
-              (mkVersion [0, 9]))
-            (EarlierVersion
-              (mkVersion [0, 11])))
-          mainLibSet,
-        Dependency
-          (PackageName "text")
-          (IntersectVersionRanges
-            (OrLaterVersion
-              (mkVersion [0, 11]))
-            (EarlierVersion
-              (mkVersion [1, 3])))
-          mainLibSet,
-        Dependency
-          (PackageName "bytestring")
-          (IntersectVersionRanges
-            (OrLaterVersion
-              (mkVersion [0, 9]))
-            (EarlierVersion
-              (mkVersion [0, 11])))
-          mainLibSet],
       condTreeComponents = []},
   condSubLibraries = [],
   condForeignLibs = [],
@@ -244,7 +198,7 @@ GenericPackageDescription {
             "",
           testInterface = TestSuiteExeV10
             (mkVersion [1, 0])
-            "Main.hs",
+            (SymbolicPath "Main.hs"),
           testBuildInfo = BuildInfo {
             buildable = True,
             buildTools = [],
@@ -254,6 +208,7 @@ GenericPackageDescription {
             cmmOptions = [],
             ccOptions = [],
             cxxOptions = [],
+            jsppOptions = [],
             ldOptions = [],
             hsc2hsOptions = [],
             pkgconfigDepends = [],
@@ -297,6 +252,8 @@ GenericPackageDescription {
               []
               [],
             sharedOptions =
+            PerCompilerFlavor [] [],
+            profSharedOptions =
             PerCompilerFlavor [] [],
             staticOptions =
             PerCompilerFlavor [] [],
@@ -358,61 +315,6 @@ GenericPackageDescription {
                 mainLibSet],
             mixins = []},
           testCodeGenerators = []},
-        condTreeConstraints = [
-          Dependency
-            (PackageName "base")
-            (OrLaterVersion (mkVersion [0]))
-            mainLibSet,
-          Dependency
-            (PackageName "template-haskell")
-            (EarlierVersion
-              (mkVersion [2, 10]))
-            mainLibSet,
-          Dependency
-            (PackageName "containers")
-            (IntersectVersionRanges
-              (OrLaterVersion
-                (mkVersion [0, 4]))
-              (EarlierVersion
-                (mkVersion [0, 6])))
-            mainLibSet,
-          Dependency
-            (PackageName "vector")
-            (IntersectVersionRanges
-              (OrLaterVersion
-                (mkVersion [0, 9]))
-              (EarlierVersion
-                (mkVersion [0, 11])))
-            mainLibSet,
-          Dependency
-            (PackageName "text")
-            (IntersectVersionRanges
-              (OrLaterVersion
-                (mkVersion [0, 11]))
-              (EarlierVersion
-                (mkVersion [1, 2])))
-            mainLibSet,
-          Dependency
-            (PackageName "bytestring")
-            (IntersectVersionRanges
-              (OrLaterVersion
-                (mkVersion [0, 9]))
-              (EarlierVersion
-                (mkVersion [0, 11])))
-            mainLibSet,
-          Dependency
-            (PackageName
-              "th-lift-instances")
-            (OrLaterVersion (mkVersion [0]))
-            mainLibSet,
-          Dependency
-            (PackageName "QuickCheck")
-            (IntersectVersionRanges
-              (OrLaterVersion
-                (mkVersion [2, 6]))
-              (EarlierVersion
-                (mkVersion [2, 8])))
-            mainLibSet],
         condTreeComponents = []},
     _×_
       (UnqualComponentName "doctests")
@@ -422,7 +324,7 @@ GenericPackageDescription {
             "",
           testInterface = TestSuiteExeV10
             (mkVersion [1, 0])
-            "doctests.hs",
+            (SymbolicPath "doctests.hs"),
           testBuildInfo = BuildInfo {
             buildable = True,
             buildTools = [],
@@ -432,6 +334,7 @@ GenericPackageDescription {
             cmmOptions = [],
             ccOptions = [],
             cxxOptions = [],
+            jsppOptions = [],
             ldOptions = [],
             hsc2hsOptions = [],
             pkgconfigDepends = [],
@@ -473,6 +376,8 @@ GenericPackageDescription {
               [],
             sharedOptions =
             PerCompilerFlavor [] [],
+            profSharedOptions =
+            PerCompilerFlavor [] [],
             staticOptions =
             PerCompilerFlavor [] [],
             customFieldsBI = [],
@@ -497,25 +402,6 @@ GenericPackageDescription {
                 mainLibSet],
             mixins = []},
           testCodeGenerators = []},
-        condTreeConstraints = [
-          Dependency
-            (PackageName "base")
-            (OrLaterVersion (mkVersion [0]))
-            mainLibSet,
-          Dependency
-            (PackageName "directory")
-            (OrLaterVersion
-              (mkVersion [1, 0]))
-            mainLibSet,
-          Dependency
-            (PackageName "doctest")
-            (OrLaterVersion
-              (mkVersion [0, 9, 1]))
-            mainLibSet,
-          Dependency
-            (PackageName "filepath")
-            (OrLaterVersion (mkVersion [0]))
-            mainLibSet],
         condTreeComponents = [
           CondBranch {
             condBranchCondition =
@@ -538,6 +424,7 @@ GenericPackageDescription {
                   cmmOptions = [],
                   ccOptions = [],
                   cxxOptions = [],
+                  jsppOptions = [],
                   ldOptions = [],
                   hsc2hsOptions = [],
                   pkgconfigDepends = [],
@@ -577,13 +464,14 @@ GenericPackageDescription {
                     [],
                   sharedOptions =
                   PerCompilerFlavor [] [],
+                  profSharedOptions =
+                  PerCompilerFlavor [] [],
                   staticOptions =
                   PerCompilerFlavor [] [],
                   customFieldsBI = [],
                   targetBuildDepends = [],
                   mixins = []},
                 testCodeGenerators = []},
-              condTreeConstraints = [],
               condTreeComponents = []},
             condBranchIfFalse = Nothing}]}],
   condBenchmarks = []}

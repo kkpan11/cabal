@@ -1,9 +1,3 @@
-{-# LANGUAGE FlexibleContexts #-}
-
------------------------------------------------------------------------------
-
------------------------------------------------------------------------------
-
 -- |
 -- Module      :  Distribution.Client.JobControl
 -- Copyright   :  (c) Duncan Coutts 2012
@@ -31,6 +25,11 @@ module Distribution.Client.JobControl
   , Lock
   , newLock
   , criticalSection
+
+    -- * Higher level utils
+  , newJobControlFromParStrat
+  , withJobControl
+  , mapConcurrentWithJobs
   ) where
 
 import Distribution.Client.Compat.Prelude
@@ -40,12 +39,14 @@ import Control.Concurrent (forkIO, forkIOWithUnmask, threadDelay)
 import Control.Concurrent.MVar
 import Control.Concurrent.STM (STM, TVar, atomically, modifyTVar', newTVarIO, readTVar)
 import Control.Concurrent.STM.TChan
-import Control.Exception (bracket_, mask_, try)
+import Control.Exception (bracket, bracket_, finally, mask_, try)
 import Control.Monad (forever, replicateM_)
 import Distribution.Client.Compat.Semaphore
+import Distribution.Client.Utils (numberOfProcessors)
 import Distribution.Compat.Stack
+import Distribution.Simple.Compiler
 import Distribution.Simple.Utils
-import Distribution.Verbosity
+import Distribution.Types.ParStrat
 import System.Semaphore
 
 -- | A simple concurrency abstraction. Jobs can be spawned and can complete
@@ -65,9 +66,9 @@ data JobControl m a = JobControl
   , cleanupJobControl :: m ()
   -- ^ cleanup any resources created by the JobControl, intended to be used
   -- as the finaliser for `bracket`.
-  , jobControlSemaphore :: Maybe SemaphoreName
-  -- ^ Name of the semaphore which can be used to control parallelism, if one
-  -- is available for that job control type.
+  , jobControlSemaphore :: Maybe SemaphoreIdentifier
+  -- ^ Identifier of the semaphore which can be used to control parallelism,
+  -- if one is available for that job control type.
   }
 
 -- | Make a 'JobControl' that executes all jobs serially and in order.
@@ -167,49 +168,57 @@ readAllTChan qvar = go []
         Nothing -> return (reverse xs)
         Just x -> go (x : xs)
 
--- | Make a 'JobControl' where the parallism is controlled by a semaphore.
+-- | Make a 'JobControl' where the parallelism is controlled by a semaphore.
 --
 -- This uses the GHC -jsem option to allow GHC to take additional semaphore slots
 -- if we are not using them all.
-newSemaphoreJobControl :: WithCallStack (Int -> IO (JobControl IO a))
-newSemaphoreJobControl n
+newSemaphoreJobControl :: WithCallStack (Verbosity -> Int -> IO (JobControl IO a))
+newSemaphoreJobControl _ n
   | n < 1 || n > 1000 =
       error $ "newParallelJobControl: not a sensible number of jobs: " ++ show n
-newSemaphoreJobControl maxJobLimit = do
-  sem <- freshSemaphore "cabal_semaphore" maxJobLimit
-  notice normal $
-    "Created semaphore called "
-      ++ getSemaphoreName (semaphoreName sem)
-      ++ " with "
-      ++ show maxJobLimit
-      ++ " slots."
-  outqVar <- newTChanIO
-  inqVar <- newTChanIO
-  countVar <- newTVarIO 0
-  void (forkIO (worker sem inqVar outqVar))
-  return
-    JobControl
-      { spawnJob = spawn inqVar countVar
-      , collectJob = collect outqVar countVar
-      , remainingJobs = remaining countVar
-      , cancelJobs = cancel inqVar countVar
-      , cleanupJobControl = destroySemaphore sem
-      , jobControlSemaphore = Just (semaphoreName sem)
-      }
+newSemaphoreJobControl verbosity maxJobLimit = do
+  mbServer <- freshSemaphore "cabal_semaphore" maxJobLimit
+  case mbServer of
+    Left err -> do
+      warn verbosity $
+        "Failed to create semaphore: "
+          ++ show err
+          ++ "; falling back to -j"
+          ++ show maxJobLimit
+          ++ "."
+      newParallelJobControl maxJobLimit
+    Right server -> do
+      let sem = serverClientSemaphore server
+      info verbosity $
+        "Created semaphore called "
+          ++ semaphoreIdentifier (clientSemaphoreName sem)
+          ++ " with "
+          ++ show maxJobLimit
+          ++ " slots."
+      outqVar <- newTChanIO
+      inqVar <- newTChanIO
+      countVar <- newTVarIO 0
+      void (forkIO (worker sem inqVar outqVar))
+      return
+        JobControl
+          { spawnJob = spawn inqVar countVar
+          , collectJob = collect outqVar countVar
+          , remainingJobs = remaining countVar
+          , cancelJobs = cancel inqVar countVar
+          , cleanupJobControl = destroyServerSemaphore server
+          , jobControlSemaphore = Just (semaphoreIdentifier (clientSemaphoreName sem))
+          }
   where
-    worker :: Semaphore -> TChan (IO a) -> TChan (Either SomeException a) -> IO ()
+    worker :: ClientSemaphore -> TChan (IO a) -> TChan (Either SomeException a) -> IO ()
     worker sem inqVar outqVar =
       forever $ do
         job <- atomically $ readTChan inqVar
-        -- mask here, as we need to ensure that the thread which contains the
-        -- release action is spawned. Otherwise, there is the chance that an
-        -- async exception is thrown between the semaphore being taken and the
-        -- thread being spawned.
+        -- mask so that the fork happens atomically with the acquire.
         mask_ $ do
-          waitOnSemaphore sem
+          -- waitOnSemaphore is interruptible under mask_
+          tok <- waitOnSemaphore sem
           void $ forkIOWithUnmask $ \unmask -> do
-            res <- try (unmask job)
-            releaseSemaphore sem 1
+            res <- try (unmask job) `finally` releaseSemaphoreToken tok
             atomically $ writeTChan outqVar res
         -- Try to give GHC enough time to compute the module graph and then
         -- request some additional capabilities if it can make use of them. The
@@ -259,7 +268,72 @@ withJobLimit (JobLimit sem) =
 newtype Lock = Lock (MVar ())
 
 newLock :: IO Lock
-newLock = fmap Lock $ newMVar ()
+newLock = Lock <$> newMVar ()
 
 criticalSection :: Lock -> IO a -> IO a
 criticalSection (Lock lck) act = bracket_ (takeMVar lck) (putMVar lck ()) act
+
+--------------------------------------------------------------------------------
+-- More high level utils
+--------------------------------------------------------------------------------
+
+newJobControlFromParStrat
+  :: Verbosity
+  -> Maybe Compiler
+  -- ^ The compiler, used to determine whether Jsem is supported.
+  -- When Nothing, Jsem is assumed to be unsupported.
+  -> ParStratInstall
+  -- ^ The parallel strategy
+  -> Maybe Int
+  -- ^ A cap on the number of jobs (e.g. to force a maximum of 2 concurrent downloads despite a -j8 parallel strategy)
+  -> IO (JobControl IO a)
+newJobControlFromParStrat verbosity mcompiler parStrat numJobsCap = case parStrat of
+  Serial -> newSerialJobControl
+  NumJobs n -> newParallelJobControl (capJobs (fromMaybe numberOfProcessors n))
+  UseSem n ->
+    case mcompiler of
+      Just compiler
+        | jsemSupported compiler
+        , isJsemCompatible compiler ->
+            newSemaphoreJobControl verbosity (capJobs n)
+        | jsemSupported compiler ->
+            do
+              warn verbosity $
+                "Semaphore version mismatch (cabal-install uses v"
+                  ++ show (getSemaphoreProtocolVersion semaphoreVersion)
+                  ++ ", but the selected GHC reports "
+                  ++ maybe "no version (assumed v1)" (\v -> "v" ++ show v) (jsemVersion compiler)
+                  ++ "); not using -jsem, GHC will be invoked without semaphore-based parallelism."
+              newParallelJobControl (capJobs n)
+        | otherwise ->
+            do
+              warn verbosity $
+                "-jsem is not supported by the selected compiler; falling back to -j"
+                  ++ show (capJobs n)
+                  ++ "."
+              newParallelJobControl (capJobs n)
+      Nothing ->
+        -- Don't warn in the Nothing case, as there isn't really a "selected" compiler.
+        newParallelJobControl (capJobs n)
+  where
+    capJobs n = min (fromMaybe maxBound numJobsCap) n
+
+-- | Check if the compiler's semaphore version is compatible with ours,
+-- per 'versionsAreCompatible'. A compiler that doesn't report a
+-- @"Semaphore version"@ field is treated as v1.
+isJsemCompatible :: Compiler -> Bool
+isJsemCompatible compiler =
+  versionsAreCompatible (SemaphoreProtocolVersion v) semaphoreVersion
+  where
+    v = fromMaybe 1 (jsemVersion compiler)
+
+withJobControl :: IO (JobControl IO a) -> (JobControl IO a -> IO b) -> IO b
+withJobControl mkJC = bracket mkJC cleanupJobControl
+
+-- | Concurrently execute actions on a list using the given JobControl.
+-- The maximum number of concurrent jobs is tied to the JobControl instance.
+-- The resulting list does /not/ preserve the original order!
+mapConcurrentWithJobs :: JobControl IO b -> (a -> IO b) -> [a] -> IO [b]
+mapConcurrentWithJobs jobControl f xs = do
+  traverse_ (spawnJob jobControl . f) xs
+  traverse (const $ collectJob jobControl) xs

@@ -1,6 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-
 module Distribution.Verbosity.Internal
   ( VerbosityLevel (..)
   , VerbosityFlag (..)
@@ -10,9 +7,10 @@ import Distribution.Compat.Prelude
 import Prelude ()
 
 data VerbosityLevel = Silent | Normal | Verbose | Deafening
-  deriving (Generic, Show, Read, Eq, Ord, Enum, Bounded, Typeable)
+  deriving (Generic, Show, Read, Eq, Ord, Enum, Bounded)
 
 instance Binary VerbosityLevel
+instance NFData VerbosityLevel
 instance Structured VerbosityLevel
 
 data VerbosityFlag
@@ -24,7 +22,8 @@ data VerbosityFlag
   | -- | @since 3.4.0.0
     VStderr
   | VNoWarn
-  deriving (Generic, Show, Read, Eq, Ord, Enum, Bounded, Typeable)
+  deriving (Generic, Show, Read, Eq, Ord, Enum, Bounded)
 
 instance Binary VerbosityFlag
+instance NFData VerbosityFlag
 instance Structured VerbosityFlag

@@ -1,5 +1,3 @@
-{-# LANGUAGE DeriveGeneric #-}
-
 module Distribution.Client.Types.InstallMethod where
 
 import Distribution.Client.Compat.Prelude
@@ -14,6 +12,7 @@ data InstallMethod
   deriving (Eq, Show, Generic, Bounded, Enum)
 
 instance Binary InstallMethod
+instance NFData InstallMethod
 instance Structured InstallMethod
 
 -- | Last

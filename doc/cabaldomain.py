@@ -89,14 +89,13 @@ To be done:
   At least setup and 'new-build` subcommands should get special directives
 
 - Improve rendering of flags in `.. cfg-field::` directive. It should be
-  possible without copy-pasting code from sphinx.directives.ObjectDescription
-  by examining result of ObjectDescription.run and inserting flags into
-  desc_content node.
+  possible by inserting flags into the desc_content node from
+  ObjectDescription.transform_content, as is done for since and deprecated.
 
   Alternatively Or `.. flags::` sub-directive can be added which will be aware
   of parent `.. cfg-field` directive.
 
-- With same ObjectDescription.run trick as above, render since and deprecated
+- With same transform_content hook as above, render since and deprecated
   info same way as standard object fields, and use fancy rendering only on
   references page.
 
@@ -116,7 +115,7 @@ from docutils.parsers.rst import Directive, directives, roles
 import pygments.lexer as lexer
 import pygments.token as token
 
-from distutils.version import StrictVersion
+from packaging.version import Version
 
 from sphinx import addnodes
 from sphinx.directives import ObjectDescription
@@ -131,7 +130,7 @@ def parse_deprecated(txt):
     if txt is None:
         return True
     try:
-        return StrictVersion(txt)
+        return Version(txt)
     except ValueError:
         return True
 
@@ -218,8 +217,8 @@ class CabalSection(Directive):
     option_spec = {
         'name': lambda x: x,
         'deprecated': parse_deprecated,
-        'removed': StrictVersion,
-        'since' : StrictVersion,
+        'removed': Version,
+        'since' : Version,
         'synopsis' : lambda x:x,
     }
     section_key = 'cabal:pkg-section'
@@ -281,8 +280,8 @@ class CabalObject(ObjectDescription):
     option_spec = {
         'noindex'   : directives.flag,
         'deprecated': parse_deprecated,
-        'removed'   : StrictVersion,
-        'since'     : StrictVersion,
+        'removed'   : Version,
+        'since'     : Version,
         'synopsis'  : lambda x:x
     }
 
@@ -364,73 +363,47 @@ class CabalObject(ObjectDescription):
 
     def run(self):
         self.cabal_meta = self.get_meta()
-        result = super(CabalObject, self).run()
+        return super(CabalObject, self).run()
 
-        if self.cabal_meta.since is not None \
-           or self.cabal_meta.deprecated is not None:
+    def transform_content(self, contentnode):
+        '''
+        As in sphinx.directives.ObjectDescription
 
-            #find content part of description
-            for item in result:
-                if isinstance(item, addnodes.desc):
-                    desc = item
-                    break
+        Adds Since, Deprecated and Removed entries to the field list at the
+        start of the description, creating the list if there is none.
+        '''
+        meta = self.cabal_meta
+        if meta.since is None and meta.deprecated is None:
+            return
+
+        # find existing field list and add to it
+        # or create new one
+        for item in contentnode:
+            if isinstance(item, nodes.field_list):
+                field_list = item
+                break
+        else:
+            field_list = nodes.field_list('')
+            contentnode.insert(0, field_list)
+
+        def add_field(label, version):
+            field = nodes.field('')
+            field += nodes.field_name(label, label)
+            if isinstance(version, Version):
+                text = 'Cabal ' + str(version)
             else:
-                return result
+                text = ''
+            field += nodes.field_body(text, nodes.paragraph(text, text))
+            field_list.insert(0, field)
 
-            for item in desc:
-                if isinstance(item, addnodes.desc_content):
-                    contents = item
-                    break
-            else:
-                return result
+        if meta.since is not None:
+            add_field('Since', meta.since)
 
-            # find exsting field list and add to it
-            # or create new one
-            for item in contents:
-                if isinstance(item, nodes.field_list):
-                    field_list = item
-                    break
-            else:
-                field_list = nodes.field_list('')
-                contents.insert(0, field_list)
+        if meta.deprecated is not None:
+            add_field('Deprecated', meta.deprecated)
 
-
-            if self.cabal_meta.since is not None:
-                #docutils horror
-                field = nodes.field('')
-                field_name = nodes.field_name('Since', 'Since')
-                since = 'Cabal ' + str(self.cabal_meta.since)
-                field_body = nodes.field_body(since, nodes.paragraph(since, since))
-                field += field_name
-                field += field_body
-                field_list.insert(0, field)
-
-            if self.cabal_meta.deprecated is not None:
-                field = nodes.field('')
-                field_name = nodes.field_name('Deprecated', 'Deprecated')
-                if isinstance(self.cabal_meta.deprecated, StrictVersion):
-                    since = 'Cabal ' + str(self.cabal_meta.deprecated)
-                else:
-                    since = ''
-
-                field_body = nodes.field_body(since, nodes.paragraph(since, since))
-                field += field_name
-                field += field_body
-                field_list.insert(0, field)
-
-            if self.cabal_meta.removed is not None:
-                field = nodes.field('')
-                field_name = nodes.field_name('Removed', 'Removed')
-                if isinstance(self.cabal_meta.removed, StrictVersion):
-                    since = 'Cabal ' + str(self.cabal_meta.removed)
-                else:
-                    since = ''
-
-                field_body = nodes.field_body(since, nodes.paragraph(since, since))
-                field += field_name
-                field += field_body
-                field_list.insert(0, field)
-        return result
+        if meta.removed is not None:
+            add_field('Removed', meta.removed)
 
 class CabalPackageSection(CabalObject):
     """
@@ -480,8 +453,8 @@ class CabalField(CabalObject):
     option_spec = {
         'noindex'   : directives.flag,
         'deprecated': parse_deprecated,
-        'removed'   : StrictVersion,
-        'since'     : StrictVersion,
+        'removed'   : Version,
+        'since'     : Version,
         'synopsis'  : lambda x:x
     }
 
@@ -548,13 +521,46 @@ class CabalPackageFieldXRef(CabalFieldXRef):
     '''
     section_key = 'cabal:pkg-section'
 
-class CabalConfigSection(CabalSection):
+class CabalConfigSection(CabalObject):
     """
     Marks section in package.cabal file
     """
     indextemplate = '%s; cabal.project section'
     section_key = 'cabal:cfg-section'
     target_prefix = 'cfg-section-'
+
+    def handle_signature(self, sig, signode):
+        '''
+        As in sphinx.directives.ObjectDescription
+
+        By default make an object description from name and adding
+        either deprecated or since as annotation.
+        '''
+        env = self.state.document.settings.env
+
+        sig = sig.strip()
+        parts = sig.split(' ',1)
+        name = parts[0]
+        signode += addnodes.desc_name(name, name)
+        signode += addnodes.desc_addname(' ', ' ')
+        if len(parts) > 1:
+            rest = parts[1].strip()
+            signode += addnodes.desc_annotation(rest, rest)
+
+        return name
+
+    def get_env_key(self, env, name):
+        store = CabalDomain.types[self.objtype]
+        return name, store
+
+    def run(self):
+        env = self.state.document.settings.env
+        section = self.arguments[0].strip().split(' ',1)[0]
+        if section == 'None':
+            env.ref_context.pop('cabal:cfg-section', None)
+            return []
+        env.ref_context['cabal:cfg-section'] = section
+        return super(CabalConfigSection, self).run()
 
 class ConfigField(CabalField):
     section_key = 'cabal:cfg-section'
@@ -719,13 +725,13 @@ def make_data_keys(typ, target, node):
 
 
 def render_deprecated(deprecated):
-    if isinstance(deprecated, StrictVersion):
+    if isinstance(deprecated, Version):
         return 'deprecated since: '+str(deprecated)
     else:
         return 'deprecated'
 
 def render_removed(deprecated, removed):
-    if isinstance(deprecated, StrictVersion):
+    if isinstance(deprecated, Version):
         return 'removed in: ' + str(removed) + '; deprecated since: '+str(deprecated)
     else:
         return 'removed in: ' + str(removed)
@@ -790,6 +796,9 @@ def make_full_name(typ, key, meta):
     '''
     if typ == 'pkg-section':
         return 'pkg-section-' + key
+
+    elif typ == 'cfg-section':
+        return 'cfg-section-' + key
 
     elif typ == 'pkg-field':
         section, name = key
@@ -914,4 +923,3 @@ class CabalLexer(lexer.RegexLexer):
 def setup(app):
     app.add_domain(CabalDomain)
     app.add_lexer('cabal', CabalLexer)
-

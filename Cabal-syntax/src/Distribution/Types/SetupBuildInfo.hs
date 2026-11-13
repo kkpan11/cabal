@@ -1,6 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-
 module Distribution.Types.SetupBuildInfo
   ( SetupBuildInfo (..)
   ) where
@@ -25,15 +22,14 @@ data SetupBuildInfo = SetupBuildInfo
   -- internally, and doesn't correspond to anything in the .cabal
   -- file. See #3199.
   }
-  deriving (Generic, Show, Eq, Ord, Read, Typeable, Data)
+  deriving (Generic, Show, Eq, Ord, Read, Data)
 
 instance Binary SetupBuildInfo
 instance Structured SetupBuildInfo
-instance NFData SetupBuildInfo where rnf = genericRnf
+instance NFData SetupBuildInfo
 
 instance Monoid SetupBuildInfo where
   mempty = SetupBuildInfo [] False
-  mappend = (<>)
 
 instance Semigroup SetupBuildInfo where
   a <> b =

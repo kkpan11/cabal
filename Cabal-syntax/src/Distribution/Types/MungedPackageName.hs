@@ -1,6 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-
 module Distribution.Types.MungedPackageName
   ( MungedPackageName (..)
   , decodeCompatPackageName
@@ -31,11 +28,11 @@ import qualified Text.PrettyPrint as Disp
 --
 -- @since 2.0.0.2
 data MungedPackageName = MungedPackageName !PackageName !LibraryName
-  deriving (Generic, Read, Show, Eq, Ord, Typeable, Data)
+  deriving (Generic, Read, Show, Eq, Ord, Data)
 
 instance Binary MungedPackageName
 instance Structured MungedPackageName
-instance NFData MungedPackageName where rnf = genericRnf
+instance NFData MungedPackageName
 
 -- | Computes the package name for a library.  If this is the public
 -- library, it will just be the original package name; otherwise,

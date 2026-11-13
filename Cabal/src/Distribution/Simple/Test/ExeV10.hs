@@ -1,6 +1,3 @@
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE RankNTypes #-}
-
 module Distribution.Simple.Test.ExeV10
   ( runTest
   ) where
@@ -8,11 +5,10 @@ module Distribution.Simple.Test.ExeV10
 import Distribution.Compat.Prelude
 import Prelude ()
 
-import Distribution.Compat.Environment
 import qualified Distribution.PackageDescription as PD
-import Distribution.Simple.Build.PathsModule
 import Distribution.Simple.BuildPaths
 import Distribution.Simple.Compiler
+import Distribution.Simple.Errors
 import Distribution.Simple.Flag
 import Distribution.Simple.Hpc
 import Distribution.Simple.InstallDirs
@@ -21,10 +17,15 @@ import qualified Distribution.Simple.LocalBuildInfo as LBI
   , buildDir
   , depLibraryPaths
   )
+
+import Distribution.Simple.Program.Db
+import Distribution.Simple.Program.Find
+import Distribution.Simple.Program.Run
+import Distribution.Simple.Setup.Common
 import Distribution.Simple.Setup.Test
 import Distribution.Simple.Test.Log
 import Distribution.Simple.Utils
-import Distribution.System
+import Distribution.System (Platform (Platform))
 import Distribution.TestSuite
 import qualified Distribution.Types.LocalBuildInfo as LBI
   ( LocalBuildInfo (..)
@@ -34,38 +35,33 @@ import qualified Distribution.Types.LocalBuildInfo as LBI
 import Distribution.Types.UnqualComponentName
 import Distribution.Verbosity
 
-import System.Directory
-  ( createDirectoryIfMissing
-  , doesDirectoryExist
-  , doesFileExist
-  , getCurrentDirectory
-  , removeDirectoryRecursive
-  )
-import System.FilePath ((<.>), (</>))
-import System.IO (stderr, stdout)
-import System.Process (createPipe)
+import Distribution.Utils.Path
 
 import qualified Data.ByteString.Lazy as LBS
-import Distribution.Simple.Errors
+import Distribution.Simple.LocalBuildInfo (interpretSymbolicPathLBI)
+import System.Directory
+  ( createDirectoryIfMissing
+  , doesFileExist
+  , removePathForcibly
+  )
+import System.Process (createPipe)
 
 runTest
-  :: PD.PackageDescription
+  :: VerbosityHandles
+  -> PD.PackageDescription
   -> LBI.LocalBuildInfo
   -> LBI.ComponentLocalBuildInfo
   -> HPCMarkupInfo
   -> TestFlags
   -> PD.TestSuite
   -> IO TestSuiteLog
-runTest pkg_descr lbi clbi hpcMarkupInfo flags suite = do
+runTest verbHandles pkg_descr lbi clbi hpcMarkupInfo flags suite = do
   let isCoverageEnabled = LBI.testCoverage lbi
       way = guessWay lbi
-      tixDir_ = tixDir distPref way
-
-  pwd <- getCurrentDirectory
-  existingEnv <- getEnvironment
+      tixDir_ = i $ tixDir distPref way
 
   let cmd =
-        LBI.buildDir lbi
+        i (LBI.buildDir lbi)
           </> testName'
           </> testName' <.> exeExtension (LBI.hostPlatform lbi)
   -- Check that the test executable exists.
@@ -75,27 +71,32 @@ runTest pkg_descr lbi clbi hpcMarkupInfo flags suite = do
       Couldn'tFindTestProgram cmd
 
   -- Remove old .tix files if appropriate.
-  unless (fromFlag $ testKeepTix flags) $ do
-    exists' <- doesDirectoryExist tixDir_
-    when exists' $ removeDirectoryRecursive tixDir_
+  unless (fromFlag $ testKeepTix flags) $
+    removePathForcibly tixDir_
 
   -- Create directory for HPC files.
   createDirectoryIfMissing True tixDir_
 
   -- Write summary notices indicating start of test suite
-  notice verbosity $ summarizeSuiteStart $ testName'
+  notice verbosity $ summarizeSuiteStart testName'
 
-  -- Run the test executable
+  -- Run the test executable (with the appropriate environment set)
+  let progDb = LBI.withPrograms lbi
+      pathVar = progSearchPath progDb
+      envOverrides = progOverrideEnv progDb
+  newPath <- programSearchPathAsPATHVar pathVar
   let opts =
         map
           (testOption pkg_descr lbi suite)
           (testOptions flags)
-      dataDirPath = pwd </> PD.dataDir pkg_descr
-      tixFile = pwd </> tixFilePath distPref way (testName')
-      pkgPathEnv =
-        (pkgPathEnvVar pkg_descr "datadir", dataDirPath)
-          : existingEnv
-      shellEnv = [("HPCTIXFILE", tixFile) | isCoverageEnabled] ++ pkgPathEnv
+      tixFile = i $ tixFilePath distPref way testName'
+
+  shellEnv <-
+    getFullEnvironment
+      ( [("PATH", Just newPath)]
+          ++ [("HPCTIXFILE", Just tixFile) | isCoverageEnabled]
+          ++ envOverrides
+      )
 
   -- Add (DY)LD_LIBRARY_PATH if needed
   shellEnv' <-
@@ -108,19 +109,24 @@ runTest pkg_descr lbi clbi hpcMarkupInfo flags suite = do
 
   -- Output logger
   (wOut, wErr, getLogText) <- case details of
-    Direct -> return (stdout, stderr, return LBS.empty)
+    Direct -> return (Nothing, Nothing, return LBS.empty)
     _ -> do
       (rOut, wOut) <- createPipe
 
-      return $ (,,) wOut wOut $ do
+      return $ (,,) (Just wOut) (Just wOut) $ do
         -- Read test executables' output
         logText <- LBS.hGetContents rOut
 
         -- '--show-details=streaming': print the log output in another thread
-        when (details == Streaming) $ LBS.putStr logText
+        when (details == Streaming) $
+          LBS.hPutStr (verbosityChosenOutputHandle verbosity) logText
 
         -- drain the output.
         evaluate (force logText)
+
+  let mbWorkDir =
+        interpretSymbolicPathCWD
+          <$> flagToMaybe (setupWorkingDir (testCommonFlags flags))
 
   (exit, logText) <- case testWrapper flags of
     Flag path ->
@@ -128,25 +134,23 @@ runTest pkg_descr lbi clbi hpcMarkupInfo flags suite = do
         verbosity
         path
         (cmd : opts)
-        Nothing
+        mbWorkDir
         (Just shellEnv')
-        getLogText
-        -- these handles are automatically closed
+        (\_ _ _ -> getLogText)
         Nothing
-        (Just wOut)
-        (Just wErr)
+        wOut
+        wErr
     NoFlag ->
       rawSystemIOWithEnvAndAction
         verbosity
         cmd
         opts
-        Nothing
+        mbWorkDir
         (Just shellEnv')
-        getLogText
-        -- these handles are automatically closed
+        (\_ _ _ -> getLogText)
         Nothing
-        (Just wOut)
-        (Just wErr)
+        wOut
+        wErr
 
   -- Generate TestSuiteLog from executable exit code and a machine-
   -- readable test log.
@@ -170,9 +174,9 @@ runTest pkg_descr lbi clbi hpcMarkupInfo flags suite = do
               || details == Failures && not (suitePassed $ testLogs suiteLog)
           )
             -- verbosity overrides show-details
-            && verbosity >= normal
+            && verbosityLevel verbosity >= Normal
   whenPrinting $ do
-    LBS.putStr logText
+    LBS.hPutStr (verbosityChosenOutputHandle verbosity) logText
     putChar '\n'
 
   -- Write summary notice to terminal indicating end of test suite
@@ -191,12 +195,15 @@ runTest pkg_descr lbi clbi hpcMarkupInfo flags suite = do
 
   return suiteLog
   where
+    i = interpretSymbolicPathLBI lbi -- See Note [Symbolic paths] in Distribution.Utils.Path
+    commonFlags = testCommonFlags flags
+
     testName' = unUnqualComponentName $ PD.testName suite
 
-    distPref = fromFlag $ testDistPref flags
-    verbosity = fromFlag $ testVerbosity flags
+    distPref = fromFlag $ setupDistPref commonFlags
+    verbosity = mkVerbosity verbHandles (fromFlag $ setupVerbosity commonFlags)
     details = fromFlag $ testShowDetails flags
-    testLogDir = distPref </> "test"
+    testLogDir = distPref </> makeRelativePathEx "test"
 
     buildLog exit =
       let r = case exit of
@@ -213,7 +220,7 @@ runTest pkg_descr lbi clbi hpcMarkupInfo flags suite = do
             { testSuiteName = PD.testName suite
             , testLogs = l
             , logFile =
-                testLogDir
+                i testLogDir
                   </> testSuiteLogPath
                     (fromFlag $ testHumanLog flags)
                     pkg_descr

@@ -1,10 +1,4 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE TypeFamilies #-}
-
------------------------------------------------------------------------------
-
------------------------------------------------------------------------------
 
 -- |
 -- Module      :  Distribution.Client.SolverInstallPlan
@@ -81,6 +75,7 @@ import Distribution.Solver.Types.SolverPackage
 import Data.Array ((!))
 import qualified Data.Foldable as Foldable
 import qualified Data.Graph as OldGraph
+import qualified Data.List.NonEmpty as NE
 import qualified Data.Map as Map
 import Distribution.Compat.Graph (Graph, IsNode (..))
 import qualified Distribution.Compat.Graph as Graph
@@ -93,19 +88,7 @@ data SolverInstallPlan = SolverInstallPlan
   { planIndex :: !SolverPlanIndex
   , planIndepGoals :: !IndependentGoals
   }
-  deriving (Typeable, Generic)
-
-{-
--- | Much like 'planPkgIdOf', but mapping back to full packages.
-planPkgOf :: SolverInstallPlan
-          -> Graph.Vertex
-          -> SolverPlanPackage
-planPkgOf plan v =
-    case Graph.lookupKey (planIndex plan)
-                         (planPkgIdOf plan v) of
-      Just pkg -> pkg
-      Nothing  -> error "InstallPlan: internal error: planPkgOf lookup failed"
--}
+  deriving (Generic)
 
 instance Binary SolverInstallPlan
 instance Structured SolverInstallPlan
@@ -167,7 +150,7 @@ remove
   -> SolverInstallPlan
   -> Either
       [SolverPlanProblem]
-      (SolverInstallPlan)
+      SolverInstallPlan
 remove shouldRemove plan =
   new (planIndepGoals plan) newIndex
   where
@@ -196,7 +179,7 @@ valid indepGoals index =
 data SolverPlanProblem
   = PackageMissingDeps
       SolverPlanPackage
-      [PackageIdentifier]
+      (NonEmpty PackageIdentifier)
   | PackageCycle [SolverPlanPackage]
   | PackageInconsistency PackageName [(PackageIdentifier, Version)]
   | PackageStateInvalid SolverPlanPackage SolverPlanPackage
@@ -206,7 +189,7 @@ showPlanProblem (PackageMissingDeps pkg missingDeps) =
   "Package "
     ++ prettyShow (packageId pkg)
     ++ " depends on the following packages which are missing from the plan: "
-    ++ intercalate ", " (map prettyShow missingDeps)
+    ++ intercalate ", " (map prettyShow (NE.toList missingDeps))
 showPlanProblem (PackageCycle cycleGroup) =
   "The following packages are involved in a dependency cycle "
     ++ intercalate ", " (map (prettyShow . packageId) cycleGroup)
@@ -246,10 +229,10 @@ problems
 problems indepGoals index =
   [ PackageMissingDeps
     pkg
-    ( mapMaybe
-        (fmap packageId . flip Graph.lookup index)
-        missingDeps
-    )
+    -- The missing deps are the neighbour 'SolverId's that are not in the
+    -- index; each 'SolverId' already carries its 'PackageId', so there is
+    -- no need to look it up (it could not be found in the index anyway).
+    (NE.map packageId missingDeps)
   | (pkg, missingDeps) <- Graph.broken index
   ]
     ++ [ PackageCycle cycleGroup
@@ -263,7 +246,7 @@ problems indepGoals index =
        | pkg <- Foldable.toList index
        , Just pkg' <-
           map
-            (flip Graph.lookup index)
+            (`Graph.lookup` index)
             (nodeNeighbors pkg)
        , not (stateDependencyRelation pkg pkg')
        ]

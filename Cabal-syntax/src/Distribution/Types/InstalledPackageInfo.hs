@@ -1,5 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
 
@@ -15,6 +13,7 @@ module Distribution.Types.InstalledPackageInfo
 import Distribution.Compat.Prelude
 import Prelude ()
 
+import Data.Text (Text)
 import Distribution.Backpack
 import Distribution.Compat.Graph (IsNode (..))
 import Distribution.License
@@ -26,7 +25,6 @@ import Distribution.Types.LibraryName
 import Distribution.Types.LibraryVisibility
 import Distribution.Types.MungedPackageId
 import Distribution.Types.MungedPackageName
-import Distribution.Utils.ShortText (ShortText)
 import Distribution.Version (nullVersion)
 
 import qualified Distribution.Package as Package
@@ -50,17 +48,17 @@ data InstalledPackageInfo = InstalledPackageInfo
     -- indefinite, OpenModule is always an OpenModuleVar
     -- with the same ModuleName as the key.
     instantiatedWith :: [(ModuleName, OpenModule)]
-  , compatPackageKey :: String
+  , compatPackageKey :: Text
   , license :: Either SPDX.License License
-  , copyright :: !ShortText
-  , maintainer :: !ShortText
-  , author :: !ShortText
-  , stability :: !ShortText
-  , homepage :: !ShortText
-  , pkgUrl :: !ShortText
-  , synopsis :: !ShortText
-  , description :: !ShortText
-  , category :: !ShortText
+  , copyright :: !Text
+  , maintainer :: !Text
+  , author :: !Text
+  , stability :: !Text
+  , homepage :: !Text
+  , pkgUrl :: !Text
+  , synopsis :: !Text
+  , description :: !Text
+  , category :: !Text
   , -- these parts are required by an installed package only:
     abiHash :: AbiHash
   , indefinite :: Bool
@@ -74,33 +72,34 @@ data InstalledPackageInfo = InstalledPackageInfo
   , libraryDirs :: [FilePath]
   , libraryDirsStatic :: [FilePath]
   , libraryDynDirs :: [FilePath]
+  , libraryBytecodeDirs :: [FilePath]
   -- ^ overrides 'libraryDirs'
   , dataDir :: FilePath
-  , hsLibraries :: [String]
-  , extraLibraries :: [String]
-  , extraLibrariesStatic :: [String]
-  , extraGHCiLibraries :: [String] -- overrides extraLibraries for GHCi
+  , hsLibraries :: [Text]
+  , extraLibraries :: [Text]
+  , extraLibrariesStatic :: [Text]
+  , extraGHCiLibraries :: [Text] -- overrides extraLibraries for GHCi
   , includeDirs :: [FilePath]
-  , includes :: [String]
+  , includes :: [Text]
   , -- INVARIANT: if the package is definite, UnitId is NOT
     -- a ComponentId of an indefinite package
     depends :: [UnitId]
   , abiDepends :: [AbiDependency]
-  , ccOptions :: [String]
-  , cxxOptions :: [String]
-  , ldOptions :: [String]
+  , ccOptions :: [Text]
+  , cxxOptions :: [Text]
+  , ldOptions :: [Text]
   , frameworkDirs :: [FilePath]
-  , frameworks :: [String]
+  , frameworks :: [Text]
   , haddockInterfaces :: [FilePath]
   , haddockHTMLs :: [FilePath]
   , pkgRoot :: Maybe FilePath
   }
-  deriving (Eq, Generic, Typeable, Read, Show)
+  deriving (Eq, Generic, Read, Show)
 
 instance Binary InstalledPackageInfo
 instance Structured InstalledPackageInfo
 
-instance NFData InstalledPackageInfo where rnf = genericRnf
+instance NFData InstalledPackageInfo
 
 instance Package.HasMungedPackageId InstalledPackageInfo where
   mungedId = mungedPackageId
@@ -161,6 +160,7 @@ emptyInstalledPackageInfo =
     , hsLibraries = []
     , extraLibraries = []
     , extraLibrariesStatic = []
+    , libraryBytecodeDirs = []
     , extraGHCiLibraries = []
     , includeDirs = []
     , includes = []

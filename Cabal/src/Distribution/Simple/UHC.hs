@@ -1,7 +1,5 @@
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE RankNTypes #-}
-
------------------------------------------------------------------------------
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE MultiWayIf #-}
 
 -- |
 -- Module      :  Distribution.Simple.UHC
@@ -37,6 +35,7 @@ import Distribution.Parsec
 import Distribution.Pretty
 import Distribution.Simple.BuildPaths
 import Distribution.Simple.Compiler
+import Distribution.Simple.Errors (WhatToFind (..))
 import Distribution.Simple.LocalBuildInfo
 import Distribution.Simple.PackageIndex
 import Distribution.Simple.Program
@@ -49,8 +48,9 @@ import Distribution.Version
 import Language.Haskell.Extension
 
 import qualified Data.Map as Map (empty)
+import qualified Data.Text as Text
 import System.Directory
-import System.FilePath
+import System.FilePath (pathSeparator)
 
 -- -----------------------------------------------------------------------------
 -- Configuring
@@ -58,10 +58,9 @@ import System.FilePath
 configure
   :: Verbosity
   -> Maybe FilePath
-  -> Maybe FilePath
   -> ProgramDb
   -> IO (Compiler, Maybe Platform, ProgramDb)
-configure verbosity hcPath _hcPkgPath progdb = do
+configure verbosity hcPath progdb = do
   (_uhcProg, uhcVersion, progdb') <-
     requireProgramVersion
       verbosity
@@ -77,6 +76,7 @@ configure verbosity hcPath _hcPkgPath progdb = do
           , compilerLanguages = uhcLanguages
           , compilerExtensions = uhcLanguageExtensions
           , compilerProperties = Map.empty
+          , compilerWiredInUnitIds = Nothing
           }
       compPlatform = Nothing
   return (comp, compPlatform, progdb')
@@ -112,25 +112,25 @@ uhcLanguageExtensions =
 getInstalledPackages
   :: Verbosity
   -> Compiler
-  -> PackageDBStack
+  -> Maybe (SymbolicPath CWD (Dir from))
+  -> PackageDBStackX (SymbolicPath from (Dir PkgDB))
   -> ProgramDb
   -> IO InstalledPackageIndex
-getInstalledPackages verbosity comp packagedbs progdb = do
+getInstalledPackages verbosity comp mbWorkDir packagedbs progdb = do
   let compilerid = compilerId comp
   systemPkgDir <- getGlobalPackageDir verbosity progdb
   userPkgDir <- getUserPackageDir
-  let pkgDirs = nub (concatMap (packageDbPaths userPkgDir systemPkgDir) packagedbs)
+  let pkgDirs = ordNub (concatMap (packageDbPaths userPkgDir systemPkgDir mbWorkDir) packagedbs)
   -- putStrLn $ "pkgdirs: " ++ show pkgDirs
   pkgs <-
-    liftM (map addBuiltinVersions . concat) $
-      traverse
-        (\d -> getDirectoryContents d >>= filterM (isPkgDir (prettyShow compilerid) d))
+    map addBuiltinVersions . concat
+      <$> traverse
+        (\d -> listDirectory d >>= filterM (isPkgDir (prettyShow compilerid) d))
         pkgDirs
   -- putStrLn $ "pkgs: " ++ show pkgs
   let iPkgs =
         map mkInstalledPackageInfo $
-          concatMap parsePackage $
-            pkgs
+          concatMap parsePackage pkgs
   -- putStrLn $ "installed pkgs: " ++ show iPkgs
   return (fromList iPkgs)
 
@@ -153,12 +153,17 @@ getUserPackageDir = do
   homeDir <- getHomeDirectory
   return $ homeDir </> ".cabal" </> "lib" -- TODO: determine in some other way
 
-packageDbPaths :: FilePath -> FilePath -> PackageDB -> [FilePath]
-packageDbPaths user system db =
+packageDbPaths
+  :: FilePath
+  -> FilePath
+  -> Maybe (SymbolicPath CWD (Dir from))
+  -> PackageDBX (SymbolicPath from (Dir PkgDB))
+  -> [FilePath]
+packageDbPaths user system mbWorkDir db =
   case db of
     GlobalPackageDB -> [system]
     UserPackageDB -> [user]
-    SpecificPackageDB path -> [path]
+    SpecificPackageDB path -> [interpretSymbolicPath mbWorkDir path]
 
 -- | Hack to add version numbers to UHC-built-in packages. This should sooner or
 -- later be fixed on the UHC side.
@@ -208,7 +213,7 @@ buildLib
 buildLib verbosity pkg_descr lbi lib clbi = do
   systemPkgDir <- getGlobalPackageDir verbosity (withPrograms lbi)
   userPkgDir <- getUserPackageDir
-  let runUhcProg = runDbProgram verbosity uhcProgram (withPrograms lbi)
+  let runUhcProg = runDbProgramCwd verbosity (mbWorkDirLBI lbi) uhcProgram (withPrograms lbi)
   let uhcArgs =
         -- set package name
         ["--pkg-build=" ++ prettyShow (packageId pkg_descr)]
@@ -224,9 +229,7 @@ buildLib verbosity pkg_descr lbi lib clbi = do
           -- source files
           -- suboptimal: UHC does not understand module names, so
           -- we replace periods by path separators
-          ++ map
-            (map (\c -> if c == '.' then pathSeparator else c))
-            (map prettyShow (allLibModules lib clbi))
+          ++ map (map (\c -> if c == '.' then pathSeparator else c) . prettyShow) (allLibModules lib clbi)
 
   runUhcProg uhcArgs
 
@@ -242,8 +245,11 @@ buildExe
 buildExe verbosity _pkg_descr lbi exe clbi = do
   systemPkgDir <- getGlobalPackageDir verbosity (withPrograms lbi)
   userPkgDir <- getUserPackageDir
-  let runUhcProg = runDbProgram verbosity uhcProgram (withPrograms lbi)
-  let uhcArgs =
+  let mbWorkDir = mbWorkDirLBI lbi
+  srcMainPath <- findFileCwd verbosity FindHaskellSourceFile mbWorkDir (hsSourceDirs $ buildInfo exe) (modulePath exe)
+  let runUhcProg = runDbProgramCwd verbosity (mbWorkDirLBI lbi) uhcProgram (withPrograms lbi)
+      u = interpretSymbolicPathCWD
+      uhcArgs =
         -- common flags lib/exe
         constructUHCCmdLine
           userPkgDir
@@ -254,9 +260,9 @@ buildExe verbosity _pkg_descr lbi exe clbi = do
           (buildDir lbi)
           verbosity
           -- output file
-          ++ ["--output", buildDir lbi </> prettyShow (exeName exe)]
+          ++ ["--output", u $ buildDir lbi </> makeRelativePathEx (prettyShow (exeName exe))]
           -- main source module
-          ++ [modulePath exe]
+          ++ [u srcMainPath]
   runUhcProg uhcArgs
 
 constructUHCCmdLine
@@ -265,19 +271,12 @@ constructUHCCmdLine
   -> LocalBuildInfo
   -> BuildInfo
   -> ComponentLocalBuildInfo
-  -> FilePath
+  -> SymbolicPath Pkg (Dir Build)
   -> Verbosity
   -> [String]
 constructUHCCmdLine user system lbi bi clbi odir verbosity =
-  -- verbosity
-  ( if verbosity >= deafening
-      then ["-v4"]
-      else
-        if verbosity >= normal
-          then []
-          else ["-v0"]
-  )
-    ++ hcOptions UHC bi
+  vFlags
+    ++ map Text.unpack (hcOptions UHC bi)
     -- flags for language extensions
     ++ languageToFlags (compiler lbi) (defaultLanguage bi)
     ++ extensionsToFlags (compiler lbi) (usedExtensions bi)
@@ -287,26 +286,33 @@ constructUHCCmdLine user system lbi bi clbi odir verbosity =
     ++ ["--package=uhcbase"]
     ++ ["--package=" ++ prettyShow (mungedName pkgid) | (_, pkgid) <- componentPackageDeps clbi]
     -- search paths
-    ++ ["-i" ++ odir]
-    ++ ["-i" ++ getSymbolicPath l | l <- nub (hsSourceDirs bi)]
-    ++ ["-i" ++ autogenComponentModulesDir lbi clbi]
-    ++ ["-i" ++ autogenPackageModulesDir lbi]
+    ++ ["-i" ++ u odir]
+    ++ ["-i" ++ u l | l <- ordNub (hsSourceDirs bi)]
+    ++ ["-i" ++ u (autogenComponentModulesDir lbi clbi)]
+    ++ ["-i" ++ u (autogenPackageModulesDir lbi)]
     -- cpp options
-    ++ ["--optP=" ++ opt | opt <- cppOptions bi]
+    ++ ["--optP=" ++ Text.unpack opt | opt <- cppOptions bi]
     -- output path
-    ++ ["--odir=" ++ odir]
+    ++ ["--odir=" ++ u odir]
     -- optimization
     ++ ( case withOptimization lbi of
           NoOptimisation -> ["-O0"]
           NormalOptimisation -> ["-O1"]
           MaximumOptimisation -> ["-O2"]
        )
+  where
+    u = interpretSymbolicPathCWD -- See Note [Symbolic paths] in Distribution.Utils.Path
+    vFlags =
+      if
+          | verbosityLevel verbosity >= Deafening -> ["-v4"]
+          | verbosityLevel verbosity < Normal -> ["-v0"]
+          | otherwise -> []
 
 uhcPackageDbOptions :: FilePath -> FilePath -> PackageDBStack -> [String]
 uhcPackageDbOptions user system db =
   map
     (\x -> "--pkg-searchpath=" ++ x)
-    (concatMap (packageDbPaths user system) db)
+    (concatMap (packageDbPaths user system Nothing) db)
 
 -- -----------------------------------------------------------------------------
 -- Installation
@@ -317,11 +323,12 @@ installLib
   -> FilePath
   -> FilePath
   -> FilePath
+  -> FilePath
   -> PackageDescription
   -> Library
   -> ComponentLocalBuildInfo
   -> IO ()
-installLib verbosity _lbi targetDir _dynlibTargetDir builtDir pkg _library _clbi = do
+installLib verbosity _lbi targetDir _dynlibTargetDir _bytecodeTargetDir builtDir pkg _library _clbi = do
   -- putStrLn $ "dest:  " ++ targetDir
   -- putStrLn $ "built: " ++ builtDir
   installDirectoryContents verbosity (builtDir </> prettyShow (packageId pkg)) targetDir
@@ -342,16 +349,17 @@ uhcPackageSubDir compilerid = compilerid </> uhcTarget </> uhcTargetVariant
 
 registerPackage
   :: Verbosity
+  -> Maybe (SymbolicPath CWD (Dir from))
   -> Compiler
   -> ProgramDb
-  -> PackageDBStack
+  -> PackageDBStackS from
   -> InstalledPackageInfo
   -> IO ()
-registerPackage verbosity comp progdb packageDbs installedPkgInfo = do
+registerPackage verbosity mbWorkDir comp progdb packageDbs installedPkgInfo = do
   dbdir <- case registrationPackageDB packageDbs of
     GlobalPackageDB -> getGlobalPackageDir verbosity progdb
     UserPackageDB -> getUserPackageDir
-    SpecificPackageDB dir -> return dir
+    SpecificPackageDB dir -> return (interpretSymbolicPath mbWorkDir dir)
   let pkgdir = dbdir </> uhcPackageDir (prettyShow pkgid) (prettyShow compilerid)
   createDirectoryIfMissingVerbose verbosity True pkgdir
   writeUTF8File
@@ -361,5 +369,5 @@ registerPackage verbosity comp progdb packageDbs installedPkgInfo = do
     pkgid = sourcePackageId installedPkgInfo
     compilerid = compilerId comp
 
-inplacePackageDbPath :: LocalBuildInfo -> FilePath
-inplacePackageDbPath lbi = buildDir lbi
+inplacePackageDbPath :: LocalBuildInfo -> SymbolicPath Pkg (Dir PkgDB)
+inplacePackageDbPath lbi = coerceSymbolicPath $ buildDir lbi

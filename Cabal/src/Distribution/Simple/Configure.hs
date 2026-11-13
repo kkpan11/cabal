@@ -1,12 +1,6 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-
------------------------------------------------------------------------------
 
 -- |
 -- Module      :  Distribution.Simple.Configure
@@ -31,6 +25,20 @@
 -- level.
 module Distribution.Simple.Configure
   ( configure
+  , configure_setupHooks
+  , computePackageInfo
+  , computePackageInfoFromIndex
+  , configureFinal
+  , runPreConfPackageHook
+  , runPostConfPackageHook
+  , runPreConfComponentHook
+  , configurePackage
+  , PackageInfo (..)
+  , mkProgramDb
+  , finalCheckPackage
+  , configureComponents
+  , mkPromisedDepsSet
+  , combinedConstraints
   , writePersistBuildConfig
   , getConfigStateFile
   , getPersistBuildConfig
@@ -47,9 +55,14 @@ module Distribution.Simple.Configure
   , getInstalledPackagesMonitorFiles
   , getInstalledPackagesById
   , getPackageDBContents
+  , configCompiler
   , configCompilerEx
   , configCompilerAuxEx
+  , configCompilerProgDb
   , computeEffectiveProfiling
+  , adjustBuildOptions
+  , buildOptionsAdjustmentWarnings
+  , adjustBuildOptionsAndWarn
   , ccLdOptionsBuildInfo
   , checkForeignDeps
   , interpretPackageDbFlags
@@ -74,35 +87,51 @@ import Distribution.InstalledPackageInfo (InstalledPackageInfo)
 import qualified Distribution.InstalledPackageInfo as IPI
 import Distribution.Package
 import Distribution.PackageDescription
-import Distribution.PackageDescription.Check hiding (doesFileExist)
+import Distribution.PackageDescription.Check hiding (doesFileExist, listDirectory)
 import Distribution.PackageDescription.Configuration
 import Distribution.PackageDescription.PrettyPrint
+import Distribution.Simple.BuildPaths (includeSearchDirs)
 import Distribution.Simple.BuildTarget
 import Distribution.Simple.BuildToolDepends
+import Distribution.Simple.BuildWay
 import Distribution.Simple.Compiler
 import Distribution.Simple.LocalBuildInfo
 import Distribution.Simple.PackageIndex (InstalledPackageIndex, lookupUnitId)
 import qualified Distribution.Simple.PackageIndex as PackageIndex
 import Distribution.Simple.PreProcess
 import Distribution.Simple.Program
-import Distribution.Simple.Program.Db (lookupProgramByName, modifyProgramSearchPath, prependProgramSearchPath)
+import Distribution.Simple.Program.Db
+  ( ProgramDb (..)
+  , lookupProgramByName
+  , modifyProgramSearchPath
+  , prependProgramSearchPath
+  , updateConfiguredProgs
+  )
+import Distribution.Simple.Program.GHC (GhcFeature (..), ghcSupports)
 import Distribution.Simple.Setup.Common as Setup
 import Distribution.Simple.Setup.Config as Setup
+import Distribution.Simple.SetupHooks.Internal
+  ( ConfigureHooks (..)
+  , applyComponentDiffs
+  , noConfigureHooks
+  )
+import qualified Distribution.Simple.SetupHooks.Internal as SetupHooks
 import Distribution.Simple.Utils
 import Distribution.System
 import Distribution.Types.ComponentRequestedSpec
+import Distribution.Types.DependencySatisfaction (DependencySatisfaction (..))
 import Distribution.Types.GivenComponent
 import qualified Distribution.Types.LocalBuildConfig as LBC
 import Distribution.Types.LocalBuildInfo
+import Distribution.Types.MissingDependencyReason (MissingDependencyReason (..))
 import Distribution.Types.PackageVersionConstraint
 import Distribution.Utils.LogProgress
 import Distribution.Utils.NubList
+import Distribution.Utils.String (trim)
 import Distribution.Verbosity
 import Distribution.Version
 
 import qualified Distribution.Simple.GHC as GHC
-import qualified Distribution.Simple.GHCJS as GHCJS
-import qualified Distribution.Simple.HaskellSuite as HaskellSuite
 import qualified Distribution.Simple.UHC as UHC
 
 import Control.Exception
@@ -118,10 +147,7 @@ import Data.List
   )
 import qualified Data.List.NonEmpty as NEL
 import qualified Data.Map as Map
-import Distribution.Compat.Directory
-  ( doesPathExist
-  , listDirectory
-  )
+import qualified Data.Text as Text
 import Distribution.Compat.Environment (lookupEnv)
 import Distribution.Parsec
   ( simpleParsec
@@ -131,18 +157,19 @@ import Distribution.Pretty
   , pretty
   , prettyShow
   )
+import Distribution.Simple.Errors
+import Distribution.Types.AnnotatedId
+import Distribution.Utils.Path
 import Distribution.Utils.Structured (structuredDecodeOrFailIO, structuredEncode)
 import System.Directory
   ( canonicalizePath
   , createDirectoryIfMissing
   , doesFileExist
-  , getTemporaryDirectory
-  , removeFile
+  , doesPathExist
+  , listDirectory
   )
 import System.FilePath
   ( isAbsolute
-  , takeDirectory
-  , (</>)
   )
 import System.IO
   ( hClose
@@ -165,8 +192,6 @@ import Text.PrettyPrint
 import qualified Data.Maybe as M
 import qualified Data.Set as Set
 import qualified Distribution.Compat.NonEmptySet as NES
-import Distribution.Simple.Errors
-import Distribution.Types.AnnotatedId
 
 type UseExternalInternalDeps = Bool
 
@@ -180,31 +205,33 @@ data ConfigStateFileError
     ConfigStateFileNoParse
   | -- | No file!
     ConfigStateFileMissing
+      { cfgStateFileErrorCwd :: Maybe (SymbolicPath CWD (Dir Pkg))
+      , cfgStateFileErrorFile :: SymbolicPath Pkg File
+      }
   | -- | Mismatched version.
     ConfigStateFileBadVersion
       PackageIdentifier
       PackageIdentifier
       (Either ConfigStateFileError LocalBuildInfo)
-  deriving (Typeable)
 
 -- | Format a 'ConfigStateFileError' as a user-facing error message.
 dispConfigStateFileError :: ConfigStateFileError -> Doc
 dispConfigStateFileError ConfigStateFileNoHeader =
   text "Saved package config file header is missing."
-    <+> text "Re-run the 'configure' command."
+    <+> text "Re-run the 'Setup configure' command."
 dispConfigStateFileError ConfigStateFileBadHeader =
   text "Saved package config file header is corrupt."
-    <+> text "Re-run the 'configure' command."
+    <+> text "Re-run the 'Setup configure' command."
 dispConfigStateFileError ConfigStateFileNoParse =
   text "Saved package config file is corrupt."
-    <+> text "Re-run the 'configure' command."
-dispConfigStateFileError ConfigStateFileMissing =
-  text "Run the 'configure' command first."
+    <+> text "Re-run the 'Setup configure' command."
+dispConfigStateFileError ConfigStateFileMissing{} =
+  text "Run the 'Setup configure' command first."
 dispConfigStateFileError (ConfigStateFileBadVersion oldCabal oldCompiler _) =
   text "Saved package config file is outdated:"
     $+$ badCabal
     $+$ badCompiler
-    $+$ text "Re-run the 'configure' command."
+    $+$ text "Re-run the 'Setup configure' command."
   where
     badCabal =
       text "• the Cabal version changed from"
@@ -228,12 +255,14 @@ instance Exception ConfigStateFileError
 -- missing, if the file cannot be read, or if the file was created by an older
 -- version of Cabal.
 getConfigStateFile
-  :: FilePath
+  :: Maybe (SymbolicPath CWD (Dir Pkg))
+  -> SymbolicPath Pkg File
   -- ^ The file path of the @setup-config@ file.
   -> IO LocalBuildInfo
-getConfigStateFile filename = do
+getConfigStateFile mbWorkDir setupConfigFile = do
+  let filename = interpretSymbolicPath mbWorkDir setupConfigFile
   exists <- doesFileExist filename
-  unless exists $ throwIO ConfigStateFileMissing
+  unless exists $ throwIO $ ConfigStateFileMissing mbWorkDir setupConfigFile
   -- Read the config file into a strict ByteString to avoid problems with
   -- lazy I/O, then convert to lazy because the binary package needs that.
   contents <- BS.readFile filename
@@ -258,48 +287,60 @@ getConfigStateFile filename = do
 -- | Read the 'localBuildInfoFile', returning either an error or the local build
 -- info.
 tryGetConfigStateFile
-  :: FilePath
+  :: Maybe (SymbolicPath CWD (Dir Pkg))
+  -- ^ Working directory.
+  -> SymbolicPath Pkg File
   -- ^ The file path of the @setup-config@ file.
   -> IO (Either ConfigStateFileError LocalBuildInfo)
-tryGetConfigStateFile = try . getConfigStateFile
+tryGetConfigStateFile mbWorkDir = try . getConfigStateFile mbWorkDir
 
 -- | Try to read the 'localBuildInfoFile'.
 tryGetPersistBuildConfig
-  :: FilePath
+  :: Maybe (SymbolicPath CWD (Dir Pkg))
+  -- ^ Working directory.
+  -> SymbolicPath Pkg (Dir Dist)
   -- ^ The @dist@ directory path.
   -> IO (Either ConfigStateFileError LocalBuildInfo)
-tryGetPersistBuildConfig = try . getPersistBuildConfig
+tryGetPersistBuildConfig mbWorkDir = try . getPersistBuildConfig mbWorkDir
 
 -- | Read the 'localBuildInfoFile'. Throw an exception if the file is
 -- missing, if the file cannot be read, or if the file was created by an older
 -- version of Cabal.
 getPersistBuildConfig
-  :: FilePath
+  :: Maybe (SymbolicPath CWD (Dir Pkg))
+  -- ^ Working directory.
+  -> SymbolicPath Pkg (Dir Dist)
   -- ^ The @dist@ directory path.
   -> IO LocalBuildInfo
-getPersistBuildConfig = getConfigStateFile . localBuildInfoFile
+getPersistBuildConfig mbWorkDir distPref =
+  getConfigStateFile mbWorkDir $ localBuildInfoFile distPref
 
 -- | Try to read the 'localBuildInfoFile'.
 maybeGetPersistBuildConfig
-  :: FilePath
+  :: Maybe (SymbolicPath CWD (Dir Pkg))
+  -- ^ Working directory.
+  -> SymbolicPath Pkg (Dir Dist)
   -- ^ The @dist@ directory path.
   -> IO (Maybe LocalBuildInfo)
-maybeGetPersistBuildConfig =
-  liftM (either (const Nothing) Just) . tryGetPersistBuildConfig
+maybeGetPersistBuildConfig mbWorkDir =
+  fmap (either (const Nothing) Just) . tryGetPersistBuildConfig mbWorkDir
 
 -- | After running configure, output the 'LocalBuildInfo' to the
 -- 'localBuildInfoFile'.
 writePersistBuildConfig
-  :: FilePath
+  :: Maybe (SymbolicPath CWD (Dir Pkg))
+  -- ^ Working directory
+  -> SymbolicPath Pkg (Dir Dist)
   -- ^ The @dist@ directory path.
   -> LocalBuildInfo
   -- ^ The 'LocalBuildInfo' to write.
   -> IO ()
-writePersistBuildConfig distPref lbi = do
-  createDirectoryIfMissing False distPref
-  writeFileAtomic (localBuildInfoFile distPref) $
+writePersistBuildConfig mbWorkDir distPref lbi = do
+  createDirectoryIfMissing False (i distPref)
+  writeFileAtomic (i $ localBuildInfoFile distPref) $
     BLC8.unlines [showHeader pkgId, structuredEncode lbi]
   where
+    i = interpretSymbolicPath mbWorkDir -- See Note [Symbolic paths] in Distribution.Utils.Path
     pkgId = localPackage lbi
 
 -- | Identifier of the current Cabal package.
@@ -359,16 +400,22 @@ showHeader pkgId =
 
 -- | Check that localBuildInfoFile is up-to-date with respect to the
 -- .cabal file.
-checkPersistBuildConfigOutdated :: FilePath -> FilePath -> IO Bool
-checkPersistBuildConfigOutdated distPref pkg_descr_file =
-  pkg_descr_file `moreRecentFile` localBuildInfoFile distPref
+checkPersistBuildConfigOutdated
+  :: Maybe (SymbolicPath CWD (Dir Pkg))
+  -> SymbolicPath Pkg (Dir Dist)
+  -> SymbolicPath Pkg File
+  -> IO Bool
+checkPersistBuildConfigOutdated mbWorkDir distPref pkg_descr_file =
+  i pkg_descr_file `moreRecentFile` i (localBuildInfoFile distPref)
+  where
+    i = interpretSymbolicPath mbWorkDir -- See Note [Symbolic paths] in Distribution.Utils.Path
 
 -- | Get the path of @dist\/setup-config@.
 localBuildInfoFile
-  :: FilePath
+  :: SymbolicPath Pkg (Dir Dist)
   -- ^ The @dist@ directory path.
-  -> FilePath
-localBuildInfoFile distPref = distPref </> "setup-config"
+  -> SymbolicPath Pkg File
+localBuildInfoFile distPref = distPref </> makeRelativePathEx "setup-config"
 
 -- -----------------------------------------------------------------------------
 
@@ -380,18 +427,18 @@ localBuildInfoFile distPref = distPref </> "setup-config"
 -- from (in order of highest to lowest preference) the override prefix, the
 -- \"CABAL_BUILDDIR\" environment variable, or the default prefix.
 findDistPref
-  :: FilePath
+  :: SymbolicPath Pkg (Dir Dist)
   -- ^ default \"dist\" prefix
-  -> Setup.Flag FilePath
+  -> Setup.Flag (SymbolicPath Pkg (Dir Dist))
   -- ^ override \"dist\" prefix
-  -> IO FilePath
+  -> IO (SymbolicPath Pkg (Dir Dist))
 findDistPref defDistPref overrideDistPref = do
-  envDistPref <- liftM parseEnvDistPref (lookupEnv "CABAL_BUILDDIR")
-  return $ fromFlagOrDefault defDistPref (mappend envDistPref overrideDistPref)
+  envDistPref <- parseEnvDistPref <$> lookupEnv "CABAL_BUILDDIR"
+  return $ fromFlagOrDefault defDistPref (envDistPref <> overrideDistPref)
   where
     parseEnvDistPref env =
       case env of
-        Just distPref | not (null distPref) -> toFlag distPref
+        Just distPref | not (null distPref) -> toFlag $ makeSymbolicPath distPref
         _ -> NoFlag
 
 -- | Return the \"dist/\" prefix, or the default prefix. The prefix is taken
@@ -401,35 +448,253 @@ findDistPref defDistPref overrideDistPref = do
 -- set. (The @*DistPref@ flags are always set to a definite value before
 -- invoking 'UserHooks'.)
 findDistPrefOrDefault
-  :: Setup.Flag FilePath
+  :: Setup.Flag (SymbolicPath Pkg (Dir Dist))
   -- ^ override \"dist\" prefix
-  -> IO FilePath
+  -> IO (SymbolicPath Pkg (Dir Dist))
 findDistPrefOrDefault = findDistPref defaultDistPref
 
 -- | Perform the \"@.\/setup configure@\" action.
---  Returns the @.setup-config@ file.
+--
+-- Returns the @LocalBuildInfo@, also writing it to the @setup-config@ file.
 configure
   :: (GenericPackageDescription, HookedBuildInfo)
   -> ConfigFlags
   -> IO LocalBuildInfo
-configure (g_pkg_descr, hookedBuildInfo) cfg = do
-  -- Cabal pre-configure
-  (lbc1, comp, platform, enabledComps) <- preConfigurePackage cfg g_pkg_descr
+configure p cfg = do
+  lbi <- configure_setupHooks noConfigureHooks p defaultVerbosityHandles cfg
+  -- Write the 'LocalBuildInfo' to the @setup-config@ file.
+  --
+  -- NB: the shared 'configure_setupHooks'/'configureFinal' functions deliberately
+  -- don't include this logic, as it is the responsibility of each top-level
+  -- configure entry point.
+  let distPref = fromFlag $ configDistPref cfg
+      mbWorkDir = flagToMaybe $ configWorkingDir cfg
+  writePersistBuildConfig mbWorkDir distPref lbi
+  return lbi
 
-  -- Cabal package-wide configure
-  (lbc2, pbd2, pkg_info) <-
-    finalizeAndConfigurePackage cfg lbc1 g_pkg_descr comp platform enabledComps
+-- | Run the @Cabal@ library configure phase.
+--
+-- NB: this function does /not/ persist the resulting 'LocalBuildInfo' to the
+-- @setup-config@ file; that is the responsibility of callers.
+configure_setupHooks
+  :: ConfigureHooks
+  -> (GenericPackageDescription, HookedBuildInfo)
+  -> VerbosityHandles
+  -> ConfigFlags
+  -> IO LocalBuildInfo
+configure_setupHooks
+  confHooks@(ConfigureHooks{preConfPackageHook})
+  (g_pkg_descr, hookedBuildInfo)
+  verbHandles
+  cfg = do
+    (lbc0, comp, platform, enabledComps) <- preConfigurePackage verbHandles cfg g_pkg_descr
 
-  -- Cabal per-component configure
-  externalPkgDeps <- finalCheckPackage g_pkg_descr pbd2 hookedBuildInfo pkg_info
-  configureComponents lbc2 pbd2 pkg_info externalPkgDeps
+    -- Package-wide pre-configure hook
+    lbc1 <-
+      maybe
+        (return lbc0)
+        (runPreConfPackageHook cfg comp platform lbc0)
+        preConfPackageHook
+
+    -- Cabal package-wide configure
+    (allConstraints, pkgInfo) <-
+      computePackageInfo verbHandles cfg lbc1 g_pkg_descr comp
+    (packageDbs, pkg_descr0, flags) <-
+      finalizePackageDescription
+        verbHandles
+        cfg
+        g_pkg_descr
+        comp
+        platform
+        enabledComps
+        allConstraints
+        pkgInfo
+
+    configureFinal
+      verbHandles
+      confHooks
+      hookedBuildInfo
+      cfg
+      lbc1
+      (g_pkg_descr, pkg_descr0)
+      flags
+      enabledComps
+      comp
+      platform
+      packageDbs
+      pkgInfo
+
+configureFinal
+  :: VerbosityHandles
+  -> ConfigureHooks
+  -> HookedBuildInfo
+  -> ConfigFlags
+  -> LBC.LocalBuildConfig
+  -> (GenericPackageDescription, PackageDescription)
+  -> FlagAssignment
+  -> ComponentRequestedSpec
+  -> Compiler
+  -> Platform
+  -> PackageDBStack
+  -> PackageInfo
+  -> IO LocalBuildInfo
+configureFinal
+  verbHandles
+  (ConfigureHooks{postConfPackageHook, preConfComponentHook})
+  hookedBuildInfo
+  cfg
+  lbc0
+  (gpkgDescr, pkgDescr0)
+  flags
+  enabledComps
+  comp
+  platform
+  packageDbs
+  pkgInfo@PackageInfo
+    { installedPackageSet = installedPkgSet
+    , promisedDepsSet = promisedDeps
+    } =
+    do
+      let verbosity = mkVerbosity verbHandles (fromFlag (configVerbosity cfg))
+
+      -- Apply compiler capability checks to the incoming build options
+      -- (idempotent).
+      lbc1 <- do
+        let opts = LBC.withBuildOptions lbc0
+        opts' <- adjustBuildOptionsAndWarn verbosity comp (LBC.withPrograms lbc0) opts
+        return lbc0{LBC.withBuildOptions = opts'}
+
+      -- Cabal package-wide configure
+      (lbc2, pbd2) <-
+        configurePackage verbHandles cfg lbc1 pkgDescr0 flags enabledComps comp platform packageDbs
+
+      -- Package-wide post-configure hook
+      for_ postConfPackageHook $ runPostConfPackageHook lbc2 pbd2
+
+      -- Per-component pre-configure hooks
+      pkgDescr <- do
+        let pkgDescr2 = LBC.localPkgDescr pbd2
+        applyComponentDiffs
+          verbosity
+          (for preConfComponentHook . runPreConfComponentHook lbc2 pbd2)
+          pkgDescr2
+      let pbd3 = pbd2{LBC.localPkgDescr = pkgDescr}
+
+      -- Cabal per-component configure
+      finalCheckPackage verbHandles gpkgDescr pbd3 hookedBuildInfo
+
+      let
+        use_external_internal_deps =
+          case enabledComps of
+            OneComponentRequestedSpec{} -> True
+            ComponentRequestedSpec{} -> False
+      -- The list of 'InstalledPackageInfo' recording the selected
+      -- dependencies on external packages.
+      --
+      -- Invariant: For any package name, there is at most one package
+      -- in externalPackageDeps which has that name.
+      --
+      -- NB: The dependency selection is global over ALL components
+      -- in the package (similar to how allConstraints and
+      -- requiredDepsMap are global over all components).  In particular,
+      -- if *any* component (post-flag resolution) has an unsatisfiable
+      -- dependency, we will fail.  This can sometimes be undesirable
+      -- for users, see #1786 (benchmark conflicts with executable),
+      --
+      -- In the presence of Backpack, these package dependencies are
+      -- NOT complete: they only ever include the INDEFINITE
+      -- dependencies.  After we apply an instantiation, we'll get
+      -- definite references which constitute extra dependencies.
+      -- (Why not have cabal-install pass these in explicitly?
+      -- For one it's deterministic; for two, we need to associate
+      -- them with renamings which would require a far more complicated
+      -- input scheme than what we have today.)
+      externalPkgDeps <-
+        selectDependencies
+          verbosity
+          use_external_internal_deps
+          pkgInfo
+          pkgDescr
+          enabledComps
+      configureComponents verbHandles lbc2 pbd3 installedPkgSet promisedDeps externalPkgDeps
+
+runPreConfPackageHook
+  :: ConfigFlags
+  -> Compiler
+  -> Platform
+  -> LBC.LocalBuildConfig
+  -> (SetupHooks.PreConfPackageInputs -> IO SetupHooks.PreConfPackageOutputs)
+  -> IO LBC.LocalBuildConfig
+runPreConfPackageHook cfg comp platform lbc0 pre_conf = do
+  let programDb0 = LBC.withPrograms lbc0
+      programDb0' = programDb0{unconfiguredProgs = Map.empty}
+      input =
+        SetupHooks.PreConfPackageInputs
+          { SetupHooks.configFlags = cfg
+          , SetupHooks.localBuildConfig = lbc0{LBC.withPrograms = programDb0'}
+          , -- Unconfigured programs are not supplied to the hook,
+            -- as these cannot be passed over a serialisation boundary
+            -- (see the "Binary ProgramDb" instance).
+            SetupHooks.compiler = comp
+          , SetupHooks.platform = platform
+          }
+  SetupHooks.PreConfPackageOutputs
+    { SetupHooks.buildOptions = opts1
+    , SetupHooks.extraConfiguredProgs = progs1
+    } <-
+    pre_conf input
+  -- The package-wide pre-configure hook returns a 'BuildOptions' that
+  -- overrides the one it was passed in, as well as an update to
+  -- the 'ProgramDb' in the form of new configured programs to add
+  -- to the program database.
+  return $
+    lbc0
+      { LBC.withBuildOptions = opts1
+      , LBC.withPrograms =
+          updateConfiguredProgs
+            (`Map.union` progs1)
+            programDb0
+      }
+
+runPostConfPackageHook
+  :: LBC.LocalBuildConfig
+  -> LBC.PackageBuildDescr
+  -> (SetupHooks.PostConfPackageInputs -> IO ())
+  -> IO ()
+runPostConfPackageHook lbc2 pbd2 postConfPkg =
+  let input =
+        SetupHooks.PostConfPackageInputs
+          { SetupHooks.localBuildConfig = lbc2
+          , SetupHooks.packageBuildDescr = pbd2
+          }
+   in postConfPkg input
+
+runPreConfComponentHook
+  :: LBC.LocalBuildConfig
+  -> LBC.PackageBuildDescr
+  -> Component
+  -> (SetupHooks.PreConfComponentInputs -> IO SetupHooks.PreConfComponentOutputs)
+  -> IO SetupHooks.ComponentDiff
+runPreConfComponentHook lbc pbd c hook = do
+  let input =
+        SetupHooks.PreConfComponentInputs
+          { SetupHooks.localBuildConfig = lbc
+          , SetupHooks.packageBuildDescr = pbd
+          , SetupHooks.component = c
+          }
+  SetupHooks.PreConfComponentOutputs
+    { SetupHooks.componentDiff = diff
+    } <-
+    hook input
+  return diff
 
 preConfigurePackage
-  :: ConfigFlags
+  :: VerbosityHandles
+  -> ConfigFlags
   -> GenericPackageDescription
   -> IO (LBC.LocalBuildConfig, Compiler, Platform, ComponentRequestedSpec)
-preConfigurePackage cfg g_pkg_descr = do
-  let verbosity = fromFlag (configVerbosity cfg)
+preConfigurePackage verbHandles cfg g_pkg_descr = do
+  let verbosity = mkVerbosity verbHandles (fromFlag $ configVerbosity cfg)
 
   -- Determine the component we are configuring, if a user specified
   -- one on the command line.  We use a fake, flattened version of
@@ -438,11 +703,12 @@ preConfigurePackage cfg g_pkg_descr = do
   -- configure everything (the old behavior).
   (mb_cname :: Maybe ComponentName) <- do
     let flat_pkg_descr = flattenPackageDescription g_pkg_descr
-    targets <- readBuildTargets verbosity flat_pkg_descr (configArgs cfg)
+        targets0 = configTargets cfg
+    targets <- readBuildTargets verbosity flat_pkg_descr targets0
     -- TODO: bleat if you use the module/file syntax
     let targets' = [cname | BuildTargetComponent cname <- targets]
     case targets' of
-      _ | null (configArgs cfg) -> return Nothing
+      _ | null targets0 -> return Nothing
       [cname] -> return (Just cname)
       [] -> dieWithException verbosity NoValidComponent
       _ -> dieWithException verbosity ConfigureEitherSingleOrAll
@@ -463,9 +729,8 @@ preConfigurePackage cfg g_pkg_descr = do
 
   -- Make a data structure describing what components are enabled.
   let enabled :: ComponentRequestedSpec
-      enabled = case mb_cname of
-        Just cname -> OneComponentRequestedSpec cname
-        Nothing ->
+      enabled =
+        maybe
           ComponentRequestedSpec
             { -- The flag name (@--enable-tests@) is a
               -- little bit of a misnomer, because
@@ -475,9 +740,10 @@ preConfigurePackage cfg g_pkg_descr = do
               -- @buildable: False@ might make it
               -- not possible to enable.
               testsRequested = fromFlag (configTests cfg)
-            , benchmarksRequested =
-                fromFlag (configBenchmarks cfg)
+            , benchmarksRequested = fromFlag (configBenchmarks cfg)
             }
+          OneComponentRequestedSpec
+          mb_cname
   -- Some sanity checks related to enabling components.
   when
     ( isJust mb_cname
@@ -488,7 +754,7 @@ preConfigurePackage cfg g_pkg_descr = do
   checkDeprecatedFlags verbosity cfg
   checkExactConfiguration verbosity g_pkg_descr cfg
 
-  programDbPre <- mkProgramDb cfg (configPrograms cfg)
+  programDbPre <- mkProgramDb verbHandles cfg (configPrograms cfg)
   -- comp:            the compiler we're building with
   -- compPlatform:    the platform we're building for
   -- programDb:  location and args of all programs we're
@@ -502,80 +768,51 @@ preConfigurePackage cfg g_pkg_descr = do
       (flagToMaybe (configHcPath cfg))
       (flagToMaybe (configHcPkg cfg))
       programDbPre
-      (lessVerbose verbosity)
+      (modifyVerbosityFlags lessVerbose verbosity)
 
   -- Where to build the package
-  let build_dir :: FilePath -- e.g. dist/build
-      build_dir = configFlagsBuildDir cfg
+  let builddir :: SymbolicPath Pkg (Dir Build) -- e.g. dist/build
+      builddir = setupFlagsBuildDir $ configCommonFlags cfg
+      mbWorkDir = flagToMaybe $ configWorkingDir cfg
   -- NB: create this directory now so that all configure hooks get
   -- to see it. (In practice, the Configure build-type needs it before
   -- the postConfPackageHook runs.)
-  createDirectoryIfMissingVerbose (lessVerbose verbosity) True build_dir
+  createDirectoryIfMissingVerbose (modifyVerbosityFlags lessVerbose verbosity) True $
+    interpretSymbolicPath mbWorkDir builddir
 
-  lbc <- computeLocalBuildConfig cfg comp programDb00
+  lbc <- computeLocalBuildConfig verbHandles cfg comp programDb00
   return (lbc, comp, compPlatform, enabled)
 
 computeLocalBuildConfig
-  :: ConfigFlags
+  :: VerbosityHandles
+  -> ConfigFlags
   -> Compiler
   -> ProgramDb
   -> IO LBC.LocalBuildConfig
-computeLocalBuildConfig cfg comp programDb = do
-  let verbosity = fromFlag (configVerbosity cfg)
-  -- Decide if we're going to compile with split sections.
-  split_sections :: Bool <-
-    if not (fromFlag $ configSplitSections cfg)
-      then return False
-      else case compilerFlavor comp of
-        GHC
-          | compilerVersion comp >= mkVersion [8, 0] ->
-              return True
-        GHCJS ->
-          return True
-        _ -> do
-          warn
-            verbosity
-            ( "this compiler does not support "
-                ++ "--enable-split-sections; ignoring"
-            )
-          return False
+computeLocalBuildConfig verbHandles cfg comp programDb = do
+  let common = configCommonFlags cfg
+      verbosity = mkVerbosity verbHandles (fromFlag $ setupVerbosity common)
+  rawBuildOptions <- buildOptionsFromConfigFlags verbosity cfg comp
+  buildOptions <- adjustBuildOptionsAndWarn verbosity comp programDb rawBuildOptions
+  return $
+    LBC.LocalBuildConfig
+      { extraConfigArgs = []
+      , -- Currently configure does not
+        -- take extra args, but if it
+        -- did they would go here.
+        withPrograms = programDb
+      , withBuildOptions = buildOptions
+      }
 
-  -- Decide if we're going to compile with split objects.
-  split_objs :: Bool <-
-    if not (fromFlag $ configSplitObjs cfg)
-      then return False
-      else case compilerFlavor comp of
-        _ | split_sections ->
-          do
-            warn
-              verbosity
-              ( "--enable-split-sections and "
-                  ++ "--enable-split-objs are mutually "
-                  ++ "exclusive; ignoring the latter"
-              )
-            return False
-        GHC ->
-          return True
-        GHCJS ->
-          return True
-        _ -> do
-          warn
-            verbosity
-            ( "this compiler does not support "
-                ++ "--enable-split-objs; ignoring"
-            )
-          return False
-
-  -- Basically yes/no/unknown.
-  let linkerSupportsRelocations :: Maybe Bool
-      linkerSupportsRelocations =
-        case lookupProgramByName "ld" programDb of
-          Nothing -> Nothing
-          Just ld ->
-            case Map.lookup "Supports relocatable output" $ programProperties ld of
-              Just "YES" -> Just True
-              Just "NO" -> Just False
-              _other -> Nothing
+-- | Compute a default 'LBC.BuildOptions' from 'ConfigFlags', applying
+-- compiler-specific defaults but without compiler capability checks
+-- (see 'adjustBuildOptionsAndWarn' for that).
+buildOptionsFromConfigFlags
+  :: Verbosity
+  -> ConfigFlags
+  -> Compiler
+  -> IO LBC.BuildOptions
+buildOptionsFromConfigFlags verbosity cfg comp = do
   let ghciLibByDefault =
         case compilerId comp of
           CompilerId GHC _ ->
@@ -587,21 +824,8 @@ computeLocalBuildConfig cfg comp programDb = do
             -- rely on them. By the time that bug was fixed, ghci had
             -- been changed to read shared libraries instead of archive
             -- files (see next code block).
-            not (GHC.isDynamic comp)
-          CompilerId GHCJS _ ->
-            not (GHCJS.isDynamic comp)
+            GHC.compilerBuildWay comp `notElem` [DynWay, ProfDynWay]
           _ -> False
-
-  withGHCiLib_ <-
-    case fromFlagOrDefault ghciLibByDefault (configGHCiLib cfg) of
-      -- NOTE: If linkerSupportsRelocations is Nothing this may still fail if the
-      -- linker does not support -r.
-      True | not (fromMaybe True linkerSupportsRelocations) -> do
-        warn verbosity $
-          "--enable-library-for-ghci is not supported with the current"
-            ++ "  linker; ignoring..."
-        return False
-      v -> return v
 
   let sharedLibsByDefault
         | fromFlag (configDynExe cfg) =
@@ -612,9 +836,7 @@ computeLocalBuildConfig cfg comp programDb = do
             CompilerId GHC _ ->
               -- if ghc is dynamic, then ghci needs a shared
               -- library, so we build one by default.
-              GHC.isDynamic comp
-            CompilerId GHCJS _ ->
-              GHCJS.isDynamic comp
+              GHC.compilerBuildWay comp == DynWay
             _ -> False
       withSharedLib_ =
         -- build shared libraries if required by GHC or by the
@@ -628,15 +850,13 @@ computeLocalBuildConfig cfg comp programDb = do
         -- into a huge .a archive) via GHCs -staticlib flag.
         fromFlagOrDefault False $ configStaticLib cfg
 
+      -- See doc/internal/bytecode-libraries.md for the end-to-end story.
+      withBytecodeLib_ =
+        fromFlagOrDefault False $ configBytecodeLib cfg
+
       withDynExe_ = fromFlag $ configDynExe cfg
 
       withFullyStaticExe_ = fromFlag $ configFullyStaticExe cfg
-
-  when (withDynExe_ && not withSharedLib_) $
-    warn verbosity $
-      "Executables will use dynamic linking, but a shared library "
-        ++ "is not being built. Linking will fail if any executables "
-        ++ "depend on the library."
 
   setProfiling <- configureProfiling verbosity cfg comp
 
@@ -661,59 +881,205 @@ computeLocalBuildConfig cfg comp programDb = do
   strip_lib <- strip_libexe "library" configStripLibs
   strip_exe <- strip_libexe "executable" configStripExes
 
-  let buildOptions =
-        setCoverage . setProfiling $
-          LBC.BuildOptions
-            { withVanillaLib = fromFlag $ configVanillaLib cfg
-            , withSharedLib = withSharedLib_
-            , withStaticLib = withStaticLib_
-            , withDynExe = withDynExe_
-            , withFullyStaticExe = withFullyStaticExe_
-            , withProfLib = False
-            , withProfLibDetail = ProfDetailNone
-            , withProfExe = False
-            , withProfExeDetail = ProfDetailNone
-            , withOptimization = fromFlag $ configOptimization cfg
-            , withDebugInfo = fromFlag $ configDebugInfo cfg
-            , withGHCiLib = withGHCiLib_
-            , splitSections = split_sections
-            , splitObjs = split_objs
-            , stripExes = strip_exe
-            , stripLibs = strip_lib
-            , exeCoverage = False
-            , libCoverage = False
-            , relocatable = fromFlagOrDefault False $ configRelocatable cfg
-            }
-
   return $
-    LBC.LocalBuildConfig
-      { extraConfigArgs = [] -- Currently configure does not
-      -- take extra args, but if it
-      -- did they would go here.
-      , withPrograms = programDb
-      , withBuildOptions = buildOptions
-      }
+    setCoverage . setProfiling $
+      LBC.BuildOptions
+        { withVanillaLib = fromFlag $ configVanillaLib cfg
+        , withSharedLib = withSharedLib_
+        , withStaticLib = withStaticLib_
+        , withBytecodeLib = withBytecodeLib_
+        , withDynExe = withDynExe_
+        , withFullyStaticExe = withFullyStaticExe_
+        , withProfLib = False
+        , withProfLibShared = False
+        , withProfLibDetail = ProfDetailNone
+        , withProfExe = False
+        , withProfExeDetail = ProfDetailNone
+        , withOptimization = fromFlag $ configOptimization cfg
+        , withDebugInfo = fromFlag $ configDebugInfo cfg
+        , withGHCiLib = fromFlagOrDefault ghciLibByDefault (configGHCiLib cfg)
+        , splitSections = fromFlagOrDefault False $ configSplitSections cfg
+        , splitObjs = fromFlagOrDefault False $ configSplitObjs cfg
+        , stripExes = strip_exe
+        , stripLibs = strip_lib
+        , exeCoverage = False
+        , libCoverage = False
+        , relocatable = fromFlagOrDefault False $ configRelocatable cfg
+        , programPrefix = flagToMaybe $ configProgPrefix cfg
+        , programSuffix = flagToMaybe $ configProgSuffix cfg
+        }
+
+-- | Adjust 'LBC.BuildOptions' to be compatible with the given 'Compiler' and
+-- 'ProgramDb'.
+--
+-- See also 'adjustBuildOptionsAndWarn', which additionally informs the user
+-- of unavailable requested features via warning messages.
+adjustBuildOptions :: Compiler -> ProgramDb -> LBC.BuildOptions -> LBC.BuildOptions
+adjustBuildOptions comp programDb opts =
+  opts
+    { LBC.splitSections = splitSec
+    , LBC.splitObjs = splitObj
+    , LBC.withGHCiLib = ghciLib
+    , LBC.withBytecodeLib = bytecodeLib
+    , LBC.exeCoverage = exeCov
+    , LBC.libCoverage = libCov
+    }
+  where
+    splitSec
+      | not (LBC.splitSections opts) = False
+      | GHC <- compilerFlavor comp
+      , compilerVersion comp >= mkVersion [8, 0] =
+          True
+      | otherwise = False -- not supported by this compiler
+    splitObj
+      | not (LBC.splitObjs opts) = False
+      | splitSec = False -- mutually exclusive with split-sections
+      | GHC <- compilerFlavor comp = True
+      | otherwise = False -- not supported by this compiler
+    linkerSupportsRelocations :: Maybe Bool
+    linkerSupportsRelocations =
+      case lookupProgramByName "ld" programDb of
+        Nothing -> Nothing
+        Just ld ->
+          case Map.lookup "Supports relocatable output" $ programProperties ld of
+            Just "YES" -> Just True
+            Just "NO" -> Just False
+            _other -> Nothing
+
+    -- Whether a GHCi library (merged object) can be built at all.
+    canMergeObjects :: Maybe Bool
+    canMergeObjects
+      | Just ghc <- lookupProgram ghcProgram programDb
+      , ghcSupports GhcMergeObjs ghc =
+          -- GHC merges objects with the tool recorded in its settings. An
+          -- empty command means it has none (e.g. the Windows bindists, whose
+          -- lld cannot produce relocatable objects); GHC would then fall back
+          -- to an archive, which brings nothing to GHCi. A GHC with
+          -- @--merge-objs@ always reports the setting, so a missing one is
+          -- treated the same way rather than assumed capable.
+          Just $ maybe False (not . null) (Map.lookup "Merge objects command" (compilerProperties comp))
+      | otherwise = linkerSupportsRelocations
+
+    ghciLib
+      | LBC.withGHCiLib opts
+      , not (fromMaybe True canMergeObjects) =
+          False
+      | otherwise = LBC.withGHCiLib opts
+
+    bytecodeLib
+      | LBC.withBytecodeLib opts
+      , not (bytecodeArtifactsSupported comp) =
+          False
+      | otherwise = LBC.withBytecodeLib opts
+
+    exeCov
+      | LBC.exeCoverage opts, not (coverageSupported comp) = False
+      | otherwise = LBC.exeCoverage opts
+
+    libCov
+      | LBC.libCoverage opts, not (coverageSupported comp) = False
+      | otherwise = LBC.libCoverage opts
+
+-- | Warnings to emit after downgrading 'LBC.BuildOptions' when the
+-- compiler (or another toolchain program) doesn't support a requested feature.
+buildOptionsAdjustmentWarnings
+  :: Compiler
+  -> LBC.BuildOptions
+  -- ^ original options
+  -> LBC.BuildOptions
+  -- ^ adjusted options (result of 'adjustBuildOptions')
+  -> [String]
+buildOptionsAdjustmentWarnings comp opts0 opts1 =
+  [ "This compiler does not support bytecode libraries; ignoring --enable-library-bytecode"
+  | LBC.withBytecodeLib opts0
+  , not (LBC.withBytecodeLib opts1)
+  ]
+    ++ [ "this compiler does not support --enable-split-sections; ignoring"
+       | LBC.splitSections opts0
+       , not (LBC.splitSections opts1)
+       ]
+    ++ [ if LBC.splitSections opts1
+        then
+          "--enable-split-sections and --enable-split-objs are mutually "
+            ++ "exclusive; ignoring the latter"
+        else "this compiler does not support --enable-split-objs; ignoring"
+       | LBC.splitObjs opts0
+       , not (LBC.splitObjs opts1)
+       ]
+    ++ [ "--enable-library-for-ghci is not supported: the linker cannot "
+        ++ "merge object files; ignoring..."
+       | LBC.withGHCiLib opts0
+       , not (LBC.withGHCiLib opts1)
+       ]
+    ++ [ "The compiler "
+        ++ showCompilerId comp
+        ++ " does not support "
+        ++ "program coverage. Program coverage has been disabled."
+       | LBC.exeCoverage opts0
+       , not (LBC.exeCoverage opts1)
+       ]
+
+-- | Like 'adjustBuildOptions', but includes warnings for downgraded
+-- build options.
+adjustBuildOptionsAndWarn
+  :: Verbosity
+  -> Compiler
+  -> ProgramDb
+  -> LBC.BuildOptions
+  -> IO LBC.BuildOptions
+adjustBuildOptionsAndWarn verbosity comp programDb opts0 = do
+  let opts1 = adjustBuildOptions comp programDb opts0
+  mapM_ (warn verbosity) (buildOptionsAdjustmentWarnings comp opts0 opts1)
+
+  -- Also warn for any inconsistencies found in BuildOptions.
+  when
+    ( LBC.withDynExe opts1
+        && not (LBC.withProfExe opts1)
+        && not (LBC.withSharedLib opts1)
+    )
+    $ warn verbosity
+    $ "Executables will use dynamic linking, but a shared library "
+      ++ "is not being built. Linking will fail if any executables "
+      ++ "depend on the library."
+  when
+    ( LBC.withDynExe opts1
+        && LBC.withProfExe opts1
+        && not (LBC.withProfLibShared opts1)
+    )
+    $ warn verbosity
+    $ "Executables will use profiled dynamic linking, but a profiled shared library "
+      ++ "is not being built. Linking will fail if any executables "
+      ++ "depend on the library."
+  return opts1
 
 data PackageInfo = PackageInfo
   { internalPackageSet :: Set LibraryName
-  , promisedDepsSet :: Map (PackageName, ComponentName) ComponentId
+  -- ^ Libraries internal to the package
+  , promisedDepsSet :: Map (PackageName, ComponentName) PromisedComponent
+  -- ^ Collection of components that are promised, i.e. are not installed already.
+  --
+  -- See 'PromisedDependency' for more details.
   , installedPackageSet :: InstalledPackageIndex
+  -- ^ Installed packages
   , requiredDepsMap :: Map (PackageName, ComponentName) InstalledPackageInfo
+  -- ^ Packages for which we have been given specific deps to use
   }
 
 configurePackage
-  :: ConfigFlags
+  :: VerbosityHandles
+  -> ConfigFlags
   -> LBC.LocalBuildConfig
   -> PackageDescription
   -> FlagAssignment
   -> ComponentRequestedSpec
   -> Compiler
   -> Platform
-  -> ProgramDb
   -> PackageDBStack
   -> IO (LBC.LocalBuildConfig, LBC.PackageBuildDescr)
-configurePackage cfg lbc0 pkg_descr00 flags enabled comp platform programDb0 packageDbs = do
-  let verbosity = fromFlag (configVerbosity cfg)
+configurePackage verbHandles cfg lbc0 pkg_descr00 flags enabled comp platform packageDbs = do
+  let common = configCommonFlags cfg
+      verbosity = mkVerbosity verbHandles (fromFlag $ setupVerbosity common)
+      programDb0 = LBC.withPrograms lbc0
 
       -- add extra include/lib dirs as specified in cfg
       pkg_descr0 = addExtraIncludeLibDirsFromConfigFlags pkg_descr00 cfg
@@ -725,32 +1091,36 @@ configurePackage cfg lbc0 pkg_descr00 flags enabled comp platform programDb0 pac
   -- right before calling configurePackage?
 
   -- Configure certain external build tools, see below for which ones.
-  let requiredBuildTools = do
-        bi <- enabledBuildInfos pkg_descr0 enabled
-        -- First, we collect any tool dep that we know is external. This is,
-        -- in practice:
-        --
-        -- 1. `build-tools` entries on the whitelist
-        --
-        -- 2. `build-tool-depends` that aren't from the current package.
-        let externBuildToolDeps =
-              [ LegacyExeDependency (unUnqualComponentName eName) versionRange
-              | buildTool@(ExeDependency _ eName versionRange) <-
-                  getAllToolDependencies pkg_descr0 bi
-              , not $ isInternal pkg_descr0 buildTool
-              ]
-        -- Second, we collect any build-tools entry we don't know how to
-        -- desugar. We'll never have any idea how to build them, so we just
-        -- hope they are already on the PATH.
-        let unknownBuildTools =
-              [ buildTool
-              | buildTool <- buildTools bi
-              , Nothing == desugarBuildTool pkg_descr0 buildTool
-              ]
-        externBuildToolDeps ++ unknownBuildTools
+  let requiredBuildTools
+        -- If --ignore-build-tools is set, no build tool is required:
+        | fromFlagOrDefault False $ configIgnoreBuildTools cfg =
+            []
+        | otherwise = do
+            bi <- enabledBuildInfos pkg_descr0 enabled
+            -- First, we collect any tool dep that we know is external. This is,
+            -- in practice:
+            --
+            -- 1. `build-tools` entries on the whitelist
+            --
+            -- 2. `build-tool-depends` that aren't from the current package.
+            let externBuildToolDeps =
+                  [ LegacyExeDependency (unUnqualComponentName eName) versionRange
+                  | buildTool@(ExeDependency _ eName versionRange) <-
+                      getAllToolDependencies pkg_descr0 bi
+                  , not $ isInternal pkg_descr0 buildTool
+                  ]
+            -- Second, we collect any build-tools entry we don't know how to
+            -- desugar. We'll never have any idea how to build them, so we just
+            -- hope they are already on the PATH.
+            let unknownBuildTools =
+                  [ buildTool
+                  | buildTool <- buildTools bi
+                  , isNothing (desugarBuildTool pkg_descr0 buildTool)
+                  ]
+            externBuildToolDeps ++ unknownBuildTools
 
   programDb1 <-
-    configureAllKnownPrograms (lessVerbose verbosity) programDb0
+    configureAllKnownPrograms (modifyVerbosityFlags lessVerbose verbosity) programDb0
       >>= configureRequiredPrograms verbosity requiredBuildTools
 
   (pkg_descr2, programDb2) <-
@@ -769,7 +1139,7 @@ configurePackage cfg lbc0 pkg_descr00 flags enabled comp platform programDb0 pac
     defaultInstallDirs'
       use_external_internal_deps
       (compilerFlavor comp)
-      (fromFlag (configUserInstall cfg))
+      (fromFlagOrDefault True (configUserInstall cfg))
       (hasLibs pkg_descr2)
   let
     installDirs =
@@ -798,36 +1168,50 @@ configurePackage cfg lbc0 pkg_descr00 flags enabled comp platform programDb0 pac
 
   return (lbc, pbd)
 
-finalizeAndConfigurePackage
-  :: ConfigFlags
+computePackageInfo
+  :: VerbosityHandles
+  -> ConfigFlags
   -> LBC.LocalBuildConfig
   -> GenericPackageDescription
   -> Compiler
-  -> Platform
-  -> ComponentRequestedSpec
-  -> IO (LBC.LocalBuildConfig, LBC.PackageBuildDescr, PackageInfo)
-finalizeAndConfigurePackage cfg lbc0 g_pkg_descr comp platform enabled = do
-  let verbosity = fromFlag (configVerbosity cfg)
+  -> IO ([PackageVersionConstraint], PackageInfo)
+computePackageInfo verbHandles cfg lbc0 g_pkg_descr comp = do
+  let common = configCommonFlags cfg
+      verbosity = mkVerbosity verbHandles (fromFlag $ setupVerbosity common)
+      mbWorkDir = flagToMaybe $ setupWorkingDir common
 
   let programDb0 = LBC.withPrograms lbc0
       -- What package database(s) to use
       packageDbs :: PackageDBStack
       packageDbs =
         interpretPackageDbFlags
-          (fromFlag (configUserInstall cfg))
+          (fromFlagOrDefault True (configUserInstall cfg))
           (configPackageDBs cfg)
 
   -- The InstalledPackageIndex of all installed packages
   installedPackageSet :: InstalledPackageIndex <-
     getInstalledPackages
-      (lessVerbose verbosity)
+      (modifyVerbosityFlags lessVerbose verbosity)
       comp
+      mbWorkDir
       packageDbs
       programDb0
+  computePackageInfoFromIndex verbHandles cfg g_pkg_descr installedPackageSet
 
-  -- The set of package names which are "shadowed" by internal
-  -- packages, and which component they map to
-  let internalPackageSet :: Set LibraryName
+-- | Like 'computePackageInfo' but takes a given 'InstalledPackageIndex'
+-- instead of needing to query the @hc-pkg@ program to obtain it.
+computePackageInfoFromIndex
+  :: VerbosityHandles
+  -> ConfigFlags
+  -> GenericPackageDescription
+  -> InstalledPackageIndex
+  -> IO ([PackageVersionConstraint], PackageInfo)
+computePackageInfoFromIndex verbHandles cfg g_pkg_descr installedPackageSet = do
+  let common = configCommonFlags cfg
+      verbosity = mkVerbosity verbHandles (fromFlag $ setupVerbosity common)
+      -- The set of package names which are "shadowed" by internal
+      -- packages, and which component they map to
+      internalPackageSet :: Set LibraryName
       internalPackageSet = getInternalLibraries g_pkg_descr
 
   -- Some sanity checks related to dynamic/static linking.
@@ -858,13 +1242,36 @@ finalizeAndConfigurePackage cfg lbc0 g_pkg_descr comp platform enabled = do
 
   let
     promisedDepsSet = mkPromisedDepsSet (configPromisedDependencies cfg)
-    pkg_info =
-      PackageInfo
+  return
+    ( allConstraints
+    , PackageInfo
         { internalPackageSet
         , promisedDepsSet
         , installedPackageSet
         , requiredDepsMap
         }
+    )
+
+finalizePackageDescription
+  :: VerbosityHandles
+  -> ConfigFlags
+  -> GenericPackageDescription
+  -> Compiler
+  -> Platform
+  -> ComponentRequestedSpec
+  -> [PackageVersionConstraint]
+  -> PackageInfo
+  -> IO (PackageDBStack, PackageDescription, FlagAssignment)
+finalizePackageDescription verbHandles cfg g_pkg_descr comp platform enabled allConstraints pkgInfo = do
+  let common = configCommonFlags cfg
+      verbosity = mkVerbosity verbHandles (fromFlag $ setupVerbosity common)
+
+  -- What package database(s) to use
+  let packageDbs :: PackageDBStack
+      packageDbs =
+        interpretPackageDbFlags
+          (fromFlagOrDefault True (configUserInstall cfg))
+          (configPackageDBs cfg)
 
   -- pkg_descr:   The resolved package description, that does not contain any
   --              conditionals, because we have an assignment for
@@ -887,7 +1294,7 @@ finalizeAndConfigurePackage cfg lbc0 g_pkg_descr comp platform enabled = do
   ( pkg_descr0 :: PackageDescription
     , flags :: FlagAssignment
     ) <-
-    configureFinalizedPackage
+    finalizePackageDescription2
       verbosity
       cfg
       enabled
@@ -897,27 +1304,12 @@ finalizeAndConfigurePackage cfg lbc0 g_pkg_descr comp platform enabled = do
           (fromFlagOrDefault False (configExactConfiguration cfg))
           (fromFlagOrDefault False (configAllowDependingOnPrivateLibs cfg))
           (packageName g_pkg_descr)
-          installedPackageSet
-          internalPackageSet
-          promisedDepsSet
-          requiredDepsMap
+          pkgInfo
       )
       comp
       platform
       g_pkg_descr
-
-  (lbc, pbd) <-
-    configurePackage
-      cfg
-      lbc0
-      pkg_descr0
-      flags
-      enabled
-      comp
-      platform
-      programDb0
-      packageDbs
-  return (lbc, pbd, pkg_info)
+  return (packageDbs, pkg_descr0, flags)
 
 addExtraIncludeLibDirsFromConfigFlags
   :: PackageDescription -> ConfigFlags -> PackageDescription
@@ -933,31 +1325,31 @@ addExtraIncludeLibDirsFromConfigFlags pkg_descr cfg =
         l
           { libBuildInfo =
               libBuildInfo l
-                `mappend` extraBi
+                <> extraBi
           }
       modifyExecutable e =
         e
           { buildInfo =
               buildInfo e
-                `mappend` extraBi
+                <> extraBi
           }
       modifyForeignLib f =
         f
           { foreignLibBuildInfo =
               foreignLibBuildInfo f
-                `mappend` extraBi
+                <> extraBi
           }
       modifyTestsuite t =
         t
           { testBuildInfo =
               testBuildInfo t
-                `mappend` extraBi
+                <> extraBi
           }
       modifyBenchmark b =
         b
           { benchmarkBuildInfo =
               benchmarkBuildInfo b
-                `mappend` extraBi
+                <> extraBi
           }
    in pkg_descr
         { library = modifyLib `fmap` library pkg_descr
@@ -969,12 +1361,13 @@ addExtraIncludeLibDirsFromConfigFlags pkg_descr cfg =
         }
 
 finalCheckPackage
-  :: GenericPackageDescription
+  :: VerbosityHandles
+  -> GenericPackageDescription
   -> LBC.PackageBuildDescr
   -> HookedBuildInfo
-  -> PackageInfo
-  -> IO ([PreExistingComponent], [PromisedComponent])
+  -> IO ()
 finalCheckPackage
+  verbHandles
   g_pkg_descr
   ( LBC.PackageBuildDescr
       { configFlags = cfg
@@ -984,22 +1377,19 @@ finalCheckPackage
       , componentEnabledSpec = enabled
       }
     )
-  hookedBuildInfo
-  (PackageInfo{internalPackageSet, promisedDepsSet, installedPackageSet, requiredDepsMap}) =
+  hookedBuildInfo =
     do
-      let verbosity = fromFlag (configVerbosity cfg)
-          use_external_internal_deps =
-            case enabled of
-              OneComponentRequestedSpec{} -> True
-              ComponentRequestedSpec{} -> False
+      let common = configCommonFlags cfg
+          verbosity = mkVerbosity verbHandles (fromFlag $ setupVerbosity common)
+          pkgRoot =
+            interpretSymbolicPath
+              (flagToMaybe $ setupWorkingDir common)
+              (sameDirectory :: SymbolicPath Pkg (Dir Pkg))
 
-      let cabalFileDir =
-            maybe "." takeDirectory $
-              flagToMaybe (configCabalFilePath cfg)
       checkCompilerProblems verbosity comp pkg_descr enabled
       checkPackageProblems
         verbosity
-        cabalFileDir
+        pkgRoot
         g_pkg_descr
         (updatePackageDescription hookedBuildInfo pkg_descr)
       -- NB: we apply the HookedBuildInfo to check it is valid,
@@ -1010,70 +1400,39 @@ finalCheckPackage
       -- Check languages and extensions
       -- TODO: Move this into a helper function.
       let langlist =
-            nub $
-              catMaybes $
-                map
-                  defaultLanguage
-                  (enabledBuildInfos pkg_descr enabled)
+            ordNub $
+              mapMaybe defaultLanguage (enabledBuildInfos pkg_descr enabled)
       let langs = unsupportedLanguages comp langlist
-      when (not (null langs)) $
+      unless (null langs) $
         dieWithException verbosity $
-          UnsupportedLanguages (packageId g_pkg_descr) (compilerId comp) (map prettyShow langs)
+          UnsupportedLanguages (packageId pkg_descr) (compilerId comp) (map prettyShow langs)
       let extlist =
-            nub $
+            ordNub $
               concatMap
                 allExtensions
                 (enabledBuildInfos pkg_descr enabled)
       let exts = unsupportedExtensions comp extlist
-      when (not (null exts)) $
+      unless (null exts) $
         dieWithException verbosity $
-          UnsupportedLanguageExtension (packageId g_pkg_descr) (compilerId comp) (map prettyShow exts)
+          UnsupportedLanguageExtension (packageId pkg_descr) (compilerId comp) (map prettyShow exts)
 
       -- Check foreign library build requirements
       let flibs = [flib | CFLib flib <- enabledComponents pkg_descr enabled]
       let unsupportedFLibs = unsupportedForeignLibs comp compPlatform flibs
-      when (not (null unsupportedFLibs)) $
+      unless (null unsupportedFLibs) $
         dieWithException verbosity $
           CantFindForeignLibraries unsupportedFLibs
 
-      -- The list of 'InstalledPackageInfo' recording the selected
-      -- dependencies on external packages.
-      --
-      -- Invariant: For any package name, there is at most one package
-      -- in externalPackageDeps which has that name.
-      --
-      -- NB: The dependency selection is global over ALL components
-      -- in the package (similar to how allConstraints and
-      -- requiredDepsMap are global over all components).  In particular,
-      -- if *any* component (post-flag resolution) has an unsatisfiable
-      -- dependency, we will fail.  This can sometimes be undesirable
-      -- for users, see #1786 (benchmark conflicts with executable),
-      --
-      -- In the presence of Backpack, these package dependencies are
-      -- NOT complete: they only ever include the INDEFINITE
-      -- dependencies.  After we apply an instantiation, we'll get
-      -- definite references which constitute extra dependencies.
-      -- (Why not have cabal-install pass these in explicitly?
-      -- For one it's deterministic; for two, we need to associate
-      -- them with renamings which would require a far more complicated
-      -- input scheme than what we have today.)
-      configureDependencies
-        verbosity
-        use_external_internal_deps
-        internalPackageSet
-        promisedDepsSet
-        installedPackageSet
-        requiredDepsMap
-        pkg_descr
-        enabled
-
 configureComponents
-  :: LBC.LocalBuildConfig
+  :: VerbosityHandles
+  -> LBC.LocalBuildConfig
   -> LBC.PackageBuildDescr
-  -> PackageInfo
-  -> ([PreExistingComponent], [PromisedComponent])
+  -> InstalledPackageIndex
+  -> Map (PackageName, ComponentName) PromisedComponent
+  -> ([PreExistingComponent], [ConfiguredPromisedComponent])
   -> IO LocalBuildInfo
 configureComponents
+  verbHandles
   lbc@(LBC.LocalBuildConfig{withPrograms = programDb})
   pbd0@( LBC.PackageBuildDescr
           { configFlags = cfg
@@ -1082,10 +1441,12 @@ configureComponents
           , componentEnabledSpec = enabled
           }
         )
-  (PackageInfo{promisedDepsSet, installedPackageSet})
+  installedPackageSet
+  promisedDepsSet
   externalPkgDeps =
     do
-      let verbosity = fromFlag (configVerbosity cfg)
+      let common = configCommonFlags cfg
+          verbosity = mkVerbosity verbHandles (fromFlag $ setupVerbosity common)
           use_external_internal_deps =
             case enabled of
               OneComponentRequestedSpec{} -> True
@@ -1140,7 +1501,9 @@ configureComponents
           extraCoverageUnitIds = case enabled of
             -- Whole package configure, add package libs
             ComponentRequestedSpec{} -> mapMaybe mbCompUnitId buildComponents
-            -- Component configure, no need to do anything
+            -- Component configure, no need to do anything since
+            -- extra-coverage-for will be passed for all other components that
+            -- should be covered.
             OneComponentRequestedSpec{} -> []
           mbCompUnitId LibComponentLocalBuildInfo{componentUnitId} = Just componentUnitId
           mbCompUnitId _ = Nothing
@@ -1164,6 +1527,9 @@ configureComponents
 
       when (LBC.relocatable $ LBC.withBuildOptions lbc) $
         checkRelocatable verbosity pkg_descr lbi
+
+      when (LBC.withDynExe $ LBC.withBuildOptions lbc) $
+        checkSharedExes verbosity lbi
 
       -- TODO: This is not entirely correct, because the dirs may vary
       -- across libraries/executables
@@ -1216,6 +1582,7 @@ configureComponents
       dirinfo "Executables" (bindir dirs) (bindir relative)
       dirinfo "Libraries" (libdir dirs) (libdir relative)
       dirinfo "Dynamic Libraries" (dynlibdir dirs) (dynlibdir relative)
+      dirinfo "Bytecode Libraries" (bytecodelibdir dirs) (bytecodelibdir relative)
       dirinfo "Private executables" (libexecdir dirs) (libexecdir relative)
       dirinfo "Data files" (datadir dirs) (datadir relative)
       dirinfo "Documentation" (docdir dirs) (docdir relative)
@@ -1228,22 +1595,23 @@ configureComponents
 
       return lbi
 
-mkPromisedDepsSet :: [GivenComponent] -> Map (PackageName, ComponentName) ComponentId
-mkPromisedDepsSet comps = Map.fromList [((pn, CLibName ln), cid) | GivenComponent pn ln cid <- comps]
+mkPromisedDepsSet :: [PromisedComponent] -> Map (PackageName, ComponentName) PromisedComponent
+mkPromisedDepsSet comps = Map.fromList [((packageName pn, CLibName ln), p) | p@(PromisedComponent pn ln _) <- comps]
 
 -- | Adds the extra program paths from the flags provided to @configure@ as
 -- well as specified locations for certain known programs and their default
 -- arguments.
-mkProgramDb :: ConfigFlags -> ProgramDb -> IO ProgramDb
-mkProgramDb cfg initialProgramDb = do
+mkProgramDb :: VerbosityHandles -> ConfigFlags -> ProgramDb -> IO ProgramDb
+mkProgramDb verbHandles cfg initialProgramDb = do
   programDb <-
     modifyProgramSearchPath (getProgramSearchPath initialProgramDb ++) -- We need to have the paths to programs installed by build-tool-depends before all other paths
-      <$> prependProgramSearchPath (fromFlagOrDefault normal (configVerbosity cfg)) searchpath initialProgramDb
+      <$> prependProgramSearchPath verbosity searchpath [] initialProgramDb
   pure
     . userSpecifyArgss (configProgramArgs cfg)
     . userSpecifyPaths (configProgramPaths cfg)
     $ programDb
   where
+    verbosity = mkVerbosity verbHandles $ fromFlagOrDefault normal (configVerbosity cfg)
     searchpath = fromNubList (configProgramPathExtra cfg)
 
 -- Note. We try as much as possible to _prepend_ rather than postpend the extra-prog-path
@@ -1296,7 +1664,7 @@ checkExactConfiguration verbosity pkg_descr0 cfg =
     let cmdlineFlags = map fst (unFlagAssignment (configConfigurationsFlags cfg))
         allFlags = map flagName . genPackageFlags $ pkg_descr0
         diffFlags = allFlags \\ cmdlineFlags
-    when (not . null $ diffFlags) $
+    unless (null diffFlags) $
       dieWithException verbosity $
         FlagsNotSpecified diffFlags
 
@@ -1328,23 +1696,19 @@ dependencySatisfiable
   -> Bool
   -- ^ allow depending on private libs?
   -> PackageName
-  -> InstalledPackageIndex
-  -- ^ installed set
-  -> Set LibraryName
-  -- ^ library components
-  -> Map (PackageName, ComponentName) ComponentId
-  -> Map (PackageName, ComponentName) InstalledPackageInfo
-  -- ^ required dependencies
-  -> (Dependency -> Bool)
+  -> PackageInfo
+  -> (Dependency -> DependencySatisfaction)
 dependencySatisfiable
   use_external_internal_deps
   exact_config
   allow_private_deps
   pn
-  installedPackageSet
-  packageLibraries
-  promisedDeps
-  requiredDepsMap
+  PackageInfo
+    { internalPackageSet = packageLibraries
+    , promisedDepsSet = promisedDeps
+    , installedPackageSet
+    , requiredDepsMap
+    }
   (Dependency depName vr sublibs)
     | exact_config =
         -- When we're given '--exact-configuration', we assume that all
@@ -1361,16 +1725,14 @@ dependencySatisfiable
             internalDepSatisfiable
           else -- Backward compatibility for the old sublibrary syntax
 
-            ( sublibs == mainLibSet
-                && Map.member
-                  ( pn
-                  , CLibName $
-                      LSubLibName $
-                        packageNameToUnqualComponentName depName
-                  )
-                  requiredDepsMap
-            )
-              || all visible sublibs
+            let depComponentName =
+                  CLibName $ LSubLibName $ packageNameToUnqualComponentName depName
+                invisibleLibraries = NES.filter (not . visible) sublibs
+             in if sublibs == mainLibSet && Map.member (pn, depComponentName) requiredDepsMap
+                  then Satisfied
+                  else case nonEmpty $ Set.toList invisibleLibraries of
+                    Nothing -> Satisfied
+                    Just invisibleLibraries' -> Unsatisfied $ MissingLibrary invisibleLibraries'
     | isInternalDep =
         if use_external_internal_deps
           then -- When we are doing per-component configure, we now need to
@@ -1387,12 +1749,31 @@ dependencySatisfiable
       isInternalDep = pn == depName
 
       depSatisfiable =
-        not . null $ PackageIndex.lookupDependency installedPackageSet depName vr
+        let allVersions = PackageIndex.lookupPackageName installedPackageSet depName
+            eligibleVersions =
+              [ version
+              | (version, _infos) <- PackageIndex.eligibleDependencies allVersions
+              ]
+         in if null $ PackageIndex.matchingDependencies vr allVersions
+              then
+                if null eligibleVersions
+                  then Unsatisfied MissingPackage
+                  else Unsatisfied $ WrongVersion eligibleVersions
+              else Satisfied
 
       internalDepSatisfiable =
-        Set.isSubsetOf (NES.toSet sublibs) packageLibraries
+        let missingLibraries = NES.toSet sublibs `Set.difference` packageLibraries
+         in case nonEmpty $ Set.toList missingLibraries of
+              Nothing -> Satisfied
+              Just missingLibraries' -> Unsatisfied $ MissingLibrary missingLibraries'
+
       internalDepSatisfiableExternally =
-        all (\ln -> not $ null $ PackageIndex.lookupInternalDependency installedPackageSet pn vr ln) sublibs
+        -- TODO: Might need to propagate information on which versions _are_ available, if any...
+        let missingLibraries =
+              NES.filter (null . PackageIndex.lookupInternalDependency installedPackageSet pn vr) sublibs
+         in case nonEmpty $ Set.toList missingLibraries of
+              Nothing -> Satisfied
+              Just missingLibraries' -> Unsatisfied $ MissingLibrary missingLibraries'
 
       -- Check whether a library exists and is visible.
       -- We don't disambiguate between dependency on non-existent or private
@@ -1422,19 +1803,19 @@ dependencySatisfiable
 -- | Finalize a generic package description.
 --
 -- The workhorse is 'finalizePD'.
-configureFinalizedPackage
+finalizePackageDescription2
   :: Verbosity
   -> ConfigFlags
   -> ComponentRequestedSpec
   -> [PackageVersionConstraint]
-  -> (Dependency -> Bool)
+  -> (Dependency -> DependencySatisfaction)
   -- ^ tests if a dependency is satisfiable.
   -- Might say it's satisfiable even when not.
   -> Compiler
   -> Platform
   -> GenericPackageDescription
   -> IO (PackageDescription, FlagAssignment)
-configureFinalizedPackage
+finalizePackageDescription2
   verbosity
   cfg
   enabled
@@ -1490,25 +1871,17 @@ checkCompilerProblems verbosity comp pkg_descr enabled = do
     $ dieWithException verbosity CompilerDoesn'tSupportBackpack
 
 -- | Select dependencies for the package.
-configureDependencies
+selectDependencies
   :: Verbosity
   -> UseExternalInternalDeps
-  -> Set LibraryName
-  -> Map (PackageName, ComponentName) ComponentId
-  -> InstalledPackageIndex
-  -- ^ installed packages
-  -> Map (PackageName, ComponentName) InstalledPackageInfo
-  -- ^ required deps
+  -> PackageInfo
   -> PackageDescription
   -> ComponentRequestedSpec
-  -> IO ([PreExistingComponent], [PromisedComponent])
-configureDependencies
+  -> IO ([PreExistingComponent], [ConfiguredPromisedComponent])
+selectDependencies
   verbosity
   use_external_internal_deps
-  packageLibraries
-  promisedDeps
-  installedPackageSet
-  requiredDepsMap
+  pkgInfo
   pkg_descr
   enableSpec = do
     let failedDeps :: [FailedDependency]
@@ -1516,15 +1889,12 @@ configureDependencies
         (failedDeps, allPkgDeps) =
           partitionEithers $
             concat
-              [ fmap (\s -> (dep, s)) <$> status
+              [ fmap (dep,) <$> status
               | dep <- enabledBuildDepends pkg_descr enableSpec
               , let status =
                       selectDependency
                         (package pkg_descr)
-                        packageLibraries
-                        promisedDeps
-                        installedPackageSet
-                        requiredDepsMap
+                        pkgInfo
                         use_external_internal_deps
                         dep
               ]
@@ -1569,7 +1939,7 @@ configureCoverage verbosity cfg comp = do
       tryLibCoverage =
         fromFlagOrDefault
           tryExeCoverage
-          (mappend (configCoverage cfg) (configLibCoverage cfg))
+          (configCoverage cfg <> configLibCoverage cfg)
   -- TODO: Should we also enforce something here on that --coverage-for cannot
   -- include indefinite components or instantiations?
   if coverageSupported comp
@@ -1606,7 +1976,7 @@ configureCoverage verbosity cfg comp = do
 --
 -- Note that @--enable-executable-profiling@ also affects profiling
 -- of benchmarks and (non-detailed) test suites.
-computeEffectiveProfiling :: ConfigFlags -> (Bool {- lib -}, Bool {- exe -})
+computeEffectiveProfiling :: ConfigFlags -> (Bool {- lib vanilla-}, Bool {- lib shared -}, Bool {- exe -})
 computeEffectiveProfiling cfg =
   -- The --profiling flag sets the default for both libs and exes,
   -- but can be overridden by --library-profiling, or the old deprecated
@@ -1614,15 +1984,20 @@ computeEffectiveProfiling cfg =
   --
   -- The --profiling-detail and --library-profiling-detail flags behave
   -- similarly
-  let tryExeProfiling =
+  let dynamicExe = fromFlagOrDefault False (configDynExe cfg)
+      tryExeProfiling =
         fromFlagOrDefault
           False
-          (mappend (configProf cfg) (configProfExe cfg))
+          (configProf cfg <> configProfExe cfg)
       tryLibProfiling =
         fromFlagOrDefault
-          tryExeProfiling
-          (mappend (configProf cfg) (configProfLib cfg))
-   in (tryLibProfiling, tryExeProfiling)
+          (tryExeProfiling && not dynamicExe)
+          (configProfLib cfg)
+      tryLibProfilingShared =
+        fromFlagOrDefault
+          (tryExeProfiling && dynamicExe)
+          (configProfShared cfg)
+   in (tryLibProfiling, tryLibProfilingShared, tryExeProfiling)
 
 -- | Select and apply profiling settings for the build based on the
 -- 'ConfigFlags' and 'Compiler'.
@@ -1632,7 +2007,7 @@ configureProfiling
   -> Compiler
   -> IO (LBC.BuildOptions -> LBC.BuildOptions)
 configureProfiling verbosity cfg comp = do
-  let (tryLibProfiling, tryExeProfiling) = computeEffectiveProfiling cfg
+  let (tryLibProfiling, tryLibProfilingShared, tryExeProfiling) = computeEffectiveProfiling cfg
 
       tryExeProfileLevel =
         fromFlagOrDefault
@@ -1641,10 +2016,7 @@ configureProfiling verbosity cfg comp = do
       tryLibProfileLevel =
         fromFlagOrDefault
           ProfDetailDefault
-          ( mappend
-              (configProfDetail cfg)
-              (configProfLibDetail cfg)
-          )
+          (configProfDetail cfg <> configProfLibDetail cfg)
 
       checkProfileLevel (ProfDetailOther other) = do
         warn
@@ -1659,8 +2031,8 @@ configureProfiling verbosity cfg comp = do
         return ProfDetailDefault
       checkProfileLevel other = return other
 
-  (exeProfWithoutLibProf, applyProfiling) <-
-    if profilingSupported comp
+  applyProfiling <-
+    if profilingSupported comp && (profilingVanillaSupportedOrUnknown comp || profilingDynamicSupportedOrUnknown comp)
       then do
         exeLevel <- checkProfileLevel tryExeProfileLevel
         libLevel <- checkProfileLevel tryLibProfileLevel
@@ -1671,11 +2043,46 @@ configureProfiling verbosity cfg comp = do
                 , LBC.withProfExe = tryExeProfiling
                 , LBC.withProfExeDetail = exeLevel
                 }
-        return (tryExeProfiling && not tryLibProfiling, apply)
+        let compilerSupportsProfilingDynamic = profilingDynamicSupportedOrUnknown comp
+        apply2 <-
+          if compilerSupportsProfilingDynamic
+            then -- Case 1: We support profiled shared libraries so turn on shared profiling
+            -- libraries if the user asked for it.
+            return $ \buildOptions -> apply buildOptions{LBC.withProfLibShared = tryLibProfilingShared}
+            else -- Case 2: Compiler doesn't support profiling shared so turn them off
+            do
+              -- If we wanted to enable profiling shared libraries.. tell the
+              -- user we couldn't.
+              when (profilingVanillaSupportedOrUnknown comp && tryLibProfilingShared) $
+                warn
+                  verbosity
+                  ( "The compiler "
+                      ++ showCompilerId comp
+                      ++ " does not support "
+                      ++ "profiling shared objects. Static profiled objects "
+                      ++ "will be built."
+                  )
+              return $ \buildOptions ->
+                let original_options = apply buildOptions
+                 in original_options
+                      { LBC.withProfLibShared = False
+                      , LBC.withProfLib = profilingVanillaSupportedOrUnknown comp && (tryLibProfilingShared || LBC.withProfLib original_options)
+                      , LBC.withDynExe = if LBC.withProfExe original_options then False else LBC.withDynExe original_options
+                      }
+
+        when (tryExeProfiling && not (tryLibProfiling || tryLibProfilingShared)) $ do
+          warn
+            verbosity
+            ( "Executables will be built with profiling, but library "
+                ++ "profiling is disabled. Linking will fail if any executables "
+                ++ "depend on the library."
+            )
+        return apply2
       else do
         let apply buildOptions =
               buildOptions
                 { LBC.withProfLib = False
+                , LBC.withProfLibShared = False
                 , LBC.withProfLibDetail = ProfDetailNone
                 , LBC.withProfExe = False
                 , LBC.withProfExeDetail = ProfDetailNone
@@ -1688,15 +2095,7 @@ configureProfiling verbosity cfg comp = do
                 ++ " does not support "
                 ++ "profiling. Profiling has been disabled."
             )
-        return (False, apply)
-
-  when exeProfWithoutLibProf $
-    warn
-      verbosity
-      ( "Executables will be built with profiling, but library "
-          ++ "profiling is disabled. Linking will fail if any executables "
-          ++ "depend on the library."
-      )
+        return apply
 
   return applyProfiling
 
@@ -1735,26 +2134,18 @@ data DependencyResolution
     -- we need to build packages in the interactive ghci session, no matter
     -- whether they have been built before.
     -- Building them in the configure phase is then redundant and costs time.
-    PromisedDependency PromisedComponent
+    PromisedDependency ConfiguredPromisedComponent
   | -- | An internal dependency ('PackageId' should be a library name)
     -- which we are going to have to build.  (The
     -- 'PackageId' here is a hack to get a modest amount of
-    -- polymorphism out of the 'Package' typeclass.)
+    -- polymorphism out of the Pkg' typeclass.)
     InternalDependency PackageId
 
 -- | Test for a package dependency and record the version we have installed.
 selectDependency
   :: PackageId
   -- ^ Package id of current package
-  -> Set LibraryName
-  -- ^ package libraries
-  -> Map (PackageName, ComponentName) ComponentId
-  -- ^ Set of components that are promised, i.e. are not installed already. See 'PromisedDependency' for more details.
-  -> InstalledPackageIndex
-  -- ^ Installed packages
-  -> Map (PackageName, ComponentName) InstalledPackageInfo
-  -- ^ Packages for which we have been given specific deps to
-  -- use
+  -> PackageInfo
   -> UseExternalInternalDeps
   -- ^ Are we configuring a
   -- single component?
@@ -1762,10 +2153,13 @@ selectDependency
   -> [Either FailedDependency DependencyResolution]
 selectDependency
   pkgid
-  internalIndex
-  promisedIndex
-  installedIndex
-  requiredDepsMap
+  ( PackageInfo
+      { internalPackageSet = internalIndex
+      , promisedDepsSet = promisedIndex
+      , installedPackageSet = installedIndex
+      , requiredDepsMap
+      }
+    )
   use_external_internal_deps
   (Dependency dep_pkgname vr libs) =
     -- If the dependency specification matches anything in the internal package
@@ -1800,8 +2194,8 @@ selectDependency
       -- We have to look it up externally
       do_external_external :: LibraryName -> Either FailedDependency DependencyResolution
       do_external_external lib
-        | Just cid <- Map.lookup (dep_pkgname, CLibName lib) promisedIndex =
-            return $ PromisedDependency (PromisedComponent dep_pkgname (AnnotatedId currentCabalId (CLibName lib) cid))
+        | Just pc <- Map.lookup (dep_pkgname, CLibName lib) promisedIndex =
+            return $ PromisedDependency (ConfiguredPromisedComponent dep_pkgname (AnnotatedId (promisedComponentPackage pc) (CLibName lib) (promisedComponentId pc)))
       do_external_external lib = do
         ipi <- case Map.lookup (dep_pkgname, CLibName lib) requiredDepsMap of
           -- If we know the exact pkg to use, then use it.
@@ -1814,8 +2208,8 @@ selectDependency
 
       do_external_internal :: LibraryName -> Either FailedDependency DependencyResolution
       do_external_internal lib
-        | Just cid <- Map.lookup (dep_pkgname, CLibName lib) promisedIndex =
-            return $ PromisedDependency (PromisedComponent dep_pkgname (AnnotatedId currentCabalId (CLibName lib) cid))
+        | Just pc <- Map.lookup (dep_pkgname, CLibName lib) promisedIndex =
+            return $ PromisedDependency (ConfiguredPromisedComponent dep_pkgname (AnnotatedId (promisedComponentPackage pc) (CLibName lib) (promisedComponentId pc)))
       do_external_internal lib = do
         ipi <- case Map.lookup (dep_pkgname, CLibName lib) requiredDepsMap of
           -- If we know the exact pkg to use, then use it.
@@ -1859,11 +2253,12 @@ reportFailedDependencies verbosity failed =
 getInstalledPackages
   :: Verbosity
   -> Compiler
-  -> PackageDBStack
+  -> Maybe (SymbolicPath CWD (Dir from))
+  -> PackageDBStackX (SymbolicPath from (Dir PkgDB))
   -- ^ The stack of package databases.
   -> ProgramDb
   -> IO InstalledPackageIndex
-getInstalledPackages verbosity comp packageDBs progdb = do
+getInstalledPackages verbosity comp mbWorkDir packageDBs progdb = do
   when (null packageDBs) $
     dieWithException verbosity NoPackageDatabaseSpecified
 
@@ -1871,15 +2266,13 @@ getInstalledPackages verbosity comp packageDBs progdb = do
   -- do not check empty packagedbs (ghc-pkg would error out)
   packageDBs' <- filterM packageDBExists packageDBs
   case compilerFlavor comp of
-    GHC -> GHC.getInstalledPackages verbosity comp packageDBs' progdb
-    GHCJS -> GHCJS.getInstalledPackages verbosity packageDBs' progdb
-    UHC -> UHC.getInstalledPackages verbosity comp packageDBs' progdb
-    HaskellSuite{} ->
-      HaskellSuite.getInstalledPackages verbosity packageDBs' progdb
+    GHC -> GHC.getInstalledPackages verbosity mbWorkDir packageDBs' progdb
+    UHC -> UHC.getInstalledPackages verbosity comp mbWorkDir packageDBs' progdb
     flv ->
       dieWithException verbosity $ HowToFindInstalledPackages flv
   where
-    packageDBExists (SpecificPackageDB path) = do
+    packageDBExists (SpecificPackageDB path0) = do
+      let path = interpretSymbolicPath mbWorkDir path0
       exists <- doesPathExist path
       unless exists $
         warn verbosity $
@@ -1900,31 +2293,32 @@ getInstalledPackages verbosity comp packageDBs progdb = do
 getPackageDBContents
   :: Verbosity
   -> Compiler
+  -> Maybe (SymbolicPath CWD (Dir Pkg))
   -> PackageDB
   -> ProgramDb
   -> IO InstalledPackageIndex
-getPackageDBContents verbosity comp packageDB progdb = do
+getPackageDBContents verbosity comp mbWorkDir packageDB progdb = do
   info verbosity "Reading installed packages..."
   case compilerFlavor comp of
-    GHC -> GHC.getPackageDBContents verbosity packageDB progdb
-    GHCJS -> GHCJS.getPackageDBContents verbosity packageDB progdb
-    -- For other compilers, try to fall back on 'getInstalledPackages'.
-    _ -> getInstalledPackages verbosity comp [packageDB] progdb
+    GHC -> GHC.getPackageDBContents verbosity mbWorkDir packageDB progdb
+    _ -> getInstalledPackages verbosity comp mbWorkDir [packageDB] progdb
 
 -- | A set of files (or directories) that can be monitored to detect when
 -- there might have been a change in the installed packages.
 getInstalledPackagesMonitorFiles
   :: Verbosity
   -> Compiler
-  -> PackageDBStack
+  -> Maybe (SymbolicPath CWD ('Dir from))
+  -> PackageDBStackS from
   -> ProgramDb
   -> Platform
   -> IO [FilePath]
-getInstalledPackagesMonitorFiles verbosity comp packageDBs progdb platform =
+getInstalledPackagesMonitorFiles verbosity comp mbWorkDir packageDBs progdb platform =
   case compilerFlavor comp of
     GHC ->
       GHC.getInstalledPackagesMonitorFiles
         verbosity
+        mbWorkDir
         platform
         progdb
         packageDBs
@@ -1938,7 +2332,7 @@ getInstalledPackagesMonitorFiles verbosity comp packageDBs progdb platform =
 -- | Looks up the 'InstalledPackageInfo' of the given 'UnitId's from the
 -- 'PackageDBStack' in the 'LocalBuildInfo'.
 getInstalledPackagesById
-  :: (Exception (VerboseException exception), Show exception, Typeable exception)
+  :: Exception (VerboseException exception)
   => Verbosity
   -> LocalBuildInfo
   -> (UnitId -> exception)
@@ -1948,8 +2342,9 @@ getInstalledPackagesById
   -> [UnitId]
   -- ^ The unit ids to lookup in the installed packages
   -> IO [InstalledPackageInfo]
-getInstalledPackagesById verbosity LocalBuildInfo{compiler = comp, withPackageDB = pkgDb, withPrograms = progDb} mkException unitids = do
-  ipindex <- getInstalledPackages verbosity comp pkgDb progDb
+getInstalledPackagesById verbosity lbi@LocalBuildInfo{compiler = comp, withPackageDB = pkgDb, withPrograms = progDb} mkException unitids = do
+  let mbWorkDir = mbWorkDirLBI lbi
+  ipindex <- getInstalledPackages verbosity comp mbWorkDir pkgDb progDb
   mapM
     ( \uid -> case lookupUnitId ipindex uid of
         Nothing -> dieWithException verbosity (mkException uid)
@@ -1961,7 +2356,7 @@ getInstalledPackagesById verbosity LocalBuildInfo{compiler = comp, withPackageDB
 -- @--global@, @--user@ and @--package-db=global|user|clear|$file@.
 -- This function combines the global/user flag and interprets the package-db
 -- flag into a single package db stack.
-interpretPackageDbFlags :: Bool -> [Maybe PackageDB] -> PackageDBStack
+interpretPackageDbFlags :: Bool -> [Maybe (PackageDBX fp)] -> PackageDBStackX fp
 interpretPackageDbFlags userInstall specificDBs =
   extra initialStack specificDBs
   where
@@ -1994,7 +2389,7 @@ combinedConstraints
       , Map (PackageName, ComponentName) InstalledPackageInfo
       )
 combinedConstraints constraints dependencies installedPackages = do
-  when (not (null badComponentIds)) $
+  unless (null badComponentIds) $
     Left $
       CombinedConstraints (dispDependencies badComponentIds)
 
@@ -2078,55 +2473,77 @@ configureRequiredProgram
   verbosity
   progdb
   (LegacyExeDependency progName verRange) =
-    case lookupKnownProgram progName progdb of
+    case lookupProgramByName progName progdb of
+      Just prog ->
+        -- If the program has already been configured, use it
+        -- (as long as the version is compatible).
+        --
+        -- Not doing so means falling back to the "simpleProgram" path below,
+        -- which might fail if the program has custom logic to find a version
+        -- (such as hsc2hs).
+        let loc = locationPath $ programLocation prog
+         in case programVersion prog of
+              Nothing
+                | verRange == anyVersion ->
+                    return progdb
+                | otherwise ->
+                    dieWithException verbosity $!
+                      UnknownVersionDb (programId prog) verRange loc
+              Just version
+                | withinRange version verRange ->
+                    return progdb
+                | otherwise ->
+                    dieWithException verbosity $!
+                      BadVersionDb (programId prog) version verRange loc
       Nothing ->
-        -- Try to configure it as a 'simpleProgram' automatically
-        --
-        -- There's a bit of a story behind this line.  In old versions
-        -- of Cabal, there were only internal build-tools dependencies.  So the
-        -- behavior in this case was:
-        --
-        --    - If a build-tool dependency was internal, don't do
-        --      any checking.
-        --
-        --    - If it was external, call 'configureRequiredProgram' to
-        --      "configure" the executable.  In particular, if
-        --      the program was not "known" (present in 'ProgramDb'),
-        --      then we would just error.  This was fine, because
-        --      the only way a program could be executed from 'ProgramDb'
-        --      is if some library code from Cabal actually called it,
-        --      and the pre-existing Cabal code only calls known
-        --      programs from 'defaultProgramDb', and so if it
-        --      is calling something else, you have a Custom setup
-        --      script, and in that case you are expected to register
-        --      the program you want to call in the ProgramDb.
-        --
-        -- OK, so that was fine, until I (ezyang, in 2016) refactored
-        -- Cabal to support per-component builds.  In this case, what
-        -- was previously an internal build-tool dependency now became
-        -- an external one, and now previously "internal" dependencies
-        -- are now external.  But these are permitted to exist even
-        -- when they are not previously configured (something that
-        -- can only occur by a Custom script.)
-        --
-        -- So, I decided, "Fine, let's just accept these in any
-        -- case."  Thus this line.  The alternative would have been to
-        -- somehow detect when a build-tools dependency was "internal" (by
-        -- looking at the unflattened package description) but this
-        -- would also be incompatible with future work to support
-        -- external executable dependencies: we definitely cannot
-        -- assume they will be preinitialized in the 'ProgramDb'.
-        configureProgram verbosity (simpleProgram progName) progdb
-      Just prog
-        -- requireProgramVersion always requires the program have a version
-        -- but if the user says "build-depends: foo" ie no version constraint
-        -- then we should not fail if we cannot discover the program version.
-        | verRange == anyVersion -> do
-            (_, progdb') <- requireProgram verbosity prog progdb
-            return progdb'
-        | otherwise -> do
-            (_, _, progdb') <- requireProgramVersion verbosity prog verRange progdb
-            return progdb'
+        -- Otherwise, try to configure it as a 'simpleProgram' automatically
+        case lookupKnownProgram progName progdb of
+          Nothing ->
+            -- There's a bit of a story behind this line.  In old versions
+            -- of Cabal, there were only internal build-tools dependencies.  So the
+            -- behavior in this case was:
+            --
+            --    - If a build-tool dependency was internal, don't do
+            --      any checking.
+            --
+            --    - If it was external, call 'configureRequiredProgram' to
+            --      "configure" the executable.  In particular, if
+            --      the program was not "known" (present in 'ProgramDb'),
+            --      then we would just error.  This was fine, because
+            --      the only way a program could be executed from 'ProgramDb'
+            --      is if some library code from Cabal actually called it,
+            --      and the pre-existing Cabal code only calls known
+            --      programs from 'defaultProgramDb', and so if it
+            --      is calling something else, you have a Custom setup
+            --      script, and in that case you are expected to register
+            --      the program you want to call in the ProgramDb.
+            --
+            -- OK, so that was fine, until I (ezyang, in 2016) refactored
+            -- Cabal to support per-component builds.  In this case, what
+            -- was previously an internal build-tool dependency now became
+            -- an external one, and now previously "internal" dependencies
+            -- are now external.  But these are permitted to exist even
+            -- when they are not previously configured (something that
+            -- can only occur by a Custom script.)
+            --
+            -- So, I decided, "Fine, let's just accept these in any
+            -- case."  Thus this line.  The alternative would have been to
+            -- somehow detect when a build-tools dependency was "internal" (by
+            -- looking at the unflattened package description) but this
+            -- would also be incompatible with future work to support
+            -- external executable dependencies: we definitely cannot
+            -- assume they will be preinitialized in the 'ProgramDb'.
+            configureProgram verbosity (simpleProgram progName) progdb
+          Just prog
+            -- requireProgramVersion always requires the program have a version
+            -- but if the user says "build-depends: foo" ie no version constraint
+            -- then we should not fail if we cannot discover the program version.
+            | verRange == anyVersion -> do
+                (_, progdb') <- requireProgram verbosity prog progdb
+                return progdb'
+            | otherwise -> do
+                (_, _, progdb') <- requireProgramVersion verbosity prog verRange progdb
+                return progdb'
 
 -- -----------------------------------------------------------------------------
 -- Configuring pkg-config package dependencies
@@ -2142,7 +2559,7 @@ configurePkgconfigPackages verbosity pkg_descr progdb enabled
   | otherwise = do
       (_, _, progdb') <-
         requireProgramVersion
-          (lessVerbose verbosity)
+          (modifyVerbosityFlags lessVerbose verbosity)
           pkgConfigProgram
           (orLaterVersion $ mkVersion [0, 9, 0])
           progdb
@@ -2165,7 +2582,7 @@ configurePkgconfigPackages verbosity pkg_descr progdb enabled
     allpkgs = concatMap pkgconfigDepends (enabledBuildInfos pkg_descr enabled)
     pkgconfig =
       getDbProgramOutput
-        (lessVerbose verbosity)
+        (modifyVerbosityFlags lessVerbose verbosity)
         pkgConfigProgram
         progdb
 
@@ -2174,7 +2591,6 @@ configurePkgconfigPackages verbosity pkg_descr progdb enabled
         pkgconfig ["--modversion", pkg]
           `catchIO` (\_ -> dieWithException verbosity $ PkgConfigNotFound pkg versionRequirement)
           `catchExit` (\_ -> dieWithException verbosity $ PkgConfigNotFound pkg versionRequirement)
-      let trim = dropWhile isSpace . dropWhileEnd isSpace
       let v = PkgconfigVersion (toUTF8BS $ trim version)
       if not (withinPkgconfigVersionRange v range)
         then dieWithException verbosity $ BadVersion pkg versionRequirement v
@@ -2195,7 +2611,7 @@ configurePkgconfigPackages verbosity pkg_descr progdb enabled
     -- Adds pkgconfig dependencies to the build info for a component
     addPkgConfigBI compBI setCompBI comp = do
       bi <- pkgconfigBuildInfo (pkgconfigDepends (compBI comp))
-      return $ setCompBI comp (compBI comp `mappend` bi)
+      return $ setCompBI comp (compBI comp <> bi)
 
     -- Adds pkgconfig dependencies to the build info for a library
     addPkgConfigBILib = addPkgConfigBI libBuildInfo $
@@ -2216,7 +2632,7 @@ configurePkgconfigPackages verbosity pkg_descr progdb enabled
     pkgconfigBuildInfo :: [PkgconfigDependency] -> IO BuildInfo
     pkgconfigBuildInfo [] = return mempty
     pkgconfigBuildInfo pkgdeps = do
-      let pkgs = nub [prettyShow pkg | PkgconfigDependency pkg _ <- pkgdeps]
+      let pkgs = ordNub [prettyShow pkg | PkgconfigDependency pkg _ <- pkgdeps]
       ccflags <- pkgconfig ("--cflags" : pkgs)
       ldflags <- pkgconfig ("--libs" : pkgs)
       ldflags_static <- pkgconfig ("--libs" : "--static" : pkgs)
@@ -2237,37 +2653,44 @@ ccLdOptionsBuildInfo cflags ldflags ldflags_static =
   let (includeDirs', cflags') = partition ("-I" `isPrefixOf`) cflags
       (extraLibs', ldflags') = partition ("-l" `isPrefixOf`) ldflags
       (extraLibDirs', ldflags'') = partition ("-L" `isPrefixOf`) ldflags'
-      (extraLibsStatic') = filter ("-l" `isPrefixOf`) ldflags_static
-      (extraLibDirsStatic') = filter ("-L" `isPrefixOf`) ldflags_static
+      extraLibsStatic' = filter ("-l" `isPrefixOf`) ldflags_static
+      extraLibDirsStatic' = filter ("-L" `isPrefixOf`) ldflags_static
    in mempty
-        { includeDirs = map (drop 2) includeDirs'
-        , extraLibs = map (drop 2) extraLibs'
-        , extraLibDirs = map (drop 2) extraLibDirs'
-        , extraLibsStatic = map (drop 2) extraLibsStatic'
-        , extraLibDirsStatic = map (drop 2) extraLibDirsStatic'
-        , ccOptions = cflags'
-        , ldOptions = ldflags''
+        { includeDirs = map (makeSymbolicPath . drop 2) includeDirs'
+        , extraLibs = map (Text.pack . drop 2) extraLibs'
+        , extraLibDirs = map (makeSymbolicPath . drop 2) extraLibDirs'
+        , extraLibsStatic = map (Text.pack . drop 2) extraLibsStatic'
+        , extraLibDirsStatic = map (makeSymbolicPath . drop 2) extraLibDirsStatic'
+        , ccOptions = map Text.pack cflags'
+        , ldOptions = map Text.pack ldflags''
         }
 
 -- -----------------------------------------------------------------------------
 -- Determining the compiler details
 
 configCompilerAuxEx
-  :: ConfigFlags
+  :: VerbosityHandles
+  -> ConfigFlags
   -> IO (Compiler, Platform, ProgramDb)
-configCompilerAuxEx cfg = do
-  programDb <- mkProgramDb cfg defaultProgramDb
+configCompilerAuxEx verbHandles cfg = do
+  programDb <- mkProgramDb verbHandles cfg defaultProgramDb
+  let common = configCommonFlags cfg
+      verbosity = mkVerbosity verbHandles (fromFlag $ setupVerbosity common)
   configCompilerEx
     (flagToMaybe $ configHcFlavor cfg)
     (flagToMaybe $ configHcPath cfg)
     (flagToMaybe $ configHcPkg cfg)
     programDb
-    (fromFlag (configVerbosity cfg))
+    verbosity
 
+-- | Configure the compiler and associated programs such as @hc-pkg@, @haddock@
+-- and toolchain program such as @ar@, @ld@.
 configCompilerEx
   :: Maybe CompilerFlavor
   -> Maybe FilePath
+  -- ^ user-specified @hc@ path (optional)
   -> Maybe FilePath
+  -- ^ user-specified @hc-pkg@ path (optional)
   -> ProgramDb
   -> Verbosity
   -> IO (Compiler, Platform, ProgramDb)
@@ -2275,11 +2698,45 @@ configCompilerEx Nothing _ _ _ verbosity = dieWithException verbosity UnknownCom
 configCompilerEx (Just hcFlavor) hcPath hcPkg progdb verbosity = do
   (comp, maybePlatform, programDb) <- case hcFlavor of
     GHC -> GHC.configure verbosity hcPath hcPkg progdb
-    GHCJS -> GHCJS.configure verbosity hcPath hcPkg progdb
-    UHC -> UHC.configure verbosity hcPath hcPkg progdb
-    HaskellSuite{} -> HaskellSuite.configure verbosity hcPath hcPkg progdb
+    UHC -> UHC.configure verbosity hcPath progdb
+    GHCJS -> dieWithException verbosity GHCJSNotSupported
     _ -> dieWithException verbosity UnknownCompilerException
   return (comp, fromMaybe buildPlatform maybePlatform, programDb)
+
+-- | Configure the compiler ONLY.
+configCompiler
+  :: Maybe CompilerFlavor
+  -> Maybe FilePath
+  -- ^ user-specified @hc@ path (optional)
+  -> ProgramDb
+  -> Verbosity
+  -> IO (Compiler, Platform, ProgramDb)
+configCompiler mbFlavor hcPath progdb verbosity = do
+  (comp, maybePlatform, programDb) <-
+    case mbFlavor of
+      Nothing -> dieWithException verbosity UnknownCompilerException
+      Just hcFlavor ->
+        case hcFlavor of
+          GHC -> GHC.configureCompiler verbosity hcPath progdb
+          UHC -> UHC.configure verbosity hcPath progdb
+          GHCJS -> dieWithException verbosity GHCJSNotSupported
+          _ -> dieWithException verbosity UnknownCompilerException
+  return (comp, fromMaybe buildPlatform maybePlatform, programDb)
+
+-- | Configure programs associated to the compiler, such as @hc-pkg@, @haddock@
+-- and toolchain program such as @ar@, @ld@.
+configCompilerProgDb
+  :: Verbosity
+  -> Compiler
+  -> ProgramDb
+  -- ^ program database containing the compiler
+  -> Maybe FilePath
+  -- ^ user-specified @hc-pkg@ path (optional)
+  -> IO ProgramDb
+configCompilerProgDb verbosity comp hcProgDb hcPkgPath = do
+  case compilerFlavor comp of
+    GHC -> GHC.compilerProgramDb verbosity comp hcProgDb hcPkgPath
+    _ -> return hcProgDb
 
 -- -----------------------------------------------------------------------------
 -- Testing C lib and header dependencies
@@ -2293,16 +2750,15 @@ checkForeignDeps :: PackageDescription -> LocalBuildInfo -> Verbosity -> IO ()
 checkForeignDeps pkg lbi verbosity =
   ifBuildsWith
     allHeaders
-    (commonCcArgs ++ makeLdArgs allLibs) -- I'm feeling
-    -- lucky
+    (commonCcArgs ++ makeLdArgs (map Text.unpack allLibs)) -- I'm feeling lucky
     (return ())
     ( do
         missingLibs <- findMissingLibs
         missingHdr <- findOffendingHdr
-        explainErrors missingHdr missingLibs
+        explainErrors missingHdr (map Text.unpack missingLibs)
     )
   where
-    allHeaders = collectField includes
+    allHeaders = collectField (fmap getSymbolicPath . includes)
     allLibs =
       collectField $
         if withFullyStaticExe lbi
@@ -2318,33 +2774,27 @@ checkForeignDeps pkg lbi verbosity =
     -- in either the generated (most likely by `configure`)
     -- build directory (e.g. `dist/build`) or in the source directory.
     --
-    -- If it exists in both, we'll remove the one in the source
-    -- directory, as the generated should take precedence.
+    -- If it exists in both, issue a warning, because C compilers are
+    -- not guaranteed to pick the correct one and there appears to be
+    -- no way to control which is picked.
     --
-    -- C compilers like to prefer source local relative includes,
-    -- so the search paths provided to the compiler via -I are
-    -- ignored if the included file can be found relative to the
-    -- including file.  As such we need to take drastic measures
-    -- and delete the offending file in the source directory.
     checkDuplicateHeaders = do
-      let relIncDirs = filter (not . isAbsolute) (collectField includeDirs)
+      let relIncDirs = filter (not . isAbsolute) (collectField (fmap getSymbolicPath . includeDirs))
           isHeader = isSuffixOf ".h"
       genHeaders <- for relIncDirs $ \dir ->
         fmap (dir </>) . filter isHeader
-          <$> listDirectory (buildDir lbi </> dir) `catchIO` (\_ -> return [])
+          <$> listDirectory (i (buildDir lbi) </> dir) `catchIO` (\_ -> return [])
       srcHeaders <- for relIncDirs $ \dir ->
         fmap (dir </>) . filter isHeader
-          <$> listDirectory (baseDir lbi </> dir) `catchIO` (\_ -> return [])
+          <$> listDirectory (pkgRoot </> dir) `catchIO` (\_ -> return [])
       let commonHeaders = concat genHeaders `intersect` concat srcHeaders
       for_ commonHeaders $ \hdr -> do
         warn verbosity $
           "Duplicate header found in "
-            ++ (buildDir lbi </> hdr)
+            ++ (getSymbolicPath (buildDir lbi) </> hdr)
             ++ " and "
-            ++ (baseDir lbi </> hdr)
-            ++ "; removing "
-            ++ (baseDir lbi </> hdr)
-        removeFile (baseDir lbi </> hdr)
+            ++ (pkgRoot </> hdr)
+            ++ ". Which one the C compiler will use is unspecified."
 
     findOffendingHdr =
       ifBuildsWith
@@ -2373,13 +2823,16 @@ checkForeignDeps pkg lbi verbosity =
     findMissingLibs =
       ifBuildsWith
         []
-        (makeLdArgs allLibs)
+        (makeLdArgs $ map Text.unpack allLibs)
         (return [])
-        (filterM (fmap not . libExists) allLibs)
+        (filterM (fmap not . libExists . Text.unpack) allLibs)
 
     libExists lib = builds (makeProgram []) (makeLdArgs [lib])
 
-    baseDir lbi' = fromMaybe "." (takeDirectory <$> cabalFilePath lbi')
+    -- See Note [Symbolic paths] in Distribution.Utils.Path
+    i = interpretSymbolicPathLBI lbi
+    mbWorkDir = mbWorkDirLBI lbi
+    pkgRoot = i (sameDirectory :: SymbolicPath Pkg (Dir Pkg))
 
     commonCppArgs =
       platformDefines lbi
@@ -2387,23 +2840,12 @@ checkForeignDeps pkg lbi verbosity =
         -- fact that the test performed here should be
         -- PER-component (c.f. the "I'm Feeling Lucky"; we
         -- should NOT be glomming everything together.)
-        ++ ["-I" ++ buildDir lbi </> "autogen"]
-        -- `configure' may generate headers in the build directory
-        ++ [ "-I" ++ buildDir lbi </> dir
-           | dir <- ordNub (collectField includeDirs)
-           , not (isAbsolute dir)
+        ++ ["-I" ++ i (buildDir lbi </> makeRelativePathEx "autogen")]
+        ++ [ "-I" ++ i dir
+           | dir <- includeSearchDirs lbi Nothing $ ordNub (collectField includeDirs)
            ]
-        -- we might also reference headers from the
-        -- packages directory.
-        ++ [ "-I" ++ baseDir lbi </> dir
-           | dir <- ordNub (collectField includeDirs)
-           , not (isAbsolute dir)
-           ]
-        ++ [ "-I" ++ dir | dir <- ordNub (collectField includeDirs), isAbsolute dir
-           ]
-        ++ ["-I" ++ baseDir lbi]
-        ++ collectField cppOptions
-        ++ collectField ccOptions
+        ++ map Text.unpack (collectField cppOptions)
+        ++ map Text.unpack (collectField ccOptions)
         ++ [ "-I" ++ dir
            | dir <-
               ordNub
@@ -2414,21 +2856,21 @@ checkForeignDeps pkg lbi verbosity =
                 -- dedupe include dirs of dependencies
                 -- to prevent quadratic blow-up
            ]
-        ++ [ opt
+        ++ [ Text.unpack opt
            | dep <- deps
            , opt <- IPI.ccOptions dep
            ]
 
     commonCcArgs =
       commonCppArgs
-        ++ collectField ccOptions
-        ++ [ opt
+        ++ map Text.unpack (collectField ccOptions)
+        ++ [ Text.unpack opt
            | dep <- deps
            , opt <- IPI.ccOptions dep
            ]
 
     commonLdArgs =
-      [ "-L" ++ dir
+      [ "-L" ++ getSymbolicPath dir
       | dir <-
           ordNub $
             collectField
@@ -2437,7 +2879,7 @@ checkForeignDeps pkg lbi verbosity =
                   else extraLibDirs
               )
       ]
-        ++ collectField ldOptions
+        ++ map Text.unpack (collectField ldOptions)
         ++ [ "-L" ++ dir
            | dir <-
               ordNub
@@ -2461,23 +2903,24 @@ checkForeignDeps pkg lbi verbosity =
     allBi = enabledBuildInfos pkg (componentEnabledSpec lbi)
     deps = PackageIndex.topologicalOrder (installedPkgs lbi)
 
+    builds :: String -> [ProgArg] -> IO Bool
     builds program args =
-      do
-        tempDir <- getTemporaryDirectory
-        withTempFile tempDir ".c" $ \cName cHnd ->
-          withTempFile tempDir "" $ \oNname oHnd -> do
+      withTempFileCwd ".c" $ \cName cHnd ->
+        withTempFileCwd "" $ \oNname oHnd ->
+          do
             hPutStrLn cHnd program
             hClose cHnd
             hClose oHnd
             _ <-
-              getDbProgramOutput
+              getDbProgramOutputCwd
                 verbosity
+                mbWorkDir
                 gccProgram
                 (withPrograms lbi)
-                (cName : "-o" : oNname : args)
+                (getSymbolicPath cName : "-o" : getSymbolicPath oNname : args)
             return True
-        `catchIO` (\_ -> return False)
-        `catchExit` (\_ -> return False)
+            `catchIO` (\_ -> return False)
+            `catchExit` (\_ -> return False)
 
     explainErrors Nothing [] = return () -- should be impossible!
     explainErrors _ _
@@ -2490,7 +2933,7 @@ checkForeignDeps pkg lbi verbosity =
 checkPackageProblems
   :: Verbosity
   -> FilePath
-  -- ^ Path to the @.cabal@ file's directory
+  -- ^ Path to the package root
   -> GenericPackageDescription
   -> PackageDescription
   -> IO ()
@@ -2500,7 +2943,7 @@ checkPackageProblems verbosity dir gpkg pkg = do
       (errors, warnings) =
         partitionEithers (M.mapMaybe classEW $ pureChecks ++ ioChecks)
   if null errors
-    then traverse_ (warn verbosity) (map ppPackageCheck warnings)
+    then traverse_ (warnPackage . ppPackageCheck) warnings
     else dieWithException verbosity $ CheckPackageProblems (map ppPackageCheck errors)
   where
     -- Classify error/warnings. Left: error, Right: warning.
@@ -2510,6 +2953,21 @@ checkPackageProblems verbosity dir gpkg pkg = do
     classEW (PackageDistSuspicious _) = Nothing
     classEW (PackageDistSuspiciousWarn _) = Nothing
     classEW (PackageDistInexcusable _) = Nothing
+
+    pkgName = prettyShow $ packageName pkg
+    warnPackage = labelMessage "Warning" (Just $ ": " ++ pkgName ++ " ") verbosity
+
+-- | Perform checks if a shared executable can be built
+checkSharedExes
+  :: Verbosity
+  -> LocalBuildInfo
+  -> IO ()
+checkSharedExes verbosity lbi =
+  when (os == Windows) $
+    dieWithException verbosity $
+      NoOSSupport os "shared executables"
+  where
+    (Platform _ os) = hostPlatform lbi
 
 -- | Preform checks if a relocatable build is allowed
 checkRelocatable
@@ -2531,15 +2989,15 @@ checkRelocatable verbosity pkg lbi =
     -- and RPATH, make sure you add your OS to RPATH-support list of:
     -- Distribution.Simple.GHC.getRPaths
     checkOS =
-      unless (os `elem` [OSX, Linux]) $
+      unless (os `elem` [OSX, Linux, FreeBSD]) $
         dieWithException verbosity $
-          NoOSSupport os
+          NoOSSupport os "relocatable builds"
       where
         (Platform _ os) = hostPlatform lbi
 
     -- Check if the Compiler support relocatable builds
     checkCompiler =
-      unless (compilerFlavor comp `elem` [GHC]) $
+      unless (compilerFlavor comp == GHC) $
         dieWithException verbosity $
           NoCompilerSupport (show comp)
       where
@@ -2549,7 +3007,7 @@ checkRelocatable verbosity pkg lbi =
     packagePrefixRelative =
       unless (relativeInstallDirs installDirs) $
         dieWithException verbosity $
-          InstallDirsNotPrefixRelative (installDirs)
+          InstallDirsNotPrefixRelative installDirs
       where
         -- NB: should be good enough to check this against the default
         -- component ID, but if we wanted to be strictly correct we'd
@@ -2558,32 +3016,30 @@ checkRelocatable verbosity pkg lbi =
         p = prefix installDirs
         relativeInstallDirs (InstallDirs{..}) =
           all
-            isJust
-            ( fmap
-                (stripPrefix p)
-                [ bindir
-                , libdir
-                , dynlibdir
-                , libexecdir
-                , includedir
-                , datadir
-                , docdir
-                , mandir
-                , htmldir
-                , haddockdir
-                , sysconfdir
-                ]
-            )
+            (isJust . stripPrefix p)
+            [ bindir
+            , libdir
+            , dynlibdir
+            , bytecodelibdir
+            , libexecdir
+            , includedir
+            , datadir
+            , docdir
+            , mandir
+            , htmldir
+            , haddockdir
+            , sysconfdir
+            ]
 
     -- Check if the library dirs of the dependencies that are in the package
     -- database to which the package is installed are relative to the
     -- prefix of the package
     depsPrefixRelative = do
       pkgr <- GHC.pkgRoot verbosity lbi (registrationPackageDB (withPackageDB lbi))
-      traverse_ (doCheck pkgr) ipkgs
+      traverse_ (doCheck $ getSymbolicPath pkgr) ipkgs
       where
         doCheck pkgr ipkg
-          | maybe False (== pkgr) (IPI.pkgRoot ipkg) =
+          | Just pkgr == IPI.pkgRoot ipkg =
               for_ (IPI.libraryDirs ipkg) $ \libdir -> do
                 -- When @prefix@ is not under @pkgroot@,
                 -- @shortRelativePath prefix pkgroot@ will return a path with
@@ -2617,12 +3073,7 @@ checkForeignLibSupported :: Compiler -> Platform -> ForeignLib -> Maybe String
 checkForeignLibSupported comp platform flib = go (compilerFlavor comp)
   where
     go :: CompilerFlavor -> Maybe String
-    go GHC
-      | compilerVersion comp < mkVersion [7, 8] =
-          unsupported
-            [ "Building foreign libraries is only supported with GHC >= 7.8"
-            ]
-      | otherwise = goGhcPlatform platform
+    go GHC = goGhcPlatform platform
     go _ =
       unsupported
         [ "Building foreign libraries is currently only supported with ghc"
@@ -2631,6 +3082,7 @@ checkForeignLibSupported comp platform flib = go (compilerFlavor comp)
     goGhcPlatform :: Platform -> Maybe String
     goGhcPlatform (Platform _ OSX) = goGhcOsx (foreignLibType flib)
     goGhcPlatform (Platform _ Linux) = goGhcLinux (foreignLibType flib)
+    goGhcPlatform (Platform _ FreeBSD) = goGhcLinux (foreignLibType flib)
     goGhcPlatform (Platform I386 Windows) = goGhcWindows (foreignLibType flib)
     goGhcPlatform (Platform X86_64 Windows) = goGhcWindows (foreignLibType flib)
     goGhcPlatform _ =

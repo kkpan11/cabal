@@ -11,7 +11,7 @@ import Distribution.Verbosity
 import Data.IORef
 import System.Directory ( doesDirectoryExist, doesFileExist
                         , getTemporaryDirectory
-                        , removeDirectoryRecursive, removeFile )
+                        , removePathForcibly )
 import System.FilePath ( (<.>) )
 import System.IO (hClose, localeEncoding, hPutStrLn)
 import System.IO.Error
@@ -23,24 +23,22 @@ import Test.Tasty.HUnit
 withTempFileTest :: Assertion
 withTempFileTest = do
   fileName <- newIORef ""
-  tempDir  <- getTemporaryDirectory
-  withTempFile tempDir ".foo" $ \fileName' _handle -> do
+  withTempFile ".foo" $ \fileName' _handle -> do
     writeIORef fileName fileName'
   fileExists <- readIORef fileName >>= doesFileExist
   assertBool "Temporary file not deleted by 'withTempFile'!" (not fileExists)
 
 withTempFileRemovedTest :: Assertion
 withTempFileRemovedTest = do
-  tempDir <- getTemporaryDirectory
-  withTempFile tempDir ".foo" $ \fileName handle -> do
+  withTempFile ".foo" $ \fileName handle -> do
     hClose handle
-    removeFile fileName
+    removeFileForcibly fileName
 
 withTempDirTest :: Assertion
 withTempDirTest = do
   dirName <- newIORef ""
   tempDir <- getTemporaryDirectory
-  withTempDirectory normal tempDir "foo" $ \dirName' -> do
+  withTempDirectory tempDir "foo" $ \dirName' -> do
     writeIORef dirName dirName'
   dirExists <- readIORef dirName >>= doesDirectoryExist
   assertBool "Temporary directory not deleted by 'withTempDirectory'!"
@@ -49,8 +47,7 @@ withTempDirTest = do
 withTempDirRemovedTest :: Assertion
 withTempDirRemovedTest = do
   tempDir <- getTemporaryDirectory
-  withTempDirectory normal tempDir "foo" $ \dirPath -> do
-    removeDirectoryRecursive dirPath
+  withTempDirectory tempDir "foo" removePathForcibly
 
 rawSystemStdInOutTextDecodingTest :: FilePath -> Assertion
 rawSystemStdInOutTextDecodingTest ghcPath
@@ -58,9 +55,8 @@ rawSystemStdInOutTextDecodingTest ghcPath
     -- so skip the test if it's not.
     | show localeEncoding /= "UTF-8" = return ()
     | otherwise = do
-  tempDir  <- getTemporaryDirectory
-  res <- withTempFile tempDir ".hs" $ \filenameHs handleHs -> do
-    withTempFile tempDir ".exe" $ \filenameExe handleExe -> do
+  res <- withTempFile ".hs" $ \filenameHs handleHs -> do
+    withTempFile ".exe" $ \filenameExe handleExe -> do
       -- Small program printing not utf8
       hPutStrLn handleHs "import Data.ByteString"
       hPutStrLn handleHs "main = Data.ByteString.putStr (Data.ByteString.pack [32, 32, 255])"
@@ -70,7 +66,7 @@ rawSystemStdInOutTextDecodingTest ghcPath
       hClose handleExe
 
       -- Compile
-      (resOutput, resErrors, resExitCode) <- rawSystemStdInOut normal
+      (resOutput, resErrors, resExitCode) <- rawSystemStdInOut (mkVerbosity defaultVerbosityHandles normal)
          ghcPath ["-o", filenameExe, filenameHs]
          Nothing Nothing Nothing
          IODataModeText
@@ -78,7 +74,7 @@ rawSystemStdInOutTextDecodingTest ghcPath
 
       -- Execute
       Exception.try $ do
-        rawSystemStdInOut normal
+        rawSystemStdInOut (mkVerbosity defaultVerbosityHandles normal)
            filenameExe []
            Nothing Nothing Nothing
            IODataModeText -- not binary mode output, ie utf8 text mode so try to decode
@@ -95,16 +91,11 @@ dropExeExtensionTest =
 
 tests :: FilePath -> [TestTree]
 tests ghcPath =
-    [ testCase "withTempFile works as expected" $
-      withTempFileTest
-    , testCase "withTempFile can handle removed files" $
-      withTempFileRemovedTest
-    , testCase "withTempDirectory works as expected" $
-      withTempDirTest
-    , testCase "withTempDirectory can handle removed directories" $
-      withTempDirRemovedTest
+    [ testCase "withTempFile works as expected" withTempFileTest
+    , testCase "withTempFile can handle removed files" withTempFileRemovedTest
+    , testCase "withTempDirectory works as expected" withTempDirTest
+    , testCase "withTempDirectory can handle removed directories" withTempDirRemovedTest
     , testCase "rawSystemStdInOut reports text decoding errors" $
       rawSystemStdInOutTextDecodingTest ghcPath
-    , testCase "dropExeExtension drops exe extension" $
-      dropExeExtensionTest
+    , testCase "dropExeExtension drops exe extension" dropExeExtensionTest
     ]

@@ -44,13 +44,12 @@ generatePathsModule pkg_descr lbi clbi =
     Z.Z
       { Z.zPackageName = packageName pkg_descr
       , Z.zVersionDigits = show $ versionNumbers $ packageVersion pkg_descr
-      , Z.zSupportsCpp = supports_cpp
-      , Z.zSupportsNoRebindableSyntax = supports_rebindable_syntax
       , Z.zAbsolute = absolute
       , Z.zRelocatable = relocatable lbi
       , Z.zIsWindows = isWindows
       , Z.zIsI386 = buildArch == I386
       , Z.zIsX8664 = buildArch == X86_64
+      , Z.zIsAArch64 = buildArch == AArch64
       , Z.zNot = not
       , Z.zManglePkgName = showPkgName
       , Z.zPrefix = show flat_prefix
@@ -62,15 +61,6 @@ generatePathsModule pkg_descr lbi clbi =
       , Z.zSysconfdir = zSysconfdir
       }
   where
-    supports_cpp = supports_language_pragma
-    supports_rebindable_syntax = ghc_newer_than (mkVersion [7, 0, 1])
-    supports_language_pragma = ghc_newer_than (mkVersion [6, 6, 1])
-
-    ghc_newer_than minVersion =
-      case compilerCompatVersion GHC (compiler lbi) of
-        Nothing -> False
-        Just version -> version `withinRange` orLaterVersion minVersion
-
     -- In several cases we cannot make relocatable installations
     absolute =
       hasLibs pkg_descr -- we can only make progs relocatable
@@ -83,7 +73,6 @@ generatePathsModule pkg_descr lbi clbi =
       _ -> False
 
     supportsRelocatableProgs GHC = isWindows
-    supportsRelocatableProgs GHCJS = isWindows
     supportsRelocatableProgs _ = False
 
     cid = componentUnitId clbi

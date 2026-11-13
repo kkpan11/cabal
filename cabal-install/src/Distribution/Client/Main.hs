@@ -1,10 +1,6 @@
-{-# LANGUAGE CPP #-}
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-
------------------------------------------------------------------------------
-
------------------------------------------------------------------------------
+{-# LANGUAGE PatternSynonyms #-}
 
 -- |
 -- Module      :  Main
@@ -24,6 +20,7 @@ import Distribution.Client.Setup
   ( ActAsSetupFlags (..)
   , BuildFlags (..)
   , CheckFlags (..)
+  , CommonSetupFlags (..)
   , ConfigExFlags (..)
   , ConfigFlags (..)
   , FetchFlags (..)
@@ -34,8 +31,7 @@ import Distribution.Client.Setup
   , InitFlags (initHcPath, initVerbosity)
   , InstallFlags (..)
   , ListFlags (..)
-  , Path (..)
-  , PathFlags (..)
+  , RepoContext (..)
   , ReportFlags (..)
   , UploadFlags (..)
   , UserConfigFlags (..)
@@ -51,6 +47,7 @@ import Distribution.Client.Setup
   , defaultConfigExFlags
   , defaultInstallFlags
   , fetchCommand
+  , filterCommonFlags
   , formatCommand
   , freezeCommand
   , genBoundsCommand
@@ -63,8 +60,6 @@ import Distribution.Client.Setup
   , listCommand
   , listNeedsCompiler
   , manpageCommand
-  , pathCommand
-  , pathName
   , reconfigureCommand
   , registerCommand
   , replCommand
@@ -80,20 +75,21 @@ import Distribution.Simple.Setup
   ( BenchmarkFlags (..)
   , CleanFlags (..)
   , CopyFlags (..)
-  , Flag (..)
+  , Flag
   , HaddockFlags (..)
   , HaddockTarget (..)
   , HscolourFlags (..)
   , RegisterFlags (..)
   , ReplFlags (..)
   , TestFlags (..)
-  , configAbsolutePaths
   , defaultHaddockFlags
   , flagToMaybe
   , fromFlag
   , fromFlagOrDefault
   , hscolourCommand
   , toFlag
+  , pattern Flag
+  , pattern NoFlag
   )
 
 import Distribution.Client.Compat.Prelude hiding (get)
@@ -102,11 +98,8 @@ import Prelude ()
 import Distribution.Client.Config
   ( SavedConfig (..)
   , createDefaultConfigFile
-  , defaultCacheDir
   , defaultConfigFile
-  , defaultInstallPath
-  , defaultLogsDir
-  , defaultStoreDir
+  , defaultUserInstall
   , getConfigFilePath
   , loadConfig
   , userConfigDiff
@@ -117,7 +110,8 @@ import qualified Distribution.Client.List as List
   , list
   )
 import Distribution.Client.SetupWrapper
-  ( SetupScriptOptions (..)
+  ( SetupRunnerArgs (NotInLibrary)
+  , SetupScriptOptions (..)
   , defaultSetupScriptOptions
   , setupWrapper
   )
@@ -131,15 +125,18 @@ import qualified Distribution.Client.CmdClean as CmdClean
 import qualified Distribution.Client.CmdConfigure as CmdConfigure
 import qualified Distribution.Client.CmdExec as CmdExec
 import qualified Distribution.Client.CmdFreeze as CmdFreeze
+import qualified Distribution.Client.CmdGenBounds as CmdGenBounds
 import qualified Distribution.Client.CmdHaddock as CmdHaddock
 import qualified Distribution.Client.CmdHaddockProject as CmdHaddockProject
 import qualified Distribution.Client.CmdInstall as CmdInstall
 import Distribution.Client.CmdLegacy
 import qualified Distribution.Client.CmdListBin as CmdListBin
 import qualified Distribution.Client.CmdOutdated as CmdOutdated
+import qualified Distribution.Client.CmdPath as CmdPath
 import qualified Distribution.Client.CmdRepl as CmdRepl
 import qualified Distribution.Client.CmdRun as CmdRun
 import qualified Distribution.Client.CmdSdist as CmdSdist
+import qualified Distribution.Client.CmdTarget as CmdTarget
 import qualified Distribution.Client.CmdTest as CmdTest
 import qualified Distribution.Client.CmdUpdate as CmdUpdate
 
@@ -152,15 +149,10 @@ import Distribution.Client.Install (install)
 
 -- import Distribution.Client.Clean            (clean)
 
-import Distribution.Client.CmdInstall.ClientInstallFlags (ClientInstallFlags (cinstInstalldir))
 import Distribution.Client.Get (get)
 import Distribution.Client.Init (initCmd)
 import Distribution.Client.Manpage (manpageCmd)
 import Distribution.Client.ManpageFlags (ManpageFlags (..))
-import Distribution.Client.Nix
-  ( nixInstantiate
-  , nixShell
-  )
 import Distribution.Client.Reconfigure (Check (..), reconfigure)
 import Distribution.Client.Run (run, splitRunArgs)
 import Distribution.Client.Sandbox
@@ -172,14 +164,15 @@ import Distribution.Client.Signal
   ( installTerminationHandler
   )
 import Distribution.Client.Tar (createTarGzFile)
-import Distribution.Client.Types.Credentials (Password (..))
+import Distribution.Client.Types.Credentials (Password (..), Token (..))
 import qualified Distribution.Client.Upload as Upload
 import Distribution.Client.Utils
   ( determineNumJobs
   , relaxEncodingErrors
   )
 import Distribution.Client.Version
-  ( cabalInstallVersion
+  ( cabalInstallGitInfo
+  , cabalInstallVersion
   )
 
 import Distribution.Package (packageId)
@@ -189,7 +182,8 @@ import Distribution.PackageDescription
   , buildable
   )
 
-import qualified Distribution.Make as Make
+import Distribution.Client.Errors
+import Distribution.Compat.ResponseFile
 import Distribution.PackageDescription.PrettyPrint
   ( writeGenericPackageDescription
   )
@@ -210,7 +204,7 @@ import Distribution.Simple.Command
   , defaultCommandFallback
   , hiddenCommand
   )
-import Distribution.Simple.Compiler (PackageDBStack)
+import Distribution.Simple.Compiler (PackageDBStack, interpretPackageDBStack)
 import Distribution.Simple.Configure
   ( ConfigStateFileError (..)
   , configCompilerAuxEx
@@ -231,23 +225,38 @@ import Distribution.Simple.Program
 import Distribution.Simple.Program.Db (reconfigurePrograms)
 import qualified Distribution.Simple.Setup as Cabal
 import Distribution.Simple.Utils
-  ( cabalVersion
+  ( VerboseException
+  , cabalCompilerInfo
+  , cabalGitInfo
+  , cabalVersion
   , createDirectoryIfMissingVerbose
+  , die'
   , dieNoVerbosity
+  , dieNoWrap
   , dieWithException
   , findPackageDesc
   , info
+  , isUserException
   , notice
   , topHandler
   , tryFindPackageDesc
-  , withOutputMarker
+  , warn
   )
 import Distribution.Text
   ( display
   )
 import qualified Distribution.Types.UnqualComponentName as Make
+import Distribution.Utils.Path hiding
+  ( (<.>)
+  , (</>)
+  )
 import Distribution.Verbosity as Verbosity
-  ( normal
+  ( VerbosityFlags
+  , defaultVerbosityHandles
+  , mkVerbosity
+  , normal
+  , verbosityFlags
+  , verbosityHandles
   )
 import Distribution.Version
   ( Version
@@ -256,13 +265,10 @@ import Distribution.Version
   )
 
 import Control.Exception (AssertionFailed, assert, try)
-import Control.Monad (mapM_)
 import Data.Monoid (Any (..))
-import Distribution.Client.Errors
-import Distribution.Compat.ResponseFile
+import Distribution.Client.Types
 import System.Directory
   ( doesFileExist
-  , getCurrentDirectory
   , withCurrentDirectory
   )
 import System.Environment (getEnvironment, getExecutablePath, getProgName)
@@ -280,7 +286,7 @@ import System.IO
   , stderr
   , stdout
   )
-import System.Process (createProcess, env, proc)
+import System.Process (createProcess, env, proc, waitForProcess)
 
 -- | Entry point
 --
@@ -316,7 +322,7 @@ main args = do
   -- for more information.
   let (args0, args1) = break (== "--") args
 
-  mainWorker =<< (++ args1) <$> expandResponse args0
+  mainWorker . (++ args1) =<< expandResponse args0
 
 -- | Check whether assertions are enabled and print a warning in that case.
 warnIfAssertionsAreEnabled :: IO ()
@@ -338,7 +344,7 @@ warnIfAssertionsAreEnabled =
 -- into IO actions for execution.
 mainWorker :: [String] -> IO ()
 mainWorker args = do
-  topHandler $ do
+  topHandler (isUserException (Proxy @(VerboseException CabalInstallException))) $ do
     command <- commandsRunWithFallback (globalCommand commands) commands delegateToExternal args
     case command of
       CommandHelp help -> printGlobalHelp help
@@ -349,6 +355,8 @@ mainWorker args = do
           _
             | fromFlagOrDefault False (globalVersion globalFlags) ->
                 printVersion
+            | fromFlagOrDefault False (globalFullVersion globalFlags) ->
+                printFullVersion
             | fromFlagOrDefault False (globalNumericVersion globalFlags) ->
                 printNumericVersion
           CommandHelp help -> printCommandHelp help
@@ -375,20 +383,24 @@ mainWorker args = do
       -> [String]
       -> IO (CommandParse Action)
     delegateToExternal commands' name cmdArgs = do
-      mCommand <- findProgramOnSearchPath normal defaultProgramSearchPath ("cabal-" <> name)
+      -- we rely on cabal's implementation of findProgramOnSearchPath not following
+      -- symlinks here. If that ever happens, then the argv[0] of the called executable
+      -- will be different from the intended one and will break tools that work by reading it.
+      let verb = mkVerbosity defaultVerbosityHandles normal
+      mCommand <- findProgramOnSearchPath verb defaultProgramSearchPath ("cabal-" <> name)
       case mCommand of
-        Just (exec, _) -> return (CommandReadyToGo $ \_ -> callExternal exec name cmdArgs)
+        Just (exec, _) -> return (CommandReadyToGo $ \_ -> callExternal exec cmdArgs)
         Nothing -> defaultCommandFallback commands' name cmdArgs
 
-    callExternal :: String -> String -> [String] -> IO ()
-    callExternal exec name cmdArgs = do
+    callExternal :: String -> [String] -> IO ()
+    callExternal exec cmdArgs = do
       cur_env <- getEnvironment
       cabal_exe <- getExecutablePath
-      let new_env = ("CABAL", cabal_exe) : cur_env
-      result <- try $ createProcess ((proc exec (name : cmdArgs)){env = Just new_env})
+      let new_env = ("CABAL_EXTERNAL_CABAL_PATH", cabal_exe) : cur_env
+      result <- try $ createProcess ((proc exec cmdArgs){env = Just new_env})
       case result of
         Left ex -> printErrors ["Error executing external command: " ++ show (ex :: SomeException)]
-        Right _ -> return ()
+        Right (_, _, _, ph) -> waitForProcess ph >>= exitWith
 
     printCommandHelp help = do
       pname <- getProgName
@@ -421,6 +433,27 @@ mainWorker args = do
           ++ "\ncompiled using version "
           ++ display cabalVersion
           ++ " of the Cabal library "
+    printFullVersion =
+      putStrLn $
+        "cabal-install version "
+          ++ display cabalInstallVersion
+          ++ cabalInstallGitInfo'
+          ++ "\ncompiled using version "
+          ++ display cabalVersion
+          ++ " of the Cabal library "
+          ++ cabalGitInfo'
+          ++ "\nwith "
+          -- it's impossible for cabal-install to have been built with a different compiler
+          -- from Cabal, so just reuse its info
+          ++ cabalCompilerInfo
+      where
+        cabalInstallGitInfo'
+          | null cabalInstallGitInfo = ""
+          | otherwise = ' ' : cabalInstallGitInfo
+        cabalGitInfo'
+          | null cabalGitInfo && null cabalInstallGitInfo = ""
+          | cabalGitInfo == cabalInstallGitInfo = "(in-tree)"
+          | otherwise = cabalGitInfo
 
     commands = map commandFromSpec commandSpecs
     commandSpecs =
@@ -434,10 +467,8 @@ mainWorker args = do
       , regularCmd reportCommand reportAction
       , regularCmd initCommand initAction
       , regularCmd userConfigCommand userConfigAction
-      , regularCmd pathCommand pathAction
-      , regularCmd genBoundsCommand genBoundsAction
-      , regularCmd CmdOutdated.outdatedCommand CmdOutdated.outdatedAction
-      , wrapperCmd hscolourCommand hscolourVerbosity hscolourDistPref
+      , regularCmd CmdPath.pathCommand CmdPath.pathAction
+      , wrapperCmd hscolourCommand hscolourCommonFlags
       , hiddenCmd formatCommand formatAction
       , hiddenCmd actAsSetupCommand actAsSetupAction
       , hiddenCmd manpageCommand (manpageAction commandSpecs)
@@ -460,7 +491,11 @@ mainWorker args = do
           , newCmd CmdExec.execCommand CmdExec.execAction
           , newCmd CmdClean.cleanCommand CmdClean.cleanAction
           , newCmd CmdSdist.sdistCommand CmdSdist.sdistAction
+          , newCmd CmdTarget.targetCommand CmdTarget.targetAction
+          , newCmd CmdGenBounds.genBoundsCommand CmdGenBounds.genBoundsAction
+          , newCmd CmdOutdated.outdatedCommand CmdOutdated.outdatedAction
           , legacyCmd configureExCommand configureAction
+          , legacyCmd genBoundsCommand genBoundsAction
           , legacyCmd buildCommand buildAction
           , legacyCmd replCommand replAction
           , legacyCmd freezeCommand freezeAction
@@ -470,8 +505,8 @@ mainWorker args = do
           , legacyCmd testCommand testAction
           , legacyCmd benchmarkCommand benchmarkAction
           , legacyCmd cleanCommand cleanAction
-          , legacyWrapperCmd copyCommand copyVerbosity copyDistPref
-          , legacyWrapperCmd registerCommand regVerbosity regDistPref
+          , legacyWrapperCmd copyCommand copyCommonFlags
+          , legacyWrapperCmd registerCommand registerCommonFlags
           , legacyCmd reconfigureCommand reconfigureAction
           ]
 
@@ -484,7 +519,7 @@ regularCmd
   -> (flags -> [String] -> action)
   -> CommandSpec action
 regularCmd ui action =
-  CommandSpec ui ((flip commandAddAction) action) NormalCommand
+  CommandSpec ui (`commandAddAction` action) NormalCommand
 
 hiddenCmd
   :: CommandUI flags
@@ -499,85 +534,101 @@ hiddenCmd ui action =
 wrapperCmd
   :: Monoid flags
   => CommandUI flags
-  -> (flags -> Flag Verbosity)
-  -> (flags -> Flag String)
+  -> (flags -> CommonSetupFlags)
   -> CommandSpec Action
-wrapperCmd ui verbosity distPref =
-  CommandSpec ui (\ui' -> wrapperAction ui' verbosity distPref) NormalCommand
+wrapperCmd ui getCommonFlags =
+  CommandSpec ui (`wrapperAction` getCommonFlags) NormalCommand
 
 wrapperAction
   :: Monoid flags
   => CommandUI flags
-  -> (flags -> Flag Verbosity)
-  -> (flags -> Flag String)
+  -> (flags -> CommonSetupFlags)
   -> Command Action
-wrapperAction command verbosityFlag distPrefFlag =
+wrapperAction command getCommonFlags =
   commandAddAction
     command
       { commandDefaultFlags = mempty
       }
     $ \flags extraArgs globalFlags -> do
-      let verbosity = fromFlagOrDefault normal (verbosityFlag flags)
+      let common = getCommonFlags flags
+          verbosity =
+            mkVerbosity defaultVerbosityHandles $
+              fromFlagOrDefault normal $
+                setupVerbosity common
+          mbWorkDir = flagToMaybe $ setupWorkingDir common
       load <- try (loadConfigOrSandboxConfig verbosity globalFlags)
       let config = either (\(SomeException _) -> mempty) id load
-      distPref <- findSavedDistPref config (distPrefFlag flags)
-      let setupScriptOptions = defaultSetupScriptOptions{useDistPref = distPref}
+      distPref <- findSavedDistPref config (setupDistPref common)
+      let setupScriptOptions =
+            defaultSetupScriptOptions
+              { useDistPref = distPref
+              , useWorkingDir = mbWorkDir
+              }
       setupWrapper
         verbosity
         setupScriptOptions
         Nothing
         command
-        (const flags)
+        getCommonFlags
+        (const (return flags))
         (const extraArgs)
+        NotInLibrary
 
 configureAction
   :: (ConfigFlags, ConfigExFlags)
   -> [String]
   -> Action
 configureAction (configFlags, configExFlags) extraArgs globalFlags = do
-  let verbosity = fromFlagOrDefault normal (configVerbosity configFlags)
+  let common = configCommonFlags configFlags
+      verbosity =
+        mkVerbosity defaultVerbosityHandles $
+          fromFlagOrDefault normal $
+            setupVerbosity common
+
   config <-
     updateInstallDirs (configUserInstall configFlags)
       <$> loadConfigOrSandboxConfig verbosity globalFlags
-  distPref <- findSavedDistPref config (configDistPref configFlags)
-  nixInstantiate verbosity distPref True globalFlags config
-  nixShell verbosity distPref globalFlags config $ do
-    let configFlags' = savedConfigureFlags config `mappend` configFlags
-        configExFlags' = savedConfigureExFlags config `mappend` configExFlags
-        globalFlags' = savedGlobalFlags config `mappend` globalFlags
-    (comp, platform, progdb) <- configCompilerAuxEx configFlags'
+  distPref <- getSymbolicPath <$> findSavedDistPref config (setupDistPref common)
 
-    writeConfigFlags verbosity distPref (configFlags', configExFlags')
+  let configFlags' = savedConfigureFlags config <> configFlags
+      configExFlags' = savedConfigureExFlags config <> configExFlags
+      globalFlags' = savedGlobalFlags config <> globalFlags
+  (comp, platform, progdb) <- configCompilerAuxEx (verbosityHandles verbosity) configFlags'
 
-    -- What package database(s) to use
-    let packageDBs :: PackageDBStack
-        packageDBs =
-          interpretPackageDbFlags
-            (fromFlag (configUserInstall configFlags'))
-            (configPackageDBs configFlags')
+  writeConfigFlags verbosity distPref (configFlags', configExFlags')
 
-    withRepoContext verbosity globalFlags' $ \repoContext ->
-      configure
-        verbosity
-        packageDBs
-        repoContext
-        comp
-        platform
-        progdb
-        configFlags'
-        configExFlags'
-        extraArgs
+  -- What package database(s) to use
+  let packageDBs :: PackageDBStack
+      packageDBs =
+        interpretPackageDbFlags
+          (fromFlagOrDefault defaultUserInstall (configUserInstall configFlags'))
+          (configPackageDBs configFlags')
+
+  withRepoContext verbosity globalFlags' $ \repoContext ->
+    configure
+      verbosity
+      (interpretPackageDBStack Nothing packageDBs)
+      repoContext
+      comp
+      platform
+      progdb
+      configFlags'
+      configExFlags'
+      extraArgs
 
 reconfigureAction
   :: (ConfigFlags, ConfigExFlags)
   -> [String]
   -> Action
 reconfigureAction flags@(configFlags, _) _ globalFlags = do
-  let verbosity = fromFlagOrDefault normal (configVerbosity configFlags)
+  let common = configCommonFlags configFlags
+      verbosity =
+        mkVerbosity defaultVerbosityHandles $
+          fromFlagOrDefault normal (setupVerbosity common)
   config <-
     updateInstallDirs (configUserInstall configFlags)
       <$> loadConfigOrSandboxConfig verbosity globalFlags
-  distPref <- findSavedDistPref config (configDistPref configFlags)
+  distPref <- findSavedDistPref config (setupDistPref common)
   let checkFlags = Check $ \_ saved -> do
         let flags' = saved <> flags
         unless (saved == flags') $ info verbosity message
@@ -589,7 +640,6 @@ reconfigureAction flags@(configFlags, _) _ globalFlags = do
           message =
             "flags changed: "
               ++ unwords (commandShowOptions configureExCommand flags)
-  nixInstantiate verbosity distPref True globalFlags config
   _ <-
     reconfigure
       configureAction
@@ -604,9 +654,13 @@ reconfigureAction flags@(configFlags, _) _ globalFlags = do
 
 buildAction :: BuildFlags -> [String] -> Action
 buildAction buildFlags extraArgs globalFlags = do
-  let verbosity = fromFlagOrDefault normal (buildVerbosity buildFlags)
+  let common = buildCommonFlags buildFlags
+      verbosity =
+        mkVerbosity defaultVerbosityHandles $
+          fromFlagOrDefault normal $
+            setupVerbosity common
   config <- loadConfigOrSandboxConfig verbosity globalFlags
-  distPref <- findSavedDistPref config (buildDistPref buildFlags)
+  distPref <- findSavedDistPref config (setupDistPref common)
   -- Calls 'configureAction' to do the real work, so nothing special has to be
   -- done to support sandboxes.
   config' <-
@@ -619,36 +673,49 @@ buildAction buildFlags extraArgs globalFlags = do
       []
       globalFlags
       config
-  nixShell verbosity distPref globalFlags config $ do
-    build verbosity config' distPref buildFlags extraArgs
+  build verbosity config' distPref buildFlags extraArgs
 
 -- | Actually do the work of building the package. This is separate from
 -- 'buildAction' so that 'testAction' and 'benchmarkAction' do not invoke
 -- 'reconfigure' twice.
-build :: Verbosity -> SavedConfig -> FilePath -> BuildFlags -> [String] -> IO ()
+build :: Verbosity -> SavedConfig -> SymbolicPath Pkg (Dir Dist) -> BuildFlags -> [String] -> IO ()
 build verbosity config distPref buildFlags extraArgs =
   setupWrapper
     verbosity
     setupOptions
     Nothing
     (Cabal.buildCommand progDb)
-    mkBuildFlags
+    buildCommonFlags
+    (return . mkBuildFlags)
     (const extraArgs)
+    NotInLibrary
   where
     progDb = defaultProgramDb
     setupOptions = defaultSetupScriptOptions{useDistPref = distPref}
 
     mkBuildFlags version = filterBuildFlags version config buildFlags'
+    commonFlags = buildCommonFlags buildFlags
     buildFlags' =
       buildFlags
-        { buildVerbosity = toFlag verbosity
-        , buildDistPref = toFlag distPref
+        { buildCommonFlags =
+            commonFlags
+              { setupVerbosity = toFlag $ verbosityFlags verbosity
+              , setupDistPref = toFlag distPref
+              }
         }
 
 -- | Make sure that we don't pass new flags to setup scripts compiled against
 -- old versions of Cabal.
 filterBuildFlags :: Version -> SavedConfig -> BuildFlags -> BuildFlags
-filterBuildFlags version config buildFlags
+filterBuildFlags version config buildFlags =
+  let flags' = filterBuildFlags' version config buildFlags
+   in flags'
+        { buildCommonFlags =
+            filterCommonFlags (buildCommonFlags flags') version
+        }
+
+filterBuildFlags' :: Version -> SavedConfig -> BuildFlags -> BuildFlags
+filterBuildFlags' version config buildFlags
   | version >= mkVersion [1, 19, 1] = buildFlags_latest
   -- Cabal < 1.19.1 doesn't support 'build -j'.
   | otherwise = buildFlags_pre_1_19_1
@@ -662,18 +729,21 @@ filterBuildFlags version config buildFlags
         { -- Take the 'jobs' setting config file into account.
           buildNumJobs =
             Flag . Just . determineNumJobs $
-              (numJobsConfigFlag `mappend` numJobsCmdLineFlag)
+              (numJobsConfigFlag <> numJobsCmdLineFlag)
         }
     numJobsConfigFlag = installNumJobs . savedInstallFlags $ config
     numJobsCmdLineFlag = buildNumJobs buildFlags
 
 replAction :: ReplFlags -> [String] -> Action
 replAction replFlags extraArgs globalFlags = do
-  let verbosity = fromFlagOrDefault normal (replVerbosity replFlags)
+  let common = replCommonFlags replFlags
+      verbosity =
+        mkVerbosity defaultVerbosityHandles $
+          fromFlagOrDefault normal $
+            setupVerbosity common
   config <- loadConfigOrSandboxConfig verbosity globalFlags
-  distPref <- findSavedDistPref config (replDistPref replFlags)
-  cwd <- getCurrentDirectory
-  pkgDesc <- findPackageDesc cwd
+  distPref <- findSavedDistPref config (setupDistPref common)
+  pkgDesc <- findPackageDesc Nothing
   let
     -- There is a .cabal file in the current directory: start a REPL and load
     -- the project's modules.
@@ -696,14 +766,25 @@ replAction replFlags extraArgs globalFlags = do
               { useCabalVersion = orLaterVersion $ mkVersion [1, 18, 0]
               , useDistPref = distPref
               }
+          commonFlags = replCommonFlags replFlags
           replFlags' =
             replFlags
-              { replVerbosity = toFlag verbosity
-              , replDistPref = toFlag distPref
+              { replCommonFlags =
+                  commonFlags
+                    { setupVerbosity = toFlag $ verbosityFlags verbosity
+                    , setupDistPref = toFlag distPref
+                    }
               }
 
-      nixShell verbosity distPref globalFlags config $
-        setupWrapper verbosity setupOptions Nothing (Cabal.replCommand progDb) (const replFlags') (const extraArgs)
+      setupWrapper
+        verbosity
+        setupOptions
+        Nothing
+        (Cabal.replCommand progDb)
+        Cabal.replCommonFlags
+        (const (return replFlags'))
+        (const extraArgs)
+        NotInLibrary
 
     -- No .cabal file in the current directory: just start the REPL (possibly
     -- using the sandbox package DB).
@@ -716,13 +797,13 @@ replAction replFlags extraArgs globalFlags = do
           (replProgramPaths replFlags)
           (replProgramArgs replFlags)
           programDb
-      nixShell verbosity distPref globalFlags config $ do
-        startInterpreter
-          verbosity
-          programDb'
-          comp
-          platform
-          (configPackageDB' configFlags)
+
+      startInterpreter
+        verbosity
+        programDb'
+        comp
+        platform
+        (configPackageDB' configFlags)
 
   either (const onNoPkgDesc) (const onPkgDesc) pkgDesc
 
@@ -738,17 +819,22 @@ installAction
   -> Action
 installAction (configFlags, _, installFlags, _, _, _) _ globalFlags
   | fromFlagOrDefault False (installOnly installFlags) = do
-      let verb = fromFlagOrDefault normal (configVerbosity configFlags)
+      let common = configCommonFlags configFlags
+          verb =
+            mkVerbosity defaultVerbosityHandles $
+              fromFlagOrDefault normal (setupVerbosity common)
       config <- loadConfigOrSandboxConfig verb globalFlags
-      dist <- findSavedDistPref config (configDistPref configFlags)
+      dist <- findSavedDistPref config (setupDistPref common)
       let setupOpts = defaultSetupScriptOptions{useDistPref = dist}
       setupWrapper
         verb
         setupOpts
         Nothing
         installCommand
-        (const (mempty, mempty, mempty, mempty, mempty, mempty))
+        (const common)
+        (const (return (mempty, mempty, mempty, mempty, mempty, mempty)))
         (const [])
+        NotInLibrary
 installAction
   ( configFlags
     , configExFlags
@@ -759,12 +845,16 @@ installAction
     )
   extraArgs
   globalFlags = do
-    let verb = fromFlagOrDefault normal (configVerbosity configFlags)
+    let common = configCommonFlags configFlags
+        verb =
+          mkVerbosity defaultVerbosityHandles $
+            fromFlagOrDefault normal $
+              setupVerbosity common
     config <-
       updateInstallDirs (configUserInstall configFlags)
         <$> loadConfigOrSandboxConfig verb globalFlags
 
-    dist <- findSavedDistPref config (configDistPref configFlags)
+    dist <- findSavedDistPref config $ setupDistPref common
 
     do
       targets <- readUserTargets verb extraArgs
@@ -772,46 +862,64 @@ installAction
       let configFlags' =
             maybeForceTests installFlags' $
               savedConfigureFlags config
-                `mappend` configFlags{configDistPref = toFlag dist}
+                <> configFlags
+                  { configCommonFlags =
+                      (configCommonFlags configFlags)
+                        { setupDistPref = toFlag dist
+                        }
+                  }
           configExFlags' =
             defaultConfigExFlags
-              `mappend` savedConfigureExFlags config
-              `mappend` configExFlags
+              <> savedConfigureExFlags config
+              <> configExFlags
           installFlags' =
             defaultInstallFlags
-              `mappend` savedInstallFlags config
-              `mappend` installFlags
+              <> savedInstallFlags config
+              <> installFlags
           haddockFlags' =
             defaultHaddockFlags
-              `mappend` savedHaddockFlags config
-              `mappend` haddockFlags{haddockDistPref = toFlag dist}
+              <> savedHaddockFlags config
+              <> haddockFlags
+                { haddockCommonFlags =
+                    (haddockCommonFlags haddockFlags)
+                      { setupDistPref = toFlag dist
+                      }
+                }
           testFlags' =
             Cabal.defaultTestFlags
-              `mappend` savedTestFlags config
-              `mappend` testFlags{testDistPref = toFlag dist}
+              <> savedTestFlags config
+              <> testFlags
+                { testCommonFlags =
+                    (testCommonFlags testFlags)
+                      { setupDistPref = toFlag dist
+                      }
+                }
           benchmarkFlags' =
             Cabal.defaultBenchmarkFlags
-              `mappend` savedBenchmarkFlags config
-              `mappend` benchmarkFlags{benchmarkDistPref = toFlag dist}
-          globalFlags' = savedGlobalFlags config `mappend` globalFlags
+              <> savedBenchmarkFlags config
+              <> benchmarkFlags
+                { benchmarkCommonFlags =
+                    (benchmarkCommonFlags benchmarkFlags)
+                      { setupDistPref = toFlag dist
+                      }
+                }
+          globalFlags' = savedGlobalFlags config <> globalFlags
       (comp, platform, progdb) <- configCompilerAux' configFlags'
 
       -- TODO: Redesign ProgramDB API to prevent such problems as #2241 in the
       -- future.
       progdb' <- configureAllKnownPrograms verb progdb
 
-      configFlags'' <- configAbsolutePaths configFlags'
-
       withRepoContext verb globalFlags' $ \repoContext ->
         install
           verb
-          (configPackageDB' configFlags'')
+          (interpretPackageDBStack Nothing (configPackageDB' configFlags'))
           repoContext
           comp
           platform
           progdb'
           globalFlags'
-          configFlags''
+          configFlags'
           configExFlags'
           installFlags'
           haddockFlags'
@@ -831,12 +939,17 @@ testAction
   -> GlobalFlags
   -> IO ()
 testAction (buildFlags, testFlags) extraArgs globalFlags = do
-  let verbosity = fromFlagOrDefault normal (buildVerbosity buildFlags)
+  let verbosity =
+        mkVerbosity defaultVerbosityHandles $
+          fromFlagOrDefault normal (setupVerbosity $ buildCommonFlags buildFlags)
   config <- loadConfigOrSandboxConfig verbosity globalFlags
-  distPref <- findSavedDistPref config (testDistPref testFlags)
+  distPref <- findSavedDistPref config (setupDistPref $ testCommonFlags testFlags)
   let buildFlags' =
         buildFlags
-          { buildVerbosity = testVerbosity testFlags
+          { buildCommonFlags =
+              (buildCommonFlags buildFlags)
+                { setupVerbosity = setupVerbosity $ testCommonFlags testFlags
+                }
           }
       checkFlags = Check $ \_ flags@(configFlags, configExFlags) ->
         if fromFlagOrDefault False (configTests configFlags)
@@ -859,28 +972,43 @@ testAction (buildFlags, testFlags) extraArgs globalFlags = do
       []
       globalFlags
       config
-  nixShell verbosity distPref globalFlags config $ do
-    let setupOptions = defaultSetupScriptOptions{useDistPref = distPref}
-        testFlags' = testFlags{testDistPref = toFlag distPref}
 
-    -- The package was just configured, so the LBI must be available.
-    names <-
-      componentNamesFromLBI
-        verbosity
-        distPref
-        "test suites"
-        (\c -> case c of LBI.CTest{} -> True; _ -> False)
-    let extraArgs'
-          | null extraArgs = case names of
-              ComponentNamesUnknown -> []
-              ComponentNames names' ->
-                [ Make.unUnqualComponentName name
-                | LBI.CTestName name <- names'
-                ]
-          | otherwise = extraArgs
+  let setupOptions = defaultSetupScriptOptions{useDistPref = distPref}
+      testFlags' =
+        testFlags
+          { testCommonFlags =
+              (testCommonFlags testFlags){setupDistPref = toFlag distPref}
+          }
+      mbWorkDir = flagToMaybe $ testWorkingDir testFlags
 
-    build verbosity config distPref buildFlags' extraArgs'
-    setupWrapper verbosity setupOptions Nothing Cabal.testCommand (const testFlags') (const extraArgs')
+  -- The package was just configured, so the LBI must be available.
+  names <-
+    componentNamesFromLBI
+      verbosity
+      mbWorkDir
+      distPref
+      "test suites"
+      (\case LBI.CTest{} -> True; _ -> False)
+
+  let extraArgs'
+        | null extraArgs = case names of
+            ComponentNamesUnknown -> []
+            ComponentNames names' ->
+              [ Make.unUnqualComponentName name
+              | LBI.CTestName name <- names'
+              ]
+        | otherwise = extraArgs
+
+  build verbosity config distPref buildFlags' extraArgs'
+  setupWrapper
+    verbosity
+    setupOptions
+    Nothing
+    Cabal.testCommand
+    Cabal.testCommonFlags
+    (const (return testFlags'))
+    (const extraArgs')
+    NotInLibrary
 
 data ComponentNames
   = ComponentNamesUnknown
@@ -889,18 +1017,20 @@ data ComponentNames
 -- | Return the names of all buildable components matching a given predicate.
 componentNamesFromLBI
   :: Verbosity
-  -> FilePath
+  -> Maybe (SymbolicPath CWD (Dir Pkg))
+  -- ^ working directory
+  -> SymbolicPath Pkg (Dir Dist)
   -> String
   -> (LBI.Component -> Bool)
   -> IO ComponentNames
-componentNamesFromLBI verbosity distPref targetsDescr compPred = do
-  eLBI <- tryGetPersistBuildConfig distPref
+componentNamesFromLBI verbosity mbWorkDir distPref targetsDescr compPred = do
+  eLBI <- tryGetPersistBuildConfig mbWorkDir distPref
   case eLBI of
     Left err -> case err of
       -- Note: the build config could have been generated by a custom setup
       -- script built against a different Cabal version, so it's crucial that
       -- we ignore the bad version error here.
-      ConfigStateFileBadVersion _ _ _ -> return ComponentNamesUnknown
+      ConfigStateFileBadVersion{} -> return ComponentNamesUnknown
       _ -> dieWithException verbosity $ ConfigStateFileException (show err)
     Right lbi -> do
       let pkgDescr = LBI.localPkgDescr lbi
@@ -916,7 +1046,7 @@ componentNamesFromLBI verbosity distPref targetsDescr compPred = do
               ++ targetsDescr
               ++ "."
           exitSuccess -- See #3215.
-        else return $! (ComponentNames names)
+        else return $! ComponentNames names
 
 benchmarkAction
   :: (BuildFlags, BenchmarkFlags)
@@ -928,15 +1058,19 @@ benchmarkAction
   extraArgs
   globalFlags = do
     let verbosity =
-          fromFlagOrDefault
-            normal
-            (buildVerbosity buildFlags)
+          mkVerbosity defaultVerbosityHandles $
+            fromFlagOrDefault
+              normal
+              (setupVerbosity $ buildCommonFlags buildFlags)
 
     config <- loadConfigOrSandboxConfig verbosity globalFlags
-    distPref <- findSavedDistPref config (benchmarkDistPref benchmarkFlags)
+    distPref <- findSavedDistPref config (setupDistPref $ benchmarkCommonFlags benchmarkFlags)
     let buildFlags' =
           buildFlags
-            { buildVerbosity = benchmarkVerbosity benchmarkFlags
+            { buildCommonFlags =
+                (buildCommonFlags buildFlags)
+                  { setupVerbosity = setupVerbosity $ benchmarkCommonFlags benchmarkFlags
+                  }
             }
 
     let checkFlags = Check $ \_ flags@(configFlags, configExFlags) ->
@@ -960,34 +1094,55 @@ benchmarkAction
         []
         globalFlags
         config
-    nixShell verbosity distPref globalFlags config $ do
-      let setupOptions = defaultSetupScriptOptions{useDistPref = distPref}
-          benchmarkFlags' = benchmarkFlags{benchmarkDistPref = toFlag distPref}
 
-      -- The package was just configured, so the LBI must be available.
-      names <-
-        componentNamesFromLBI
-          verbosity
-          distPref
-          "benchmarks"
-          (\c -> case c of LBI.CBench{} -> True; _ -> False)
-      let extraArgs'
-            | null extraArgs = case names of
-                ComponentNamesUnknown -> []
-                ComponentNames names' ->
-                  [ Make.unUnqualComponentName name
-                  | LBI.CBenchName name <- names'
-                  ]
-            | otherwise = extraArgs
+    let setupOptions = defaultSetupScriptOptions{useDistPref = distPref}
+        benchmarkFlags' =
+          benchmarkFlags
+            { benchmarkCommonFlags =
+                (benchmarkCommonFlags benchmarkFlags)
+                  { setupDistPref = toFlag distPref
+                  }
+            }
+        mbWorkDir = flagToMaybe $ benchmarkWorkingDir benchmarkFlags
 
-      build verbosity config' distPref buildFlags' extraArgs'
-      setupWrapper verbosity setupOptions Nothing Cabal.benchmarkCommand (const benchmarkFlags') (const extraArgs')
+    -- The package was just configured, so the LBI must be available.
+    names <-
+      componentNamesFromLBI
+        verbosity
+        mbWorkDir
+        distPref
+        "benchmarks"
+        (\case LBI.CBench{} -> True; _ -> False)
+
+    let extraArgs'
+          | null extraArgs = case names of
+              ComponentNamesUnknown -> []
+              ComponentNames names' ->
+                [ Make.unUnqualComponentName name
+                | LBI.CBenchName name <- names'
+                ]
+          | otherwise = extraArgs
+
+    build verbosity config' distPref buildFlags' extraArgs'
+    setupWrapper
+      verbosity
+      setupOptions
+      Nothing
+      Cabal.benchmarkCommand
+      Cabal.benchmarkCommonFlags
+      (const (return benchmarkFlags'))
+      (const extraArgs')
+      NotInLibrary
 
 haddockAction :: HaddockFlags -> [String] -> Action
 haddockAction haddockFlags extraArgs globalFlags = do
-  let verbosity = fromFlag (haddockVerbosity haddockFlags)
+  let common = haddockCommonFlags haddockFlags
+      verbosity =
+        mkVerbosity defaultVerbosityHandles $
+          fromFlag $
+            setupVerbosity common
   config <- loadConfigOrSandboxConfig verbosity globalFlags
-  distPref <- findSavedDistPref config (haddockDistPref haddockFlags)
+  distPref <- findSavedDistPref config (setupDistPref common)
   config' <-
     reconfigure
       configureAction
@@ -998,64 +1153,87 @@ haddockAction haddockFlags extraArgs globalFlags = do
       []
       globalFlags
       config
-  nixShell verbosity distPref globalFlags config $ do
-    let haddockFlags' =
-          defaultHaddockFlags
-            `mappend` savedHaddockFlags config'
-            `mappend` haddockFlags{haddockDistPref = toFlag distPref}
-        setupScriptOptions =
-          defaultSetupScriptOptions
-            { useDistPref = distPref
+
+  let mbWorkDir = flagToMaybe $ setupWorkingDir common
+      haddockFlags' =
+        defaultHaddockFlags
+          <> savedHaddockFlags config'
+          <> haddockFlags
+            { haddockCommonFlags =
+                (haddockCommonFlags haddockFlags)
+                  { setupDistPref = toFlag distPref
+                  }
             }
-    setupWrapper
-      verbosity
-      setupScriptOptions
-      Nothing
-      haddockCommand
-      (const haddockFlags')
-      (const extraArgs)
-    when (haddockForHackage haddockFlags == Flag ForHackage) $ do
-      pkg <- fmap LBI.localPkgDescr (getPersistBuildConfig distPref)
-      let dest = distPref </> name <.> "tar.gz"
-          name = display (packageId pkg) ++ "-docs"
-          docDir = distPref </> "doc" </> "html"
-      createTarGzFile dest docDir name
-      notice verbosity $ "Documentation tarball created: " ++ dest
+      setupScriptOptions =
+        defaultSetupScriptOptions
+          { useDistPref = distPref
+          }
+
+  setupWrapper
+    verbosity
+    setupScriptOptions
+    Nothing
+    haddockCommand
+    haddockCommonFlags
+    (const (return haddockFlags'))
+    (const extraArgs)
+    NotInLibrary
+
+  when (haddockForHackage haddockFlags == Flag ForHackage) $ do
+    pkg <- fmap LBI.localPkgDescr (getPersistBuildConfig mbWorkDir distPref)
+    let dest = getSymbolicPath distPref </> name <.> "tar.gz"
+        name = display (packageId pkg) ++ "-docs"
+        docDir = getSymbolicPath distPref </> "doc" </> "html"
+    createTarGzFile dest docDir name
+    notice verbosity $ "Documentation tarball created: " ++ dest
 
 cleanAction :: CleanFlags -> [String] -> Action
 cleanAction cleanFlags extraArgs globalFlags = do
+  let common = cleanCommonFlags cleanFlags
+      verbosity =
+        mkVerbosity defaultVerbosityHandles $
+          fromFlagOrDefault normal $
+            setupVerbosity common
   load <- try (loadConfigOrSandboxConfig verbosity globalFlags)
   let config = either (\(SomeException _) -> mempty) id load
-  distPref <- findSavedDistPref config (cleanDistPref cleanFlags)
+  distPref <- findSavedDistPref config $ setupDistPref common
   let setupScriptOptions =
         defaultSetupScriptOptions
           { useDistPref = distPref
           , useWin32CleanHack = True
           }
-      cleanFlags' = cleanFlags{cleanDistPref = toFlag distPref}
+      cleanFlags' =
+        cleanFlags
+          { cleanCommonFlags =
+              (cleanCommonFlags cleanFlags)
+                { setupDistPref = toFlag distPref
+                }
+          }
   setupWrapper
     verbosity
     setupScriptOptions
     Nothing
     cleanCommand
-    (const cleanFlags')
+    cleanCommonFlags
+    (const (return cleanFlags'))
     (const extraArgs)
-  where
-    verbosity = fromFlagOrDefault normal (cleanVerbosity cleanFlags)
+    NotInLibrary
 
 listAction :: ListFlags -> [String] -> Action
 listAction listFlags extraArgs globalFlags = do
-  let verbosity = fromFlag (listVerbosity listFlags)
+  let verbosity =
+        mkVerbosity defaultVerbosityHandles $
+          fromFlag (listVerbosity listFlags)
   config <- loadConfigOrSandboxConfig verbosity globalFlags
   let configFlags' = savedConfigureFlags config
       configFlags =
         configFlags'
           { configPackageDBs =
               configPackageDBs configFlags'
-                `mappend` listPackageDBs listFlags
+                <> listPackageDBs listFlags
           , configHcPath = listHcPath listFlags
           }
-      globalFlags' = savedGlobalFlags config `mappend` globalFlags
+      globalFlags' = savedGlobalFlags config <> globalFlags
   compProgdb <-
     if listNeedsCompiler listFlags
       then do
@@ -1065,7 +1243,7 @@ listAction listFlags extraArgs globalFlags = do
   withRepoContext verbosity globalFlags' $ \repoContext ->
     List.list
       verbosity
-      (configPackageDB' configFlags)
+      (interpretPackageDBStack Nothing (configPackageDB' configFlags))
       repoContext
       compProgdb
       listFlags
@@ -1073,7 +1251,9 @@ listAction listFlags extraArgs globalFlags = do
 
 infoAction :: InfoFlags -> [String] -> Action
 infoAction infoFlags extraArgs globalFlags = do
-  let verbosity = fromFlag (infoVerbosity infoFlags)
+  let verbosity =
+        mkVerbosity defaultVerbosityHandles $
+          fromFlag (infoVerbosity infoFlags)
   targets <- readUserTargets verbosity extraArgs
   config <- loadConfigOrSandboxConfig verbosity globalFlags
   let configFlags' = savedConfigureFlags config
@@ -1081,14 +1261,14 @@ infoAction infoFlags extraArgs globalFlags = do
         configFlags'
           { configPackageDBs =
               configPackageDBs configFlags'
-                `mappend` infoPackageDBs infoFlags
+                <> infoPackageDBs infoFlags
           }
-      globalFlags' = savedGlobalFlags config `mappend` globalFlags
-  (comp, _, progdb) <- configCompilerAuxEx configFlags
+      globalFlags' = savedGlobalFlags config <> globalFlags
+  (comp, _, progdb) <- configCompilerAuxEx defaultVerbosityHandles configFlags
   withRepoContext verbosity globalFlags' $ \repoContext ->
     List.info
       verbosity
-      (configPackageDB' configFlags)
+      (interpretPackageDBStack Nothing (configPackageDB' configFlags))
       repoContext
       comp
       progdb
@@ -1098,16 +1278,18 @@ infoAction infoFlags extraArgs globalFlags = do
 
 fetchAction :: FetchFlags -> [String] -> Action
 fetchAction fetchFlags extraArgs globalFlags = do
-  let verbosity = fromFlag (fetchVerbosity fetchFlags)
+  let verbosity =
+        mkVerbosity defaultVerbosityHandles $
+          fromFlag (fetchVerbosity fetchFlags)
   targets <- readUserTargets verbosity extraArgs
   config <- loadConfig verbosity (globalConfigFile globalFlags)
   let configFlags = savedConfigureFlags config
-      globalFlags' = savedGlobalFlags config `mappend` globalFlags
+      globalFlags' = savedGlobalFlags config <> globalFlags
   (comp, platform, progdb) <- configCompilerAux' configFlags
   withRepoContext verbosity globalFlags' $ \repoContext ->
     fetch
       verbosity
-      (configPackageDB' configFlags)
+      (interpretPackageDBStack Nothing (configPackageDB' configFlags))
       repoContext
       comp
       platform
@@ -1118,55 +1300,64 @@ fetchAction fetchFlags extraArgs globalFlags = do
 
 freezeAction :: FreezeFlags -> [String] -> Action
 freezeAction freezeFlags _extraArgs globalFlags = do
-  let verbosity = fromFlag (freezeVerbosity freezeFlags)
+  let verbosity =
+        mkVerbosity defaultVerbosityHandles $
+          fromFlag (freezeVerbosity freezeFlags)
   config <- loadConfigOrSandboxConfig verbosity globalFlags
-  distPref <- findSavedDistPref config NoFlag
-  nixShell verbosity distPref globalFlags config $ do
-    let configFlags = savedConfigureFlags config
-        globalFlags' = savedGlobalFlags config `mappend` globalFlags
-    (comp, platform, progdb) <- configCompilerAux' configFlags
+  let configFlags = savedConfigureFlags config
+      globalFlags' = savedGlobalFlags config <> globalFlags
+  (comp, platform, progdb) <- configCompilerAux' configFlags
 
-    withRepoContext verbosity globalFlags' $ \repoContext ->
-      freeze
-        verbosity
-        (configPackageDB' configFlags)
-        repoContext
-        comp
-        platform
-        progdb
-        globalFlags'
-        freezeFlags
+  withRepoContext verbosity globalFlags' $ \repoContext ->
+    freeze
+      verbosity
+      (interpretPackageDBStack Nothing (configPackageDB' configFlags))
+      repoContext
+      comp
+      platform
+      progdb
+      globalFlags'
+      freezeFlags
 
 genBoundsAction :: FreezeFlags -> [String] -> GlobalFlags -> IO ()
 genBoundsAction freezeFlags _extraArgs globalFlags = do
-  let verbosity = fromFlag (freezeVerbosity freezeFlags)
+  let verbosity =
+        mkVerbosity defaultVerbosityHandles $
+          fromFlag (freezeVerbosity freezeFlags)
   config <- loadConfigOrSandboxConfig verbosity globalFlags
-  distPref <- findSavedDistPref config NoFlag
-  nixShell verbosity distPref globalFlags config $ do
-    let configFlags = savedConfigureFlags config
-        globalFlags' = savedGlobalFlags config `mappend` globalFlags
-    (comp, platform, progdb) <- configCompilerAux' configFlags
+  let configFlags = savedConfigureFlags config
+      globalFlags' = savedGlobalFlags config <> globalFlags
+  (comp, platform, progdb) <- configCompilerAux' configFlags
 
-    withRepoContext verbosity globalFlags' $ \repoContext ->
-      genBounds
-        verbosity
-        (configPackageDB' configFlags)
-        repoContext
-        comp
-        platform
-        progdb
-        globalFlags'
-        freezeFlags
+  withRepoContext verbosity globalFlags' $ \repoContext ->
+    genBounds
+      verbosity
+      (interpretPackageDBStack Nothing (configPackageDB' configFlags))
+      repoContext
+      comp
+      platform
+      progdb
+      globalFlags'
+      freezeFlags
 
 uploadAction :: UploadFlags -> [String] -> Action
 uploadAction uploadFlags extraArgs globalFlags = do
   config <- loadConfig verbosity (globalConfigFile globalFlags)
-  let uploadFlags' = savedUploadFlags config `mappend` uploadFlags
-      globalFlags' = savedGlobalFlags config `mappend` globalFlags
+  let uploadFlags' = savedUploadFlags config <> uploadFlags
+      globalFlags' = savedGlobalFlags config <> globalFlags
       tarfiles = extraArgs
+      chosenRepo = flagToMaybe $ uploadRepoName uploadFlags'
   when (null tarfiles && not (fromFlag (uploadDoc uploadFlags'))) $
     dieWithException verbosity UploadAction
   checkTarFiles extraArgs
+  maybe_token <-
+    case uploadTokenCmd uploadFlags' of
+      Flag (xs : xss) ->
+        Just . Token
+          <$> getProgramInvocationOutput
+            verbosity
+            (simpleProgramInvocation xs xss)
+      _ -> pure $ flagToMaybe $ uploadToken uploadFlags'
   maybe_password <-
     case uploadPasswordCmd uploadFlags' of
       Flag (xs : xss) ->
@@ -1176,6 +1367,7 @@ uploadAction uploadFlags extraArgs globalFlags = do
             (simpleProgramInvocation xs xss)
       _ -> pure $ flagToMaybe $ uploadPassword uploadFlags'
   withRepoContext verbosity globalFlags' $ \repoContext -> do
+    filteredRepoContext <- chooseRepo verbosity repoContext (unRepoName <$> chosenRepo)
     if fromFlag (uploadDoc uploadFlags')
       then do
         when (length tarfiles > 1) $
@@ -1183,8 +1375,8 @@ uploadAction uploadFlags extraArgs globalFlags = do
         tarfile <- maybe (generateDocTarball config) return $ listToMaybe tarfiles
         Upload.uploadDoc
           verbosity
-          repoContext
-          (flagToMaybe $ uploadToken uploadFlags')
+          filteredRepoContext
+          maybe_token
           (flagToMaybe $ uploadUsername uploadFlags')
           maybe_password
           (fromFlag (uploadCandidate uploadFlags'))
@@ -1192,14 +1384,16 @@ uploadAction uploadFlags extraArgs globalFlags = do
       else do
         Upload.upload
           verbosity
-          repoContext
-          (flagToMaybe $ uploadToken uploadFlags')
+          filteredRepoContext
+          maybe_token
           (flagToMaybe $ uploadUsername uploadFlags')
           maybe_password
           (fromFlag (uploadCandidate uploadFlags'))
           tarfiles
   where
-    verbosity = fromFlag (uploadVerbosity uploadFlags)
+    verbosity =
+      mkVerbosity defaultVerbosityHandles $
+        fromFlag (uploadVerbosity uploadFlags)
     checkTarFiles tarfiles
       | not (null otherFiles) =
           dieWithException verbosity $ UploadActionOnlyArchives otherFiles
@@ -1227,54 +1421,61 @@ uploadAction uploadFlags extraArgs globalFlags = do
         []
         globalFlags
       distPref <- findSavedDistPref config NoFlag
-      pkg <- fmap LBI.localPkgDescr (getPersistBuildConfig distPref)
-      return $ distPref </> display (packageId pkg) ++ "-docs" <.> "tar.gz"
+      let mbWorkDir = flagToMaybe $ configWorkingDir $ savedConfigureFlags config
+      pkg <- fmap LBI.localPkgDescr (getPersistBuildConfig mbWorkDir distPref)
+      return $ getSymbolicPath distPref </> display (packageId pkg) ++ "-docs" <.> "tar.gz"
 
 checkAction :: CheckFlags -> [String] -> Action
 checkAction checkFlags extraArgs _globalFlags = do
   let verbosityFlag = checkVerbosity checkFlags
-      verbosity = fromFlag verbosityFlag
+      verbosity = mkVerbosity defaultVerbosityHandles $ fromFlag verbosityFlag
   unless (null extraArgs) $
     dieWithException verbosity $
       CheckAction extraArgs
-  allOk <- Check.check (fromFlag verbosityFlag) (checkIgnore checkFlags)
+  allOk <- Check.check (mkVerbosity defaultVerbosityHandles $ fromFlag verbosityFlag) (checkIgnore checkFlags)
   unless allOk exitFailure
 
-formatAction :: Flag Verbosity -> [String] -> Action
+formatAction :: Flag VerbosityFlags -> [String] -> Action
 formatAction verbosityFlag extraArgs _globalFlags = do
-  let verbosity = fromFlag verbosityFlag
+  let verbosity = mkVerbosity defaultVerbosityHandles $ fromFlag verbosityFlag
+  warn verbosity "This command is not a full formatter yet"
   path <- case extraArgs of
-    [] -> do
-      cwd <- getCurrentDirectory
-      tryFindPackageDesc verbosity cwd
-    (p : _) -> return p
-  pkgDesc <- readGenericPackageDescription verbosity path
+    [] -> relativeSymbolicPath <$> tryFindPackageDesc verbosity Nothing
+    (p : _) -> return $ makeSymbolicPath p
+  pkgDesc <- readGenericPackageDescription verbosity Nothing path
   -- Uses 'writeFileAtomic' under the hood.
-  writeGenericPackageDescription path pkgDesc
+  writeGenericPackageDescription (getSymbolicPath path) pkgDesc
 
 reportAction :: ReportFlags -> [String] -> Action
 reportAction reportFlags extraArgs globalFlags = do
-  let verbosity = fromFlag (reportVerbosity reportFlags)
+  let verbosity =
+        mkVerbosity defaultVerbosityHandles $
+          fromFlag (reportVerbosity reportFlags)
   unless (null extraArgs) $
     dieWithException verbosity $
       ReportAction extraArgs
   config <- loadConfig verbosity (globalConfigFile globalFlags)
-  let globalFlags' = savedGlobalFlags config `mappend` globalFlags
-      reportFlags' = savedReportFlags config `mappend` reportFlags
-
-  withRepoContext verbosity globalFlags' $ \repoContext ->
+  let globalFlags' = savedGlobalFlags config <> globalFlags
+      reportFlags' = savedReportFlags config <> reportFlags
+      chosenRepo = flagToMaybe $ reportRepoName reportFlags'
+  withRepoContext verbosity globalFlags' $ \repoContext -> do
+    filteredRepoContext <- chooseRepo verbosity repoContext (unRepoName <$> chosenRepo)
     Upload.report
       verbosity
-      repoContext
+      filteredRepoContext
       (flagToMaybe $ reportToken reportFlags')
       (flagToMaybe $ reportUsername reportFlags')
       (flagToMaybe $ reportPassword reportFlags')
 
 runAction :: BuildFlags -> [String] -> Action
 runAction buildFlags extraArgs globalFlags = do
-  let verbosity = fromFlagOrDefault normal (buildVerbosity buildFlags)
+  let common = buildCommonFlags buildFlags
+      verbosity =
+        mkVerbosity defaultVerbosityHandles $
+          fromFlagOrDefault normal $
+            setupVerbosity common
   config <- loadConfigOrSandboxConfig verbosity globalFlags
-  distPref <- findSavedDistPref config (buildDistPref buildFlags)
+  distPref <- findSavedDistPref config $ setupDistPref common
   config' <-
     reconfigure
       configureAction
@@ -1285,23 +1486,27 @@ runAction buildFlags extraArgs globalFlags = do
       []
       globalFlags
       config
-  nixShell verbosity distPref globalFlags config $ do
-    lbi <- getPersistBuildConfig distPref
-    (exe, exeArgs) <- splitRunArgs verbosity lbi extraArgs
+  let mbWorkDir = flagToMaybe $ setupWorkingDir common
+  lbi <- getPersistBuildConfig mbWorkDir distPref
+  (exe, exeArgs) <- splitRunArgs verbosity lbi extraArgs
 
-    build verbosity config' distPref buildFlags ["exe:" ++ display (exeName exe)]
-    run verbosity lbi exe exeArgs
+  build verbosity config' distPref buildFlags ["exe:" ++ display (exeName exe)]
+  run verbosity lbi exe exeArgs
 
 getAction :: GetFlags -> [String] -> Action
 getAction getFlags extraArgs globalFlags = do
-  let verbosity = fromFlag (getVerbosity getFlags)
+  let verbosity =
+        mkVerbosity defaultVerbosityHandles $
+          fromFlag (getVerbosity getFlags)
   targets <- readUserTargets verbosity extraArgs
   config <- loadConfigOrSandboxConfig verbosity globalFlags
-  let globalFlags' = savedGlobalFlags config `mappend` globalFlags
-  withRepoContext verbosity (savedGlobalFlags config) $ \repoContext ->
+  let globalFlags' = savedGlobalFlags config <> globalFlags
+      chosenRepo = flagToMaybe $ getRepoName getFlags
+  withRepoContext verbosity (savedGlobalFlags config) $ \repoContext -> do
+    filteredRepoContext <- chooseRepo verbosity repoContext (unRepoName <$> chosenRepo)
     get
       verbosity
-      repoContext
+      filteredRepoContext
       globalFlags'
       getFlags
       targets
@@ -1324,34 +1529,38 @@ initAction initFlags extraArgs globalFlags = do
     initAction' = do
       confFlags <- loadConfigOrSandboxConfig verbosity globalFlags
       -- override with `--with-compiler` from CLI if available
-      let confFlags' = savedConfigureFlags confFlags `mappend` compFlags
-          initFlags' = savedInitFlags confFlags `mappend` initFlags
-          globalFlags' = savedGlobalFlags confFlags `mappend` globalFlags
+      let confFlags' = savedConfigureFlags confFlags <> compFlags
+          initFlags' = savedInitFlags confFlags <> initFlags
+          globalFlags' = savedGlobalFlags confFlags <> globalFlags
 
       (comp, _, progdb) <- configCompilerAux' confFlags'
 
       withRepoContext verbosity globalFlags' $ \repoContext ->
         initCmd
           verbosity
-          (configPackageDB' confFlags')
+          (interpretPackageDBStack Nothing (configPackageDB' confFlags'))
           repoContext
           comp
           progdb
           initFlags'
 
-    verbosity = fromFlag (initVerbosity initFlags)
+    verbosity =
+      mkVerbosity defaultVerbosityHandles $
+        fromFlag (initVerbosity initFlags)
     compFlags = mempty{configHcPath = initHcPath initFlags}
 
 userConfigAction :: UserConfigFlags -> [String] -> Action
 userConfigAction ucflags extraArgs globalFlags = do
-  let verbosity = fromFlag (userConfigVerbosity ucflags)
+  let verbosity =
+        mkVerbosity defaultVerbosityHandles $
+          fromFlag (userConfigVerbosity ucflags)
       frc = fromFlag (userConfigForce ucflags)
       extraLines = fromFlag (userConfigAppendLines ucflags)
   case extraArgs of
     ("init" : _) -> do
-      path <- configFile
+      path <- getConfigFilePath verbosity (globalConfigFile globalFlags)
       fileExists <- doesFileExist path
-      if (not fileExists || (fileExists && frc))
+      if not fileExists || (fileExists && frc)
         then void $ createDefaultConfigFile verbosity extraLines path
         else dieWithException verbosity $ UserConfigAction path
     ("diff" : _) -> traverse_ putStrLn =<< userConfigDiff verbosity globalFlags extraLines
@@ -1359,8 +1568,6 @@ userConfigAction ucflags extraArgs globalFlags = do
     -- Error handling.
     [] -> dieWithException verbosity SpecifySubcommand
     _ -> dieWithException verbosity $ UnknownUserConfigSubcommand extraArgs
-  where
-    configFile = getConfigFilePath (globalConfigFile globalFlags)
 
 -- | Used as an entry point when cabal-install needs to invoke itself
 -- as a setup script. This can happen e.g. when doing parallel builds.
@@ -1370,15 +1577,24 @@ actAsSetupAction actAsSetupFlags args _globalFlags =
    in case bt of
         Simple -> Simple.defaultMainArgs args
         Configure ->
-          Simple.defaultMainWithHooksArgs
-            Simple.autoconfUserHooks
+          Simple.defaultMainWithSetupHooksArgs
+            Simple.autoconfSetupHooks
+            defaultVerbosityHandles
             args
-        Make -> Make.defaultMainArgs args
-        Custom -> error "actAsSetupAction Custom"
+        Make -> unsupportedBuildType
+        Hooks -> unsupportedBuildType
+        Custom -> unsupportedBuildType
+  where
+    verbosity = mkVerbosity defaultVerbosityHandles normal
+    unsupportedBuildType = do
+      warn verbosity "act-as-setup accepts --build-type=Simple|Configure, case-sensitively."
+      dieNoWrap verbosity "act-as-setup doesn't accept --build-type=Make|Hooks|Custom."
 
 manpageAction :: [CommandSpec action] -> ManpageFlags -> [String] -> Action
 manpageAction commands flags extraArgs _ = do
-  let verbosity = fromFlag (manpageVerbosity flags)
+  let verbosity =
+        mkVerbosity defaultVerbosityHandles $
+          fromFlag (manpageVerbosity flags)
   unless (null extraArgs) $
     dieWithException verbosity $
       ManpageAction extraArgs
@@ -1389,31 +1605,30 @@ manpageAction commands flags extraArgs _ = do
           else pname
   manpageCmd cabalCmd commands flags
 
-pathAction :: PathFlags -> [String] -> Action
-pathAction pathflags extraArgs globalFlags = do
-  let verbosity = fromFlag (pathVerbosity pathflags)
-  unless (null extraArgs) $
-    dieWithException verbosity $
-      ManpageAction extraArgs
-  cfg <- loadConfig verbosity mempty
-  let getDir getDefault getGlobal =
-        maybe
-          getDefault
-          pure
-          (flagToMaybe $ getGlobal $ savedGlobalFlags cfg)
-      getSomeDir PathCacheDir = getDir defaultCacheDir globalCacheDir
-      getSomeDir PathLogsDir = getDir defaultLogsDir globalLogsDir
-      getSomeDir PathStoreDir = getDir defaultStoreDir globalStoreDir
-      getSomeDir PathConfigFile = getConfigFilePath (globalConfigFile globalFlags)
-      getSomeDir PathInstallDir =
-        fromFlagOrDefault defaultInstallPath (pure <$> cinstInstalldir (savedClientInstallFlags cfg))
-      printPath p = putStrLn . withOutputMarker verbosity . ((pathName p ++ ": ") ++) =<< getSomeDir p
-  -- If no paths have been requested, print all paths with labels.
-  --
-  -- If a single path has been requested, print that path without any label.
-  --
-  -- If multiple paths have been requested, print each of them with labels.
-  case fromFlag $ pathDirs pathflags of
-    [] -> mapM_ printPath [minBound .. maxBound]
-    [d] -> putStrLn . withOutputMarker verbosity =<< getSomeDir d
-    ds -> mapM_ printPath ds
+chooseRepo :: Verbosity -> RepoContext -> Maybe String -> IO RepoContext
+chooseRepo verbosity ctx mrepo = do
+  let repos = repoContextRepos ctx
+  let remoteRepositories = filter isRepoRemote repos
+  filtered <- case mrepo of
+    Just name -> case find (\r -> name == (unRepoName . repoName) r) repos of
+      Just found -> return [found]
+      Nothing ->
+        die' verbosity $
+          mconcat
+            [ "Cannot find chosen repository "
+            , name
+            , "."
+            , " Available repositories are: "
+            , intercalate ", " (fmap (unRepoName . repoName) (repoContextRepos ctx))
+            ]
+    Nothing -> return remoteRepositories
+  if length filtered > 1
+    then
+      die'
+        verbosity
+        $ mconcat
+          [ "Cannot determine a specific hackage repository. Please choose one with --repository-name."
+          , " Available repositories are: "
+          , intercalate ", " (fmap (unRepoName . repoName) (repoContextRepos ctx))
+          ]
+    else pure ctx{repoContextRepos = filtered}

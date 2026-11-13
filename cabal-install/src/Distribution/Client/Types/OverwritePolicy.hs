@@ -1,5 +1,3 @@
-{-# LANGUAGE DeriveGeneric #-}
-
 module Distribution.Client.Types.OverwritePolicy where
 
 import Distribution.Client.Compat.Prelude
@@ -15,6 +13,7 @@ data OverwritePolicy
   deriving (Show, Eq, Generic, Bounded, Enum)
 
 instance Binary OverwritePolicy
+instance NFData OverwritePolicy
 instance Structured OverwritePolicy
 
 instance Parsec OverwritePolicy where

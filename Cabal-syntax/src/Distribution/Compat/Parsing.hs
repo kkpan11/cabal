@@ -58,6 +58,7 @@ import Control.Monad.Trans.Writer.Lazy as Lazy
 import Control.Monad.Trans.Writer.Strict as Strict
 import Data.Foldable (asum)
 
+import Control.Monad (replicateM)
 import qualified Data.List.NonEmpty as NE
 import qualified Text.Parsec as Parsec
 
@@ -81,7 +82,7 @@ option x p = p <|> pure x
 -- It only fails if @p@ fails after consuming input. It discards the result
 -- of @p@. (Plays the role of parsec's optional, which conflicts with Applicative's optional)
 skipOptional :: Alternative m => m a -> m ()
-skipOptional p = (() <$ p) <|> pure ()
+skipOptional p = void p <|> pure ()
 {-# INLINE skipOptional #-}
 
 -- | @between open close p@ parses @open@, followed by @p@ and @close@.
@@ -141,7 +142,7 @@ endBy p sep = many (p <* sep)
 count :: Applicative m => Int -> m a -> m [a]
 count n p
   | n <= 0 = pure []
-  | otherwise = sequenceA (replicate n p)
+  | otherwise = replicateM n p
 {-# INLINE count #-}
 
 -- | @chainr p op x@ parses /zero/ or more occurrences of @p@,
@@ -223,7 +224,7 @@ class Alternative m => Parsing m where
   -- | A version of many that discards its input. Specialized because it
   -- can often be implemented more cheaply.
   skipMany :: m a -> m ()
-  skipMany p = () <$ many p
+  skipMany p = void $ many p
   {-# INLINE skipMany #-}
 
   -- | @skipSome p@ applies the parser @p@ /one/ or more times, skipping

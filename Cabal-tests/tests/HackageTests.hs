@@ -1,16 +1,7 @@
-{-# LANGUAGE BangPatterns        #-}
 {-# LANGUAGE CPP                 #-}
-{-# LANGUAGE Rank2Types          #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-#if !MIN_VERSION_deepseq(1,4,0)
-{-# OPTIONS_GHC -fno-warn-orphans #-}
-#endif
+{-# OPTIONS_GHC -Wno-unused-pattern-binds #-} -- pattern match to assert field count
 
 module Main where
-
-import Distribution.Compat.Semigroup
-import Prelude ()
-import Prelude.Compat
 
 import Control.Applicative                         (many, (<**>), (<|>))
 import Control.DeepSeq                             (NFData (..), force)
@@ -23,16 +14,29 @@ import Data.Monoid                                 (Sum (..))
 import Distribution.PackageDescription.Check       (PackageCheck (..), checkPackage)
 import Distribution.PackageDescription.PrettyPrint (showGenericPackageDescription)
 import Distribution.PackageDescription.Quirks      (patchQuirks)
+import Distribution.PackageDescription
+  ( GenericPackageDescription(GenericPackageDescription)
+  , packageDescription
+  , gpdScannedVersion
+  , genPackageFlags
+  , condLibrary
+  , condSubLibraries
+  , condForeignLibs
+  , condExecutables
+  , condTestSuites
+  , condBenchmarks
+  )
 import Distribution.Simple.Utils                   (fromUTF8BS, toUTF8BS)
+import Distribution.Fields.ParseResult
+import Distribution.Parsec.Source
 import Numeric                                     (showFFloat)
 import System.Directory                            (getXdgDirectory, XdgDirectory(XdgCache, XdgConfig), getAppUserDataDirectory, doesDirectoryExist)
 import System.Environment                          (lookupEnv)
 import System.Exit                                 (exitFailure)
 import System.FilePath                             ((</>))
 
-import Data.Orphans ()
-
 import qualified Codec.Archive.Tar                      as Tar
+import qualified Codec.Archive.Tar.Entry                as Tar
 import qualified Data.ByteString                        as B
 import qualified Data.ByteString.Char8                  as B8
 import qualified Data.ByteString.Lazy                   as BSL
@@ -56,11 +60,14 @@ import Data.TreeDiff.Instances.Cabal ()
 import Data.TreeDiff.Pretty          (ansiWlEditExprCompact)
 #endif
 
+import Data.Time.Clock.System
+import Data.Time.Format
+
 -------------------------------------------------------------------------------
 -- parseIndex: Index traversal
 -------------------------------------------------------------------------------
 
-parseIndex :: (Monoid a, NFData a) => (FilePath -> Bool)
+parseIndex :: (Monoid a, NFData a) => (Tar.EpochTime -> FilePath -> Bool)
            -> (FilePath -> B.ByteString -> IO a) -> IO a
 parseIndex predicate action = do
     configPath <- getCabalConfigPath
@@ -99,7 +106,7 @@ parseIndex predicate action = do
 
 parseIndex'
     :: (Monoid a, NFData a)
-    => (FilePath -> Bool)
+    => (Tar.EpochTime -> FilePath -> Bool)
     -> (FilePath -> B.ByteString -> IO a) -> FilePath -> IO a
 parseIndex' predicate action path = do
     putStrLn $ "Reading index from: " ++ path
@@ -110,7 +117,7 @@ parseIndex' predicate action path = do
 
   where
     cons entry entries
-        | predicate (Tar.entryPath entry) = entry : entries
+        | predicate (Tar.entryTime entry) (Tar.entryPath entry) = entry : entries
         | otherwise = entries
 
     f entry = case Tar.entryContent entry of
@@ -148,7 +155,7 @@ readFieldTest fpath bs = case Parsec.readFields bs' of
 parseParsecTest :: Bool -> FilePath -> B.ByteString -> IO ParsecResult
 parseParsecTest keepGoing fpath bs = do
     let (warnings, result) = Parsec.runParseResult $
-                             Parsec.parseGenericPackageDescription bs
+                             withSource (PCabalFile (fpath, bs)) $ Parsec.parseGenericPackageDescription bs
 
     let w | null warnings = 0
           | otherwise     = 1
@@ -159,10 +166,10 @@ parseParsecTest keepGoing fpath bs = do
             return (ParsecResult 1 w 0)
 
         Left (_, errors) | keepGoing -> do
-            traverse_ (putStrLn . Parsec.showPError fpath) errors
+            traverse_ (putStrLn . Parsec.showPErrorWithSource . fmap renderCabalFileSource) errors
             return (ParsecResult 1 w 1)
                          | otherwise -> do
-            traverse_ (putStrLn . Parsec.showPError fpath) errors
+            traverse_ (putStrLn . Parsec.showPErrorWithSource . fmap renderCabalFileSource) errors
             exitFailure
 
 -- | A hook to make queries on Hackage
@@ -181,10 +188,9 @@ instance Semigroup ParsecResult where
 
 instance Monoid ParsecResult where
     mempty  = ParsecResult 0 0 0
-    mappend = (<>)
 
 instance NFData ParsecResult where
-    rnf (ParsecResult _ _ _) = ()
+    rnf ParsecResult{} = ()
 
 -------------------------------------------------------------------------------
 -- Check test
@@ -193,7 +199,7 @@ instance NFData ParsecResult where
 parseCheckTest :: FilePath -> B.ByteString -> IO CheckResult
 parseCheckTest fpath bs = do
     let (warnings, parsec) = Parsec.runParseResult $
-                             Parsec.parseGenericPackageDescription bs
+                             withSource (PCabalFile (fpath, bs)) $ Parsec.parseGenericPackageDescription bs
     case parsec of
         Right gpd -> do
             let checks = checkPackage gpd
@@ -206,7 +212,7 @@ parseCheckTest fpath bs = do
             -- one for file, many checks
             return (CheckResult 1 (w warnings) 0 0 0 0 0 0 <> foldMap toCheckResult checks)
         Left (_, errors) -> do
-            traverse_ (putStrLn . Parsec.showPError fpath) errors
+            traverse_ (putStrLn . Parsec.showPErrorWithSource . fmap renderCabalFileSource) errors
             exitFailure
 
 -- checkCppFlags :: BuildInfo -> IO BuildInfo
@@ -228,7 +234,6 @@ instance Semigroup CheckResult where
 
 instance Monoid CheckResult where
     mempty = CheckResult 0 0 0 0 0 0 0 0
-    mappend = (<>)
 
 toCheckResult :: PackageCheck -> CheckResult
 toCheckResult PackageBuildImpossible {}    = CheckResult 0 0 1 1 0 0 0 0
@@ -251,7 +256,20 @@ roundtripTest testFieldsTransform fpath bs = do
     let y = y0 & L.packageDescription . L.description .~ mempty
     let x = x0 & L.packageDescription . L.description .~ mempty
 
-    assertEqual' bs' x y
+    -- Note: The pattern matching is to ensure this doesn't go unnoticed when new fields are added.
+    let checkField field = assertEqual' bs' (field x) (field y)
+    let (GenericPackageDescription _ _ _ _ _ _ _ _ _) = x0
+    sequence_
+      [ checkField packageDescription
+      , checkField gpdScannedVersion
+      , checkField genPackageFlags
+      , checkField condLibrary
+      , checkField condSubLibraries
+      , checkField condForeignLibs
+      , checkField condExecutables
+      , checkField condTestSuites
+      , checkField condBenchmarks
+      ]
 
     -- fromParsecField, "shallow" parser/pretty roundtrip
     when testFieldsTransform $
@@ -297,9 +315,10 @@ roundtripTest testFieldsTransform fpath bs = do
         putStrLn bs'
         exitFailure
 
+{- FOURMOLU_DISABLE -}
     parse phase c = do
         let (_, x') = Parsec.runParseResult $
-                      Parsec.parseGenericPackageDescription c
+                      withSource (PCabalFile (fpath, c)) $ Parsec.parseGenericPackageDescription c
         case x' of
             Right gpd -> pure gpd
             Left (_, errs) -> do
@@ -307,6 +326,7 @@ roundtripTest testFieldsTransform fpath bs = do
                 traverse_ print errs
                 B.putStr c
                 fail "parse error"
+{- FOURMOLU_ENABLE -}
 
 -------------------------------------------------------------------------------
 -- Main
@@ -320,6 +340,13 @@ main = join (O.execParser opts)
         , O.progDesc "tests using Hackage's index"
         ]
 
+    indexP =
+      fmap cvt <$> O.optional (O.strOption (O.long "index-state" <> O.metavar "YYYY-MM-DD"))
+      where
+       cvt =
+        systemSeconds . utcToSystemTime .
+          parseTimeOrError False defaultTimeLocale "%Y-%m-%d"
+
     optsP = subparser
         [ command "read-fields" readFieldsP
           "Parse outer format (to '[Field]', TODO: apply Quirks)"
@@ -330,20 +357,20 @@ main = join (O.execParser opts)
 
     defaultA = do
         putStrLn "Default action: parsec k"
-        parsecA (mkPredicate ["k"]) False
+        parsecA ["k"] False Nothing
 
-    readFieldsP = readFieldsA <$> prefixP
-    readFieldsA pfx = parseIndex pfx readFieldTest
+    readFieldsP = readFieldsA <$> prefixP <*> indexP
+    readFieldsA pfx idx = parseIndex (mkPredicate pfx idx) readFieldTest
 
-    parsecP = parsecA <$> prefixP <*> keepGoingP
+    parsecP = parsecA <$> prefixP <*> keepGoingP <*> indexP
     keepGoingP =
         O.flag' True  (O.long "keep-going") <|>
         O.flag' False (O.long "no-keep-going") <|>
         pure False
 
-    parsecA pfx keepGoing = do
+    parsecA pfx keepGoing idx = do
         begin <- Clock.getTime Clock.Monotonic
-        ParsecResult n w f <- parseIndex pfx (parseParsecTest keepGoing)
+        ParsecResult n w f <- parseIndex (mkPredicate pfx idx) (parseParsecTest keepGoing)
         end <- Clock.getTime Clock.Monotonic
         let diff = Clock.toNanoSecs $ Clock.diffTimeSpec end begin
 
@@ -353,14 +380,14 @@ main = join (O.execParser opts)
         putStrLn $ showFFloat (Just 6) (fromInteger diff / 1e9                  :: Double) " seconds elapsed"
         putStrLn $ showFFloat (Just 6) (fromInteger diff / 1e6 / fromIntegral n :: Double) " milliseconds per file"
 
-    roundtripP = roundtripA <$> prefixP <*> testFieldsP
-    roundtripA pfx testFieldsTransform = do
-        Sum n <- parseIndex pfx (roundtripTest testFieldsTransform)
+    roundtripP = roundtripA <$> prefixP <*> testFieldsP <*> indexP
+    roundtripA pfx testFieldsTransform idx = do
+        Sum n <- parseIndex (mkPredicate pfx idx) (roundtripTest testFieldsTransform)
         putStrLn $ show n ++ " files processed"
 
-    checkP = checkA <$> prefixP
-    checkA pfx = do
-        CheckResult n w x a b c d e <- parseIndex pfx parseCheckTest
+    checkP = checkA <$> prefixP <*> indexP
+    checkA pfx idx = do
+        CheckResult n w x a b c d e <- parseIndex (mkPredicate pfx idx) parseCheckTest
         putStrLn $ show n ++ " files processed"
         putStrLn $ show w ++ " files have lexer/parser warnings"
         putStrLn $ show x ++ " files have check warnings"
@@ -370,7 +397,7 @@ main = join (O.execParser opts)
         putStrLn $ show d ++ " build dist suspicious warning"
         putStrLn $ show e ++ " build dist inexcusable"
 
-    prefixP = fmap mkPredicate $ many $ O.strArgument $ mconcat
+    prefixP = many $ O.strArgument $ mconcat
         [ O.metavar "PREFIX"
         , O.help "Check only files starting with a prefix"
         ]
@@ -380,8 +407,14 @@ main = join (O.execParser opts)
         , O.help "Test also 'showFields . fromParsecFields . readFields' transform"
         ]
 
-    mkPredicate [] = const True
-    mkPredicate pfxs = \n -> any (`isPrefixOf` n) pfxs
+    indexPredicate :: Maybe Tar.EpochTime -> (k -> Bool) -> (Tar.EpochTime -> k -> Bool)
+    indexPredicate Nothing k = const k
+    indexPredicate (Just indexDate) k =
+        \e -> if e <= indexDate then k else const False
+
+    mkPredicate :: [String] -> Maybe Tar.EpochTime -> (Tar.EpochTime -> FilePath -> Bool)
+    mkPredicate [] idx = indexPredicate idx (const True)
+    mkPredicate pfxs idx = indexPredicate idx (\n -> any (`isPrefixOf` n) pfxs)
 
     command name p desc = O.command name
                           (O.info (p <**> O.helper) (O.progDesc desc))
@@ -426,16 +459,7 @@ fieldLinesToString fieldLines =
 -- | We assume that monoid is commutative.
 --
 -- First we chunk input (as single cabal file is little work)
-foldIO :: forall a m. (Monoid m, NFData m) => (a -> IO m) -> [a] -> IO m
+foldIO :: forall a m. (Monoid m) => (a -> IO m) -> [a] -> IO m
 foldIO f = go mempty where
     go !acc [] = acc
-    go !acc (x:xs) = go (mappend acc (f x)) xs
-
--------------------------------------------------------------------------------
--- Orphans
--------------------------------------------------------------------------------
-
-#if !MIN_VERSION_deepseq(1,4,0)
-instance NFData a => NFData (Sum a) where
-    rnf (Sum a)  = rnf a
-#endif
+    go !acc (x:xs) = go (acc <> f x) xs

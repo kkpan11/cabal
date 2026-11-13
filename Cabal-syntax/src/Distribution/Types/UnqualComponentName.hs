@@ -1,7 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-
 module Distribution.Types.UnqualComponentName
   ( UnqualComponentName
   , unUnqualComponentName
@@ -33,7 +29,6 @@ newtype UnqualComponentName = UnqualComponentName ShortText
     , Show
     , Eq
     , Ord
-    , Typeable
     , Data
     , Semigroup
     , Monoid -- TODO: bad enabler of bad monoids

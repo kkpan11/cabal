@@ -1,5 +1,5 @@
--- -fno-warn-deprecations for use of Map.foldWithKey
-{-# OPTIONS_GHC -fno-warn-deprecations #-}
+-- -Wno-deprecations for use of Map.foldWithKey
+{-# OPTIONS_GHC -Wno-deprecations #-}
 
 -----------------------------------------------------------------------------
 
@@ -28,17 +28,18 @@ module Distribution.PackageDescription.Configuration
   , mapCondTree
   , mapTreeData
   , mapTreeConds
-  , mapTreeConstrs
   , transformAllBuildInfos
   , transformAllBuildDepends
   , transformAllBuildDependsN
   , simplifyWithSysParams
   ) where
 
+import Data.Functor ((<&>))
 import Distribution.Compat.Prelude
 import Prelude ()
 
 -- lens
+import qualified Distribution.Compat.Lens as L
 import qualified Distribution.Types.BuildInfo.Lens as L
 import qualified Distribution.Types.GenericPackageDescription.Lens as L
 import qualified Distribution.Types.PackageDescription.Lens as L
@@ -56,13 +57,15 @@ import Distribution.System
 import Distribution.Types.Component
 import Distribution.Types.ComponentRequestedSpec
 import Distribution.Types.DependencyMap
+import Distribution.Types.DependencySatisfaction (DependencySatisfaction (..))
+import Distribution.Types.MissingDependency (MissingDependency (..))
 import Distribution.Types.PackageVersionConstraint
 import Distribution.Utils.Generic
-import Distribution.Utils.Path
+import Distribution.Utils.Path (sameDirectory)
 import Distribution.Version
 
-import qualified Data.Map.Lazy as Map
 import Data.Tree (Tree (Node))
+import Data.Tuple
 
 ------------------------------------------------------------------------------
 
@@ -111,8 +114,8 @@ simplifyWithSysParams os arch cinfo cond = (cond', flags)
 parseCondition :: CabalParsing m => m (Condition ConfVar)
 parseCondition = condOr
   where
-    condOr = sepByNonEmpty condAnd (oper "||") >>= return . foldl1 COr
-    condAnd = sepByNonEmpty cond (oper "&&") >>= return . foldl1 CAnd
+    condOr = sepByNonEmpty condAnd (oper "||") <&> foldl1 COr
+    condAnd = sepByNonEmpty cond (oper "&&") <&> foldl1 CAnd
     -- TODO: try?
     cond =
       sp
@@ -125,11 +128,11 @@ parseCondition = condOr
               <|> implCond
            )
     inparens = between (P.char '(' >> sp) (sp >> P.char ')' >> sp)
-    notCond = P.char '!' >> sp >> cond >>= return . CNot
-    osCond = string "os" >> sp >> inparens osIdent >>= return . Var
-    archCond = string "arch" >> sp >> inparens archIdent >>= return . Var
-    flagCond = string "flag" >> sp >> inparens flagIdent >>= return . Var
-    implCond = string "impl" >> sp >> inparens implIdent >>= return . Var
+    notCond = (P.char '!' >> sp >> cond) <&> CNot
+    osCond = (string "os" >> sp >> inparens osIdent) <&> Var
+    archCond = (string "arch" >> sp >> inparens archIdent) <&> Var
+    flagCond = (string "flag" >> sp >> inparens flagIdent) <&> Var
+    implCond = (string "impl" >> sp >> inparens implIdent) <&> Var
     boolLiteral = fmap Lit parsec
     archIdent = fmap Arch parsec
     osIdent = fmap OS parsec
@@ -144,15 +147,16 @@ parseCondition = condOr
 
 ------------------------------------------------------------------------------
 
--- | Result of dependency test. Isomorphic to @Maybe d@ but renamed for
+-- | Result of dependency test. Isomorphic to @Maybe@ but renamed for
 --   clarity.
-data DepTestRslt d = DepOk | MissingDeps d
+data DepTestRslt
+  = DepOk
+  | MissingDeps [MissingDependency]
 
-instance Semigroup d => Monoid (DepTestRslt d) where
+instance Monoid DepTestRslt where
   mempty = DepOk
-  mappend = (<>)
 
-instance Semigroup d => Semigroup (DepTestRslt d) where
+instance Semigroup DepTestRslt where
   DepOk <> x = x
   x <> DepOk = x
   (MissingDeps d) <> (MissingDeps d') = MissingDeps (d <> d')
@@ -189,21 +193,21 @@ resolveWithFlags
   -- ^ Compiler information
   -> [PackageVersionConstraint]
   -- ^ Additional constraints
-  -> [CondTree ConfVar [Dependency] PDTagged]
-  -> ([Dependency] -> DepTestRslt [Dependency])
+  -> [CondTree ConfVar PDTagged]
+  -> ([Dependency] -> DepTestRslt)
   -- ^ Dependency test function.
-  -> Either [Dependency] (TargetSet PDTagged, FlagAssignment)
+  -> Either [MissingDependency] (TargetSet PDTagged, FlagAssignment)
   -- ^ Either the missing dependencies (error case), or a pair of
   -- (set of build targets with dependencies, chosen flag assignments)
 resolveWithFlags dom enabled os arch impl constrs trees checkDeps =
-  either (Left . fromDepMapUnion) Right $ explore (build mempty dom)
+  explore (build mempty dom)
   where
     -- simplify trees by (partially) evaluating all conditions and converting
     -- dependencies to dependency maps.
-    simplifiedTrees :: [CondTree FlagName DependencyMap PDTagged]
+    simplifiedTrees :: [CondTree FlagName (PDTagged, DependencyMap)]
     simplifiedTrees =
       map
-        ( mapTreeConstrs toDepMap -- convert to maps
+        ( mapTreeData (\x -> (x, toDepMap $ L.view L.targetBuildDepends x))
             . addBuildableConditionPDTagged
             . mapTreeConds (fst . simplifyWithSysParams os arch impl)
         )
@@ -216,20 +220,21 @@ resolveWithFlags dom enabled os arch impl constrs trees checkDeps =
     -- computation overhead in the successful case.
     explore
       :: Tree FlagAssignment
-      -> Either DepMapUnion (TargetSet PDTagged, FlagAssignment)
+      -> Either [MissingDependency] (TargetSet PDTagged, FlagAssignment)
     explore (Node flags ts) =
       let targetSet =
             TargetSet $
               flip map simplifiedTrees $
                 -- apply additional constraints to all dependencies
                 first (`constrainBy` constrs)
+                  . swap
                   . simplifyCondTree (env flags)
           deps = overallDependencies enabled targetSet
        in case checkDeps (fromDepMap deps) of
             DepOk
               | null ts -> Right (targetSet, flags)
               | otherwise -> tryAll $ map explore ts
-            MissingDeps mds -> Left (toDepMapUnion mds)
+            MissingDeps mds -> Left mds
 
     -- Builds a tree of all possible flag assignments.  Internal nodes
     -- have only partial assignments.
@@ -238,18 +243,18 @@ resolveWithFlags dom enabled os arch impl constrs trees checkDeps =
     build assigned ((fn, vals) : unassigned) =
       Node assigned $ map (\v -> build (insertFlagAssignment fn v assigned) unassigned) vals
 
-    tryAll :: [Either DepMapUnion a] -> Either DepMapUnion a
+    tryAll :: Monoid a => [Either a b] -> Either a b
     tryAll = foldr mp mz
 
     -- special version of `mplus' for our local purposes
-    mp :: Either DepMapUnion a -> Either DepMapUnion a -> Either DepMapUnion a
+    mp :: Monoid a => Either a b -> Either a b -> Either a b
     mp m@(Right _) _ = m
     mp _ m@(Right _) = m
     mp (Left xs) (Left ys) = Left (xs <> ys)
 
     -- `mzero'
-    mz :: Either DepMapUnion a
-    mz = Left (DepMapUnion Map.empty)
+    mz :: Monoid a => Either a b
+    mz = Left mempty
 
     env :: FlagAssignment -> FlagName -> Either FlagName Bool
     env flags flag = (maybe (Left flag) Right . lookupFlagAssignment flag) flags
@@ -259,15 +264,15 @@ resolveWithFlags dom enabled os arch impl constrs trees checkDeps =
 -- can determine that Buildable is always True, it returns the input unchanged.
 -- If Buildable is always False, it returns the empty 'CondTree'.
 addBuildableCondition
-  :: (Eq v, Monoid a, Monoid c)
+  :: (Eq v, Monoid a)
   => (a -> BuildInfo)
-  -> CondTree v c a
-  -> CondTree v c a
+  -> CondTree v a
+  -> CondTree v a
 addBuildableCondition getInfo t =
   case extractCondition (buildable . getInfo) t of
     Lit True -> t
-    Lit False -> CondNode mempty mempty []
-    c -> CondNode mempty mempty [condIfThen c t]
+    Lit False -> CondNode mempty []
+    c -> CondNode mempty [condIfThen c t]
 
 -- | This is a special version of 'addBuildableCondition' for the 'PDTagged'
 -- type.
@@ -279,16 +284,18 @@ addBuildableCondition getInfo t =
 --
 -- See <https://github.com/haskell/cabal/pull/4094> for more details.
 addBuildableConditionPDTagged
-  :: (Eq v, Monoid c)
-  => CondTree v c PDTagged
-  -> CondTree v c PDTagged
+  :: Eq v
+  => CondTree v PDTagged
+  -> CondTree v PDTagged
 addBuildableConditionPDTagged t =
   case extractCondition (buildable . getInfo) t of
     Lit True -> t
-    Lit False -> deleteConstraints t
-    c -> CondNode mempty mempty [condIfThenElse c t (deleteConstraints t)]
+    Lit False -> mapTreeData deleteConstraints t
+    c -> CondNode mempty [condIfThenElse c t (mapTreeData deleteConstraints t)]
   where
-    deleteConstraints = mapTreeConstrs (const mempty)
+    deleteConstraints (Lib lib) = Lib (L.set L.targetBuildDepends mempty lib)
+    deleteConstraints (SubComp unqualName comp) = SubComp unqualName (L.set L.targetBuildDepends mempty comp)
+    deleteConstraints PDNull = PDNull
 
     getInfo :: PDTagged -> BuildInfo
     getInfo (Lib l) = libBuildInfo l
@@ -323,31 +330,10 @@ extractConditions f gpkg =
     , extractCondition (f . benchmarkBuildInfo) . snd <$> condBenchmarks gpkg
     ]
 
--- | A map of package constraints that combines version ranges using 'unionVersionRanges'.
-newtype DepMapUnion = DepMapUnion {unDepMapUnion :: Map PackageName (VersionRange, NonEmptySet LibraryName)}
-
-instance Semigroup DepMapUnion where
-  DepMapUnion x <> DepMapUnion y =
-    DepMapUnion $
-      Map.unionWith unionVersionRanges' x y
-
-unionVersionRanges'
-  :: (VersionRange, NonEmptySet LibraryName)
-  -> (VersionRange, NonEmptySet LibraryName)
-  -> (VersionRange, NonEmptySet LibraryName)
-unionVersionRanges' (vr, cs) (vr', cs') = (unionVersionRanges vr vr', cs <> cs')
-
-toDepMapUnion :: [Dependency] -> DepMapUnion
-toDepMapUnion ds =
-  DepMapUnion $ Map.fromListWith unionVersionRanges' [(p, (vr, cs)) | Dependency p vr cs <- ds]
-
-fromDepMapUnion :: DepMapUnion -> [Dependency]
-fromDepMapUnion m = [Dependency p vr cs | (p, (vr, cs)) <- Map.toList (unDepMapUnion m)]
-
-freeVars :: CondTree ConfVar c a -> [FlagName]
+freeVars :: CondTree ConfVar a -> [FlagName]
 freeVars t = [f | PackageFlag f <- freeVars' t]
   where
-    freeVars' (CondNode _ _ ifs) = concatMap compfv ifs
+    freeVars' (CondNode _ ifs) = concatMap compfv ifs
     compfv (CondBranch c ct mct) = condfv c ++ freeVars' ct ++ maybe [] freeVars' mct
     condfv c = case c of
       Var v -> [v]
@@ -415,7 +401,6 @@ data PDTagged
 
 instance Monoid PDTagged where
   mempty = PDNull
-  mappend = (<>)
 
 instance Semigroup PDTagged where
   PDNull <> x = x
@@ -423,6 +408,12 @@ instance Semigroup PDTagged where
   Lib l <> Lib l' = Lib (l <> l')
   SubComp n x <> SubComp n' x' | n == n' = SubComp n (x <> x')
   _ <> _ = cabalBug "Cannot combine incompatible tags"
+
+instance L.HasBuildInfo PDTagged where
+  buildInfo f x = case x of
+    Lib lib -> Lib <$> L.buildInfo f lib
+    SubComp name comp -> SubComp name <$> L.buildInfo f comp
+    PDNull -> PDNull <$ f mempty
 
 -- | Create a package description with all configurations resolved.
 --
@@ -453,7 +444,7 @@ finalizePD
   :: FlagAssignment
   -- ^ Explicitly specified flag assignments
   -> ComponentRequestedSpec
-  -> (Dependency -> Bool)
+  -> (Dependency -> DependencySatisfaction)
   -- ^ Is a given dependency satisfiable from the set of
   -- available packages?  If this is unknown then use
   -- True.
@@ -465,7 +456,7 @@ finalizePD
   -- ^ Additional constraints
   -> GenericPackageDescription
   -> Either
-      [Dependency]
+      [MissingDependency]
       (PackageDescription, FlagAssignment)
   -- ^ Either missing dependencies or the resolved package
   -- description along with the flag assignments chosen.
@@ -526,7 +517,11 @@ finalizePD
           | otherwise -> [b, not b]
       -- flagDefaults = map (\(n,x:_) -> (n,x)) flagChoices
       check ds =
-        let missingDeps = filter (not . satisfyDep) ds
+        let missingDeps =
+              [ MissingDependency dependency reason
+              | (dependency, Unsatisfied reason) <-
+                  map (\dependency -> (dependency, satisfyDep dependency)) ds
+              ]
          in if null missingDeps
               then DepOk
               else MissingDeps missingDeps
@@ -568,36 +563,47 @@ flattenPackageDescription
     where
       mlib = f <$> mlib0
         where
-          f lib = (libFillInDefaults . fst . ignoreConditions $ lib){libName = LMainLibName}
+          f :: CondTree ConfVar Library -> Library
+          f lib = (libFillInDefaults . ignoreConditions $ lib){libName = LMainLibName}
       sub_libs = flattenLib <$> sub_libs0
       flibs = flattenFLib <$> flibs0
       exes = flattenExe <$> exes0
       tests = flattenTst <$> tests0
       bms = flattenBm <$> bms0
+
+      flattenLib :: (UnqualComponentName, CondTree ConfVar Library) -> Library
       flattenLib (n, t) =
         libFillInDefaults $
-          (fst $ ignoreConditions t)
+          (ignoreConditions t)
             { libName = LSubLibName n
             , libExposed = False
             }
+
+      flattenFLib :: (UnqualComponentName, CondTree ConfVar ForeignLib) -> ForeignLib
       flattenFLib (n, t) =
         flibFillInDefaults $
-          (fst $ ignoreConditions t)
+          (ignoreConditions t)
             { foreignLibName = n
             }
+
+      flattenExe :: (UnqualComponentName, CondTree ConfVar Executable) -> Executable
       flattenExe (n, t) =
         exeFillInDefaults $
-          (fst $ ignoreConditions t)
+          (ignoreConditions t)
             { exeName = n
             }
+
+      flattenTst :: (UnqualComponentName, CondTree ConfVar TestSuite) -> TestSuite
       flattenTst (n, t) =
         testFillInDefaults $
-          (fst $ ignoreConditions t)
+          (ignoreConditions t)
             { testName = n
             }
+
+      flattenBm :: (UnqualComponentName, CondTree ConfVar Benchmark) -> Benchmark
       flattenBm (n, t) =
         benchFillInDefaults $
-          (fst $ ignoreConditions t)
+          (ignoreConditions t)
             { benchmarkName = n
             }
 
@@ -654,8 +660,6 @@ transformAllBuildDepends
 transformAllBuildDepends f =
   over (L.traverseBuildInfos . L.targetBuildDepends . traverse) f
     . over (L.packageDescription . L.setupBuildInfo . traverse . L.setupDepends . traverse) f
-    -- cannot be point-free as normal because of higher rank
-    . over (\f' -> L.allCondTrees $ traverseCondTreeC f') (map f)
 
 -- | Walk a 'GenericPackageDescription' and apply @f@ to all nested
 -- @build-depends@ fields.
@@ -666,5 +670,3 @@ transformAllBuildDependsN
 transformAllBuildDependsN f =
   over (L.traverseBuildInfos . L.targetBuildDepends) f
     . over (L.packageDescription . L.setupBuildInfo . traverse . L.setupDepends) f
-    -- cannot be point-free as normal because of higher rank
-    . over (\f' -> L.allCondTrees $ traverseCondTreeC f') f

@@ -1,6 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-
 module Distribution.Types.Benchmark
   ( Benchmark (..)
   , emptyBenchmark
@@ -27,11 +24,11 @@ data Benchmark = Benchmark
   , benchmarkInterface :: BenchmarkInterface
   , benchmarkBuildInfo :: BuildInfo
   }
-  deriving (Generic, Show, Read, Eq, Ord, Typeable, Data)
+  deriving (Generic, Show, Read, Eq, Ord, Data)
 
 instance Binary Benchmark
 instance Structured Benchmark
-instance NFData Benchmark where rnf = genericRnf
+instance NFData Benchmark
 
 instance L.HasBuildInfo Benchmark where
   buildInfo f (Benchmark x1 x2 x3) = fmap (\y1 -> Benchmark x1 x2 y1) (f x3)
@@ -43,7 +40,6 @@ instance Monoid Benchmark where
       , benchmarkInterface = mempty
       , benchmarkBuildInfo = mempty
       }
-  mappend = (<>)
 
 instance Semigroup Benchmark where
   a <> b =
@@ -53,7 +49,7 @@ instance Semigroup Benchmark where
       , benchmarkBuildInfo = combine benchmarkBuildInfo
       }
     where
-      combine field = field a `mappend` field b
+      combine field = field a <> field b
 
 emptyBenchmark :: Benchmark
 emptyBenchmark = mempty

@@ -80,15 +80,16 @@ computer architecture and user-specified configuration flags.
 
 ::
 
-    name:     Foo
-    version:  1.0
+    cabal-version: 3.0
+    name:          Foo
+    version:       1.0
 
     library
-      default-language: Haskell2010
-      build-depends:    base >= 4 && < 5
-      exposed-modules:  Foo
-      extensions:       ForeignFunctionInterface
-      ghc-options:      -Wall
+      default-language:   Haskell2010
+      build-depends:      base >= 4 && < 5
+      exposed-modules:    Foo
+      default-extensions: ForeignFunctionInterface
+      ghc-options:        -Wall
       if os(windows)
         build-depends: Win32 >= 2.1 && < 2.6
 
@@ -277,7 +278,6 @@ files, i.e. with names ending in "``.hs``" or "``.lhs``", or to inputs for
 various Haskell preprocessors. The simple build infrastructure understands the
 extensions:
 
--  ``.gc`` (:hackage-pkg:`greencard`)
 -  ``.chs`` (:hackage-pkg:`c2hs`)
 -  ``.hsc`` (:hackage-pkg:`hsc2hs`)
 -  ``.y`` and ``.ly`` (happy_)
@@ -313,24 +313,39 @@ describe the package as a whole:
     tools require the package-name specified for this field to match
     the package description's file-name :file:`{package-name}.cabal`.
 
-    Package names are case-sensitive and must match the regular expression
-    (i.e. alphanumeric "words" separated by dashes; each alphanumeric
-    word must contain at least one letter):
-    ``[[:digit:]]*[[:alpha:]][[:alnum:]]*(-[[:digit:]]*[[:alpha:]][[:alnum:]]*)*``.
+    A valid package name comprises an alphanumeric 'word'; or two or more
+    such words separated by a hyphen character (``-``). A word cannot be
+    comprised only of the digits ``0`` to ``9``.
 
-    Or, expressed in ABNF_:
+    An alphanumeric character belongs to one of the Unicode Letter categories
+    (Lu (uppercase), Ll (lowercase), Lt (titlecase), Lm (modifier), or
+    Lo (other)) or Number categories (Nd (decimal), Nl (letter), or No (other)).
+
+    Package names are case-sensitive.
+
+    Expressed as a regular expression:
+
+    ``[0-9]*[\p{L}\p{N}-[0-9]][\p{L}\p{N}]*(-[0-9]*[\p{L}\p{N}-[0-9]][\p{L}\p{N}]*)*``
+
+    Expressed in ABNF_:
 
     .. code-block:: abnf
 
         package-name      = package-name-part *("-" package-name-part)
-        package-name-part = *DIGIT UALPHA *UALNUM
+        package-name-part = *DIGIT UALPHANUM-NOT-DIGIT *UALNUM
 
-        UALNUM = UALPHA / DIGIT
-        UALPHA = ... ; set of alphabetic Unicode code-points
+        DIGIT = %x30-39 ; 0-9
+
+        UALNUM = UALPHANUM-NOT-DIGIT / DIGIT
+        UALPHANUM-NOT-DIGIT = ... ; set of Unicode code-points in Letter or
+                                  ; Number categories, other than the DIGIT
+                                  ; code-points
 
     .. note::
 
-        Hackage restricts package names to the ASCII subset.
+        Hackage will not accept package names that use alphanumeric characters
+        other than ``A`` to ``Z``, ``a`` to ``z``, and ``0`` to ``9``
+        (the ASCII subset).
 
 .. pkg-field:: version: numbers (required)
 
@@ -441,6 +456,14 @@ describe the package as a whole:
         import Distribution.Simple
         main = defaultMain
 
+    For build type ``Hooks``, the contents of ``Setup.hs`` must be:
+
+    .. code-block:: haskell
+
+        import Distribution.Simple
+        import SetupHooks (setupHooks)
+        main = defaultMainWithSetupHooks setupHooks
+
     For build type ``Configure`` (see the section on `system-dependent
     parameters`_ below), the contents of
     ``Setup.hs`` must be:
@@ -450,18 +473,13 @@ describe the package as a whole:
         import Distribution.Simple
         main = defaultMainWithHooks autoconfUserHooks
 
-    For build type ``Make`` (see the section on `more complex packages`_ below),
-    the contents of ``Setup.hs`` must be:
-
-    .. code-block:: haskell
-
-        import Distribution.Make
-        main = defaultMain
+    Build type ``Make`` is no longer supported.
 
     For build type ``Custom``, the file ``Setup.hs`` can be customized,
     and will be used both by ``cabal`` and other tools.
 
-    For most packages, the build type ``Simple`` is sufficient.
+    For most packages, the build type ``Simple`` is sufficient. For more exotic
+    needs, the ``Hooks`` build type is recommended; see :ref:`setup-hooks`.
 
 .. pkg-field:: license: SPDX expression
 
@@ -637,42 +655,24 @@ describe the package as a whole:
 
     ::
 
-        tested-with: GHC == 9.0.1, GHC == 8.10.4, GHC == 8.8.4,
-                     GHC == 8.6.5, GHC == 8.4.4, GHC == 8.2.2, GHC == 8.0.2,
-                     GHC == 7.10.3, GHC == 7.8.4, GHC == 7.6.3, GHC == 7.4.2
+        tested-with: GHC == 9.10.1, GHC == 9.8.2, GHC == 9.6.5
 
     The same can be spread over several lines, for instance:
 
     ::
 
-        tested-with: GHC == 9.0.1
-                   , GHC == 8.10.4
-                   , GHC == 8.8.4
-                   , GHC == 8.6.5
-                   , GHC == 8.4.4
-                   , GHC == 8.2.2
-                   , GHC == 8.0.2
-                   , GHC == 7.10.3
-                   , GHC == 7.8.4
-                   , GHC == 7.6.3
-                   , GHC == 7.4.2
+        tested-with: GHC == 9.10.1
+                   , GHC == 9.8.2
+                   , GHC == 9.6.5
 
     The separating comma can also be dropped altogether:
 
     ::
 
         tested-with:
-          GHC == 9.0.1
-          GHC == 8.10.4
-          GHC == 8.8.4
-          GHC == 8.6.5
-          GHC == 8.4.4
-          GHC == 8.2.2
-          GHC == 8.0.2
-          GHC == 7.10.3
-          GHC == 7.8.4
-          GHC == 7.6.3
-          GHC == 7.4.2
+          GHC == 9.10.1
+          GHC == 9.8.2
+          GHC == 9.6.5
 
     However, this alternative might
     `disappear <https://github.com/haskell/cabal/issues/4894#issuecomment-909008657>`__
@@ -687,24 +687,16 @@ describe the package as a whole:
         ::
 
             tested-with:
-              , GHC == 9.0.1
-              , GHC == 8.10.4
-              , GHC == 8.8.4
-              , GHC == 8.6.5
-              , GHC == 8.4.4
-              , GHC == 8.2.2
-              , GHC == 8.0.2
-              , GHC == 7.10.3
-              , GHC == 7.8.4
-              , GHC == 7.6.3
-              , GHC == 7.4.2
+              , GHC == 9.10.1
+              , GHC == 9.8.2
+              , GHC == 9.6.5
 
 
     2. A concise set notation syntax is available:
 
        ::
 
-           tested-with: GHC == { 9.0.1, 8.10.4, 8.8.4, 8.6.5, 8.4.4, 8.2.2, 8.0.2, 7.10.3, 7.8.4, 7.6.3, 7.4.2 }
+          tested-with: GHC == { 9.10.1, 9.8.2, 9.6.5 }
 
 .. pkg-field:: data-files: filename list
 
@@ -790,6 +782,11 @@ describe the package as a whole:
     additional hooks, such as the scheme described in the section on
     `system-dependent parameters`_.
 
+.. pkg-field:: extra-files: filename list
+
+    A list of additional files to be included in source distributions built with :ref:`setup-sdist`.
+    As with :pkg-field:`data-files` it can use a limited form of ``*`` wildcards in file names.
+
 Library
 ^^^^^^^
 
@@ -803,11 +800,6 @@ Library
     only by components in the same package (private) or by those components and
     components in other packages (public). A package can have no more than one
     unnamed library.
-
-    .. Note::
-
-       The 'cabal' executable provided by the 'cabal-install' package will not
-       accept dependencies on sublibraries of packages with no unnamed library.
 
     This guide refers to an unnamed library as the main library and a named
     library as a sublibrary (such components may be considered as subidiary, or
@@ -984,10 +976,10 @@ is an example:
 
     library
       build-depends:
-        , base         ^>= 4.11.1.0
-        , bytestring   ^>= 0.10.2.0
-        , containers   ^>= 0.4.2.1 || ^>= 0.5.0.0
-        , transformers ^>= 0.5.0.0
+        , base         ^>= 4.19.0.0
+        , bytestring   ^>= 0.12.0.0
+        , containers   ^>= 0.6.8 || ^>= 0.7.0
+        , transformers ^>= 0.6.1.0
 
       hs-source-dirs:       src
 
@@ -1001,9 +993,9 @@ is an example:
 
     library attoparsec
       build-depends:
-        , base         ^>= 4.11.1.0
-        , bytestring   ^>= 0.10.2.0
-        , deepseq      ^>= 1.4.0.0
+        , base         ^>= 4.19.0.0
+        , bytestring   ^>= 0.12.0.0
+        , deepseq      ^>= 1.5.0.0
 
       hs-source-dirs:       vendor/attoparsec-0.13.1.0
 
@@ -1040,12 +1032,32 @@ build information fields (see the section on `build information`_).
 
 .. pkg-field:: main-is: filename (required)
 
-    The name of the ``.hs`` or ``.lhs`` file containing the ``Main``
-    module. Note that it is the ``.hs`` filename that must be listed,
-    even if that file is generated using a preprocessor. The source file
-    must be relative to one of the directories listed in
-    :pkg-field:`hs-source-dirs`. Further, while the name of the file may
-    vary, the module itself must be named ``Main``.
+    By convention, a Haskell program must have a module called ``Main`` which
+    exports an IO action named ``main``. When the program is executed, the
+    action is performed. This field specifies the name of the ``.hs`` or
+    ``.lhs`` source file containing that module. It is the ``.hs`` filename that
+    must be listed, even if that file is generated using a preprocessor. The
+    file must be relative to one of the directories listed in
+    :pkg-field:`hs-source-dirs`.
+
+    Further, while the name of the source file may vary, if the convention is
+    being followed, the module itself must be named ``Main`` and export
+    ``main``.
+
+    However, GHC's ``-main-is`` option can be used to change the name of the
+    relevant IO action. For example, if source file ``MyMainSourceFile.hs``
+    contains a module named ``MyMainModule`` exporting ``myMainFunc`` and that
+    is to be the relevant IO action, you can specify:
+
+    ::
+
+        executable my-app
+          main-is: MyMainSourceFile.hs
+          ghc-options: -main-is MyMainModule.myMainFunc
+          build-depends:
+              base
+          default-language: Haskell2010
+
 
     Starting with ``cabal-version: 1.18`` this field supports
     specifying a C, C++, or objC source file as the main entry point.
@@ -1102,7 +1114,7 @@ field.
     even if that file is generated using a preprocessor. The source file
     must be relative to one of the directories listed in
     :pkg-field:`hs-source-dirs`. This field is analogous to the ``main-is`` field
-    of an executable section.
+    of an executable section; see that documentation for further information.
 
 Test suites using the ``detailed-0.9`` interface are modules exporting
 the symbol ``tests :: IO [Test]``. The ``Test`` type is exported by the
@@ -1126,14 +1138,14 @@ the :pkg-field:`test-module` field.
     An optional list of preprocessors which can generate new modules
     for use in the test-suite.
 
- A list of executabes (possibly brought into scope by
+ A list of executables (possibly brought into scope by
  :pkg-field:`build-tool-depends`) that are run after all other
  preprocessors. These executables are invoked as so: ``exe-name
  TARGETDIR [SOURCEDIRS] -- [GHCOPTIONS]``. The arguments are, in order a target dir for
  output, a sequence of all source directories with source files of
  local lib components that the given test stanza depends on, and
  following a double dash, all options cabal would pass to ghc for a
- build. They are expected to output a newline-seperated list of
+ build. They are expected to output a newline-separated list of
  generated modules which have been written to the targetdir
  (excepting, if written, the main module). This can
  be used for driving doctests and other discover-style tests generated
@@ -1193,7 +1205,10 @@ be provided by the library that provides the testing facility.
     Test-Suite test-bar
         type:             detailed-0.9
         test-module:      Bar
-        build-depends:    base >= 4 && < 5, Cabal >= 1.9.2 && < 2
+        -- To keep this (untested) example working, we rely on the test type
+        -- version rather than an upper bound on Cabal. In real code, PVP
+        -- compliance may require including the upper bound.
+        build-depends:    base >= 4 && < 5, Cabal >= 1.9.2
         default-language: Haskell2010
 
 
@@ -1261,8 +1276,8 @@ standard output and error channels.
     even if that file is generated using a preprocessor. The source file
     must be relative to one of the directories listed in
     :pkg-field:`hs-source-dirs`. This field is analogous to the ``main-is``
-    field of an executable section. Further, while the name of the file may
-    vary, the module itself must be named ``Main``.
+    field of an executable section; see that documentation for further
+    information.
 
 Example:
 """""""""""""""""""""""""""""""""""""""""""""""""""""""
@@ -1301,146 +1316,7 @@ Example:
         end <- getCurrentTime
         putStrLn $ "fib 20 took " ++ show (diffUTCTime end start)
 
-
-Foreign libraries
-^^^^^^^^^^^^^^^^^
-
-Foreign libraries are system libraries intended to be linked against
-programs written in C or other "foreign" languages. They
-come in two primary flavours: dynamic libraries (``.so`` files on Linux,
-``.dylib`` files on OSX, ``.dll`` files on Windows, etc.) are linked against
-executables when the executable is run (or even lazily during
-execution), while static libraries (``.a`` files on Linux/OSX, ``.lib``
-files on Windows) get linked against the executable at compile time.
-
-Foreign libraries only work with GHC 7.8 and later.
-
-A typical stanza for a foreign library looks like
-
-::
-
-    foreign-library myforeignlib
-      type:                native-shared
-      lib-version-info:    6:3:2
-
-      if os(Windows)
-        options: standalone
-        mod-def-file: MyForeignLib.def
-
-      other-modules:       MyForeignLib.SomeModule
-                           MyForeignLib.SomeOtherModule
-      build-depends:       base >=4.7 && <4.9
-      hs-source-dirs:      src
-      c-sources:           csrc/MyForeignLibWrapper.c
-      default-language:    Haskell2010
-
-
-.. pkg-section:: foreign-library name
-    :since: 2.0
-    :synopsis: Foreign library build information.
-
-    Build information for `foreign libraries`_.
-
-.. pkg-field:: type: foreign library type
-
-   Cabal recognizes ``native-static`` and ``native-shared`` here, although
-   we currently only support building `native-shared` libraries.
-
-.. pkg-field:: options: foreign library option list
-
-   Options for building the foreign library, typically specific to the
-   specified type of foreign library. Currently we only support
-   ``standalone`` here. A standalone dynamic library is one that does not
-   have any dependencies on other (Haskell) shared libraries; without
-   the ``standalone`` option the generated library would have dependencies
-   on the Haskell runtime library (``libHSrts``), the base library
-   (``libHSbase``), etc. Currently, ``standalone`` *must* be used on Windows
-   and *must not* be used on any other platform.
-
-.. pkg-field:: mod-def-file: filename
-
-   This option can only be used when creating dynamic Windows libraries
-   (that is, when using ``native-shared`` and the ``os`` is ``Windows``). If
-   used, it must be a path to a *module definition file*. The details of
-   module definition files are beyond the scope of this document; see the
-   `GHC <https://downloads.haskell.org/~ghc/latest/docs/html/users_guide/win32-dlls.html>`_
-   manual for some details and some further pointers.
-
-.. pkg-field:: lib-version-info: current:revision:age
-
-   This field is currently only used on Linux.
-
-   This field specifies a Libtool-style version-info field that sets
-   an appropriate ABI version for the foreign library. Note that the
-   three numbers specified in this field do not directly specify the
-   actual ABI version: ``6:3:2`` results in library version ``4.2.3``.
-
-   With this field set, the SONAME of the library is set, and symlinks
-   are installed.
-
-   How you should bump this field on an ABI change depends on the
-   breakage you introduce:
-
-   -  Programs using the previous version may use the new version as
-      drop-in replacement, and programs using the new version can also
-      work with the previous one. In other words, no recompiling nor
-      relinking is needed. In this case, bump ``revision`` only, don't
-      touch current nor age.
-   -  Programs using the previous version may use the new version as
-      drop-in replacement, but programs using the new version may use
-      APIs not present in the previous one. In other words, a program
-      linking against the new version may fail with "unresolved
-      symbols" if linking against the old version at runtime: set
-      revision to 0, bump current and age.
-   -  Programs may need to be changed, recompiled, and relinked in
-      order to use the new version. Bump current, set revision and age
-      to 0.
-
-   Also refer to the Libtool documentation on the version-info field.
-
-.. pkg-field:: lib-version-linux: version
-
-   This field is only used on Linux.
-
-   Specifies the library ABI version directly for foreign libraries
-   built on Linux: so specifying ``4.2.3`` causes a library
-   ``libfoo.so.4.2.3`` to be built with SONAME ``libfoo.so.4``, and
-   appropriate symlinks ``libfoo.so.4`` and ``libfoo.so`` to be
-   installed.
-
-Note that typically foreign libraries should export a way to initialize
-and shutdown the Haskell runtime. In the example above, this is done by
-the ``csrc/MyForeignLibWrapper.c`` file, which might look something like
-
-.. code-block:: c
-
-    #include <stdlib.h>
-    #include "HsFFI.h"
-
-    HsBool myForeignLibInit(void){
-      int argc = 2;
-      char *argv[] = { "+RTS", "-A32m", NULL };
-      char **pargv = argv;
-
-      // Initialize Haskell runtime
-      hs_init(&argc, &pargv);
-
-      // do any other initialization here and
-      // return false if there was a problem
-      return HS_BOOL_TRUE;
-    }
-
-    void myForeignLibExit(void){
-      hs_exit();
-    }
-
-With modern ghc regular libraries are installed in directories that contain
-package keys. This isn't usually a problem because the package gets registered
-in ghc's package DB and so we can figure out what the location of the library
-is. Foreign libraries however don't get registered, which means that we'd have
-to have a way of finding out where a platform library got installed (other than by
-searching the ``lib/`` directory). Instead, we install foreign libraries in
-``~/.local/lib``.
+.. _build-info:
 
 Build information
 ^^^^^^^^^^^^^^^^^
@@ -1471,6 +1347,15 @@ system-dependent values for these fields.
 
     .. Note::
 
+       The :pkg-field:`build-depends` field of an executable section (from
+       version 1.8 of the Cabal specification), test suite section (from
+       version 1.10) or benchmark section (from version 1.14) can specify a
+       library in the same package by the name of the library (without a version
+       constraint). Cabal then treats the executable, test suite or benchmark as
+       if it were in another package that depended on the package.
+
+    .. Note::
+
        Before version 3.4 of the Cabal specification, from version 2.0, a
        private sublibrary (an internal library) was identified by only the name
        of the sublibrary. An internal library could shadow a dependency on the
@@ -1495,13 +1380,13 @@ system-dependent values for these fields.
        but ``time-1.12.3`` bumps the lower bound on base to ``>=4.14``.  If we
        still want to compile with a ``ghc-8.8.*`` version of GHC that ships with
        ``base-4.13`` and with later GHC versions, then we can use ``time >=1.12
-       && (time <1.12.3 || time >1.12.3)``.
+       && (<1.12.3 || >1.12.3)``.
 
        Hackage shows deprecated and preferred versions for packages, such as for
        `containers <https://hackage.haskell.org/package/containers/preferred>`_
        and `aeson <https://hackage.haskell.org/package/aeson/preferred>`_ for
        example. Deprecating package versions is not the same deprecating a
-       package as a whole, for which hackage keeps a `deprecated packages list
+       package as a whole, for which Hackage keeps a `deprecated packages list
        <https://hackage.haskell.org/packages/deprecated>`_.
 
     If no version constraint is specified, any version is assumed to be
@@ -1685,7 +1570,7 @@ system-dependent values for these fields.
       compiled twice, once as part of the library and again for the executable.
 
 .. pkg-field:: default-extensions: identifier list
-   :since: 1.12
+   :since: 1.10
 
     A list of Haskell extensions used by every module. These determine
     corresponding compiler options enabled for all files. Extension
@@ -1695,7 +1580,7 @@ system-dependent values for these fields.
     to be preprocessed with a C preprocessor.
 
 .. pkg-field:: other-extensions: identifier list
-   :since: 1.12
+   :since: 1.10
 
     A list of Haskell extensions used by some (but not necessarily all)
     modules. From GHC version 6.6 onward, these may be specified by
@@ -1724,7 +1609,7 @@ system-dependent values for these fields.
     :pkg-field:`other-extensions` declarations.
 
 .. pkg-field:: default-language: identifier
-   :since: 1.12
+   :since: 1.10
 
     Specifies a language standard or a group of language extensions to be activated for the project. In the case of GHC, `see here for details <https://downloads.haskell.org/ghc/latest/docs/users_guide/exts/control.html#controlling-extensions>`__.
 
@@ -1736,12 +1621,12 @@ system-dependent values for these fields.
     -  ``Haskell98``
 
 .. pkg-field:: other-languages: identifier
-   :since: 1.12
+   :since: 1.10
 
-   TBW
+    Specifies a language standard used by some (but not necessarily all) modules.
 
 .. pkg-field:: extensions: identifier list
-   :deprecated: 1.12
+   :deprecated: 1.10
    :removed: 3.0
 
    Deprecated in favor of :pkg-field:`default-extensions`.
@@ -1856,8 +1741,6 @@ system-dependent values for these fields.
     +--------------------------+-----------------------------------+-----------------+
     | ``cpphs``                | ``cpphs:cpphs``                   |                 |
     +--------------------------+-----------------------------------+-----------------+
-    | ``greencard``            | ``greencard:greencard``           |                 |
-    +--------------------------+-----------------------------------+-----------------+
     | ``haddock``              | ``haddock:haddock``               |                 |
     +--------------------------+-----------------------------------+-----------------+
     | ``happy``                | ``happy:happy``                   |                 |
@@ -1869,7 +1752,8 @@ system-dependent values for these fields.
     | ``hspec-discover``       | ``hspec-discover:hspec-discover`` | since Cabal 2.0 |
     +--------------------------+-----------------------------------+-----------------+
 
-    This built-in set can be programmatically extended via ``Custom`` setup scripts; this, however, is of limited use since the Cabal solver cannot access information injected by ``Custom`` setup scripts.
+    This built-in set can be programmatically extended via use of the
+    :ref:`Hooks build type<setup-hooks>` .
 
 .. pkg-field:: buildable: boolean
 
@@ -1882,8 +1766,11 @@ system-dependent values for these fields.
 
 .. pkg-field:: ghc-options: token list
 
-    Additional options for GHC. You can often achieve the same effect
-    using the :pkg-field:`default-extensions` field, which is preferred.
+    Additional options for GHC.
+
+    If specifying extensions (via ``-X<Extension>`` flags) one can often achieve
+    the same effect using the :pkg-field:`default-extensions` field, which is
+    preferred.
 
     Options required only by one module may be specified by placing an
     ``OPTIONS_GHC`` pragma in the source file affected.
@@ -1920,19 +1807,52 @@ system-dependent values for these fields.
     ones specified via :pkg-field:`ghc-options`, and are passed to GHC during
     both the compile and link phases.
 
-.. pkg-field:: ghcjs-options: token list
+.. pkg-field:: ghc-prof-shared-options: token list
 
-   Like :pkg-field:`ghc-options` but applies to GHCJS
+    Additional options for GHC when the package is built as shared profiling
+    library. The options specified via this field are combined with the
+    ones specified via :pkg-field:`ghc-options`, and are passed to GHC during
+    both the compile and link phases.
+
+    Note that if any :pkg-field:`ghc-shared-options` are set, the
+    ``-dynamic-too` option will never be passed to GHC, leading to all modules
+    being compiled twice (once to generate the ``.o`` files and another to
+    generate the ``.dyn_o`` files).
+
+.. pkg-field:: ghcjs-options: token list
+    :deprecated:
+
+    Formerly like :pkg-field:`ghc-options` but for GHCJS. Still accepted so
+    that existing packages parse, but ignored since GHCJS support was
+    removed.
 
 .. pkg-field:: ghcjs-prof-options: token list
+    :deprecated:
 
-   Like :pkg-field:`ghc-prof-options` but applies to GHCJS
+    Formerly like :pkg-field:`ghc-prof-options` but for GHCJS. Still accepted
+    so that existing packages parse, but ignored since GHCJS support was
+    removed.
 
 .. pkg-field:: ghcjs-shared-options: token list
+    :deprecated:
 
-   Like :pkg-field:`ghc-shared-options` but applies to GHCJS
+    Formerly like :pkg-field:`ghc-shared-options` but for GHCJS. Still
+    accepted so that existing packages parse, but ignored since GHCJS support
+    was removed.
+
+.. pkg-field:: ghcjs-prof-shared-options: token list
+    :deprecated:
+
+    Formerly like :pkg-field:`ghc-prof-shared-options` but for GHCJS. Still
+    accepted so that existing packages parse, but ignored since GHCJS support
+    was removed.
 
 .. pkg-field:: includes: filename list
+    :since: 1.0
+    :deprecated: 2.0
+
+    From GHC 6.10.1, :pkg-field:`includes` has no effect when compiling with
+    GHC. From Cabal 2.0, support for GHC versions before GHC 6.12 was removed.
 
     A list of header files to be included in any compilations via C.
     This field applies to both header files that are already installed
@@ -1983,6 +1903,8 @@ system-dependent values for these fields.
     locate files listed in :pkg-field:`includes` and
     :pkg-field:`install-includes`.
 
+    Directories here will be passed as ``-I<dir>`` flags to GHC.
+
 .. pkg-field:: c-sources: filename list
 
     A list of C source files to be compiled and linked with the Haskell
@@ -2019,7 +1941,7 @@ system-dependent values for these fields.
 .. pkg-field:: extra-libraries: token list
 
     A list of extra libraries to link with (when not linking fully static
-    executables).
+    executables). Libraries will be passed as ``-optl-l<lib>`` flags to GHC.
 
 .. pkg-field:: extra-libraries-static: token list
 
@@ -2037,11 +1959,11 @@ system-dependent values for these fields.
    A list of libraries that are supposed to be copied from the build
    directory alongside the produced Haskell libraries.  Note that you
    are under the obligation to produce those libraries in the build
-   directory (e.g. via a custom setup).  Libraries listed here will
-   be included when ``copy``-ing packages and be listed in the
-   ``hs-libraries`` of the package configuration in the package database.
-   Library names must either be prefixed with "HS" or "C" and corresponding
-   library file names must match:
+   directory (e.g. via a custom setup or pre-build rules).
+   Libraries listed here will be included when ``copy``-ing packages and be
+   listed in the ``hs-libraries`` of the package configuration in the package
+   database. Library names must either be prefixed with "HS" or "C" and
+   corresponding library file names must match:
 
       - Libraries with name "HS<library-name>":
          - `libHS<library-name>.a`
@@ -2053,7 +1975,7 @@ system-dependent values for these fields.
 .. pkg-field:: extra-lib-dirs: directory list
 
     A list of directories to search for libraries (when not linking fully static
-    executables).
+    executables). Directories will be passed as ``-optl-L<dir>`` flags to GHC.
 
 .. pkg-field:: extra-lib-dirs-static: directory list
 
@@ -2070,21 +1992,29 @@ system-dependent values for these fields.
 
 .. pkg-field:: cc-options: token list
 
-    Command-line arguments to be passed to the C compiler. Since the
+    Command-line arguments to be passed to the Haskell compiler for the C
+    compiling phase (as ``-optc`` flags for GHC). Since the
     arguments are compiler-dependent, this field is more useful with the
     setup described in the section on `system-dependent parameters`_.
+
+.. pkg-field:: jspp-options: token list
+
+    Command-line arguments for pre-processing JS code. Applies to pre-processed
+    Haskell source like .js. Flags here will be passed as ``-optJSP`` flags to GHC.
 
 .. pkg-field:: cpp-options: token list
 
     Command-line arguments for pre-processing Haskell code. Applies to
     Haskell source and other pre-processed Haskell source like .hsc
     .chs. Does not apply to C code, that's what cc-options is for.
+    Flags here will be passed as ``-optP`` flags to GHC.
 
 .. pkg-field:: cxx-options: token list
     :since: 2.2
 
-    Command-line arguments to be passed to the compiler when compiling
-    C++ code. The C++ sources to which these command-line arguments
+    Command-line arguments to be passed to the Haskell compiler for the C++
+    compiling phase (as ``-optcxx`` flags for GHC).
+    The C++ sources to which these command-line arguments
     should be applied can be specified with the :pkg-field:`cxx-sources`
     field. Command-line options for C and C++ can be passed separately to
     the compiler when compiling both C and C++ sources by segregating the C
@@ -2096,20 +2026,22 @@ system-dependent values for these fields.
 .. pkg-field:: cmm-options: token list
     :since: 3.0
 
-    Command-line arguments to be passed to the compiler when compiling
+    Command-line arguments to be passed to the Haskell compiler when compiling
     C-- code. See also :pkg-field:`cmm-sources`.
 
 .. pkg-field:: asm-options: token list
     :since: 3.0
 
-    Command-line arguments to be passed to the assembler when compiling
-    assembler code. See also :pkg-field:`asm-sources`.
+    Command-line arguments to be passed to the Haskell compiler (as ``-opta``
+    flags for GHC) when compiling assembler code. See also :pkg-field:`asm-sources`.
 
 .. pkg-field:: ld-options: token list
 
-    Command-line arguments to be passed to the linker. Since the
-    arguments are compiler-dependent, this field is more useful with the
-    setup described in the section on `system-dependent parameters`_.
+    Command-line arguments to be passed to the Haskell compiler (as ``-optl``
+    flags for GHC) for the linking phase. Note that only executables (including
+    test-suites and benchmarks) are linked so this has no effect in libraries.
+    Since the arguments are compiler-dependent, this field is more useful with
+    the setup described in the section on `system-dependent parameters`_.
 
 .. pkg-field:: hsc2hs-options: token list
     :since: 3.6
@@ -2256,12 +2188,154 @@ system-dependent values for these fields.
        in a different package dependency, or at least in a separate internal
        library.
 
+Foreign libraries
+^^^^^^^^^^^^^^^^^
+
+Foreign libraries are system libraries intended to be linked against
+programs written in C or other "foreign" languages. They
+come in two primary flavours: dynamic libraries (``.so`` files on Linux,
+``.dylib`` files on OSX, ``.dll`` files on Windows, etc.) are linked against
+executables when the executable is run (or even lazily during
+execution), while static libraries (``.a`` files on Linux/OSX, ``.lib``
+files on Windows) get linked against the executable at compile time.
+
+Foreign libraries only work with GHC 7.8 and later.
+
+A typical stanza for a foreign library looks like
+
+::
+
+    foreign-library myforeignlib
+      type:                native-shared
+      lib-version-info:    6:3:2
+
+      if os(Windows)
+        -- Cabal currently only supports standalone foreign libraries on Windows.
+        options: standalone
+        mod-def-file: MyForeignLib.def
+
+      other-modules:       MyForeignLib.SomeModule
+                           MyForeignLib.SomeOtherModule
+      build-depends:       base >=4.7 && <4.9
+      hs-source-dirs:      src
+      c-sources:           csrc/MyForeignLibWrapper.c
+      default-language:    Haskell2010
+
+
+.. pkg-section:: foreign-library name
+    :since: 2.0
+    :synopsis: Foreign library build information.
+
+    Build information for `foreign libraries`_.
+
+.. pkg-field:: type: foreign library type
+
+   Cabal recognizes ``native-static`` and ``native-shared`` here, although
+   we currently only support building `native-shared` libraries.
+
+.. pkg-field:: options: foreign library option list
+
+   Options for building the foreign library, typically specific to the
+   specified type of foreign library. Currently we only support
+   ``standalone`` here. A standalone dynamic library is one that does not
+   have any dependencies on other (Haskell) shared libraries; without
+   the ``standalone`` option the generated library would have dependencies
+   on the Haskell runtime library (``libHSrts``), the base library
+   (``libHSbase``), etc. Currently, Cabal can only build ``standalone``
+   foreign libraries on Windows; a non-standalone foreign library is
+   rejected at configure time there.
+
+.. pkg-field:: mod-def-file: filename
+
+   This option can only be used when creating dynamic Windows libraries
+   (that is, when using ``native-shared`` and the ``os`` is ``Windows``). If
+   used, it must be a path to a *module definition file*. The details of
+   module definition files are beyond the scope of this document; see the
+   `GHC <https://downloads.haskell.org/~ghc/latest/docs/html/users_guide/win32-dlls.html>`_
+   manual for some details and some further pointers.
+
+.. pkg-field:: lib-version-info: current:revision:age
+
+   This field is currently only used on Linux.
+
+   This field specifies a Libtool-style version-info field that sets
+   an appropriate ABI version for the foreign library. Note that the
+   three numbers specified in this field do not directly specify the
+   actual ABI version: ``6:3:2`` results in library version ``4.2.3``.
+
+   With this field set, the SONAME of the library is set, and symlinks
+   are installed.
+
+   How you should bump this field on an ABI change depends on the
+   breakage you introduce:
+
+   -  Programs using the previous version may use the new version as
+      drop-in replacement, and programs using the new version can also
+      work with the previous one. In other words, no recompiling nor
+      relinking is needed. In this case, bump ``revision`` only, don't
+      touch current nor age.
+   -  Programs using the previous version may use the new version as
+      drop-in replacement, but programs using the new version may use
+      APIs not present in the previous one. In other words, a program
+      linking against the new version may fail with "unresolved
+      symbols" if linking against the old version at runtime: set
+      revision to 0, bump current and age.
+   -  Programs may need to be changed, recompiled, and relinked in
+      order to use the new version. Bump current, set revision and age
+      to 0.
+
+   Also refer to the Libtool documentation on the version-info field.
+
+.. pkg-field:: lib-version-linux: version
+
+   This field is only used on Linux.
+
+   Specifies the library ABI version directly for foreign libraries
+   built on Linux: so specifying ``4.2.3`` causes a library
+   ``libfoo.so.4.2.3`` to be built with SONAME ``libfoo.so.4``, and
+   appropriate symlinks ``libfoo.so.4`` and ``libfoo.so`` to be
+   installed.
+
+Note that typically foreign libraries should export a way to initialize
+and shutdown the Haskell runtime. In the example above, this is done by
+the ``csrc/MyForeignLibWrapper.c`` file, which might look something like
+
+.. code-block:: c
+
+    #include <stdlib.h>
+    #include "HsFFI.h"
+
+    HsBool myForeignLibInit(void){
+      int argc = 2;
+      char *argv[] = { "+RTS", "-A32m", NULL };
+      char **pargv = argv;
+
+      // Initialize Haskell runtime
+      hs_init(&argc, &pargv);
+
+      // do any other initialization here and
+      // return false if there was a problem
+      return HS_BOOL_TRUE;
+    }
+
+    void myForeignLibExit(void){
+      hs_exit();
+    }
+
+With modern ghc regular libraries are installed in directories that contain
+package keys. This isn't usually a problem because the package gets registered
+in ghc's package DB and so we can figure out what the location of the library
+is. Foreign libraries however don't get registered, which means that we'd have
+to have a way of finding out where a platform library got installed (other than by
+searching the ``lib/`` directory). Instead, we install foreign libraries in
+``~/.local/lib``.
+
 Configurations
 ^^^^^^^^^^^^^^
 
 Library and executable sections may include conditional blocks, which
 test for various system parameters and configuration flags. The flags
-mechanism is rather generic, but most of the time a flag represents
+mechanism is rather generic, but most of the time a flag represents a
 certain feature, that can be switched on or off by the package user.
 Here is an example package description file using configurations:
 
@@ -2322,8 +2396,9 @@ Example: A package containing a library and executable programs
 
     Executable test1
       Main-is:          T1.hs
-      Other-Modules:    Testing.Test1
-      Build-Depends:    base >= 4.2 && < 4.9
+      Build-Depends:
+        , base >= 4.2 && < 4.9
+        , Test1
       Default-Language: Haskell2010
 
       if flag(debug)
@@ -2426,10 +2501,11 @@ Configuration Flags
     :default: ``False``
     :since: 1.6
 
-    By default, Cabal will first try to satisfy dependencies with the
-    default flag value and then, if that is not possible, with the
-    negated value. However, if the flag is manual, then the default
-    value (which can be overridden by commandline flags) will be used.
+      By default, Cabal tries to resolve dependencies using the flag's ``default`` value.
+      If that fails, it tries again with the negated default value. However, if the flag is
+      marked as ``manual``, Cabal will only use the default value and will not retry
+      with the negated default. Note that the default value can still be overridden
+      using command-line flags.
 
 .. _conditional-blocks:
 
@@ -2466,6 +2542,17 @@ Since Cabal 2.2 conditional blocks support ``elif`` construct.
            property-descriptions-or-conditionals
       else
            property-descriptions-or-conditionals
+
+.. warning::
+
+    Conditionals are resolved *last*, irrespective of their lexical position.
+
+    ::
+
+        if true-condition
+            buildable: True
+        buildable: False
+        -- The parent component is buildable since conditionals are resolved last.
 
 .. _conditions:
 
@@ -2627,11 +2714,11 @@ Starting with Cabal-2.2 it's possible to use common build info stanzas.
 ::
 
       common deps
-        build-depends: base ^>= 4.11
+        build-depends: base ^>= 4.18
         ghc-options: -Wall
 
       common test-deps
-        build-depends: tasty ^>= 0.12.0.1
+        build-depends: tasty ^>= 1.4
 
       library
         import:           deps
@@ -2666,25 +2753,19 @@ Starting with Cabal-2.2 it's possible to use common build info stanzas.
 
     TBW
 
-Source Repositories
-^^^^^^^^^^^^^^^^^^^
+
+.. _pkg-author-source:
+
+*Source code* repository marker
+-------------------------------
 
 .. pkg-section:: source-repository
     :since: 1.6
 
-It is often useful to be able to specify a source revision control
-repository for a package. Cabal lets you specify this information in
-a relatively structured form which enables other tools to interpret and
-make effective use of the information. For example the information
-should be sufficient for an automatic tool to checkout the sources.
+A marker that points to the *source code* for this package within a
+**source code repository**.
 
-Cabal supports specifying different information for various common
-source control systems. Obviously not all automated tools will support
-all source control systems.
-
-Cabal supports specifying repositories for different use cases. By
-declaring which case we mean automated tools can be more useful. There
-are currently two kinds defined:
+There are two kinds. You can specify one or the other or both at once:
 
 -  The ``head`` kind refers to the latest development branch of the
    package. This may be used for example to track activity of a project
@@ -2692,17 +2773,12 @@ are currently two kinds defined:
    making new contributions.
 
 -  The ``this`` kind refers to the branch and tag of a repository that
-   contains the sources for this version or release of a package. For
-   most source control systems this involves specifying a tag, id or
-   hash of some form and perhaps a branch. The purpose is to be able to
-   reconstruct the sources corresponding to a particular package
-   version. This might be used to indicate what sources to get if
-   someone needs to fix a bug in an older branch that is no longer an
-   active head branch.
+   contains the sources for this version or release of a package.  For most
+   source control systems this involves specifying a tag, id or hash of some
+   form and perhaps a branch.
 
-You can specify one kind or the other or both. As an example here are
-the repositories for the Cabal library. Note that the ``this`` kind of
-repository specifies a tag.
+As an example, here are the repositories for the Cabal library. Note that the
+``this`` kind of repository specifies a tag.
 
 ::
 
@@ -2715,76 +2791,125 @@ repository specifies a tag.
       location: https://github.com/haskell/cabal
       tag:      1.6.1
 
-The exact fields are as follows:
+The :ref:`cabal get<cabal-get>` command uses the kind of repository with
+its ``--source-repository`` option, if provided.
 
-.. pkg-field:: type: token
+.. _source-repository-fields:
 
-    The name of the source control system used for this repository. The
-    currently recognised types are:
+The :ref:`VCS fields<vcs-fields>` of ``source-repository`` are:
 
-    -  ``darcs``
-    -  ``git``
-    -  ``svn``
-    -  ``cvs``
-    -  ``mercurial`` (or alias ``hg``)
-    -  ``bazaar`` (or alias ``bzr``)
-    -  ``arch``
-    -  ``monotone``
+..
+  data SourceRepo = SourceRepo
+    { repoKind :: RepoKind
+    , repoType :: Maybe RepoType
+    , repoLocation :: Maybe String
+    , repoModule :: Maybe String
+    , repoBranch :: Maybe String
+    , repoTag :: Maybe String
+    , repoSubdir :: Maybe FilePath
+    }
+
+.. pkg-field:: type: VCS kind
+
+    This field is required.
+
+    .. include:: vcs/kind.rst
+
+.. pkg-field:: location: VCS location
 
     This field is required.
 
-.. pkg-field:: location: URL
-
-    The location of the repository. The exact form of this field depends
-    on the repository type. For example:
-
-    -  for darcs: ``http://code.haskell.org/foo/``
-    -  for git: ``git://github.com/foo/bar.git``
-    -  for CVS: ``anoncvs@cvs.foo.org:/cvs``
-
-    This field is required.
+    .. include:: vcs/location.rst
 
 .. pkg-field:: module: token
-
-    CVS requires a named module, as each CVS server can host multiple
-    named repositories.
 
     This field is required for the CVS repository type and should not be
     used otherwise.
 
-.. pkg-field:: branch: token
+    CVS requires a named module, as each CVS server can host multiple
+    named repositories.
 
-    Many source control systems support the notion of a branch, as a
-    distinct concept from having repositories in separate locations. For
-    example CVS, SVN and git use branches while darcs uses different
-    locations for different branches. If you need to specify a branch to
-    identify a your repository then specify it in this field.
+.. pkg-field:: branch: VCS branch
 
     This field is optional.
 
-.. pkg-field:: tag: token
+    .. include:: vcs/branch.rst
 
-    A tag identifies a particular state of a source repository. The tag
-    can be used with a ``this`` repository kind to identify the state of
-    a repository corresponding to a particular package version or
-    release. The exact form of the tag depends on the repository type.
+.. pkg-field:: tag: VCS tag
 
     This field is required for the ``this`` repository kind.
 
-.. pkg-field:: subdir: directory
+    This might be used to indicate what sources to get if someone needs to fix a
+    bug in an older branch that is no longer an active head branch.
 
-    Some projects put the sources for multiple packages under a single
-    source repository. This field lets you specify the relative path
-    from the root of the repository to the top directory for the
-    package, i.e. the directory containing the package's ``.cabal``
-    file.
+    .. include:: vcs/tag.rst
 
-    This field is optional. It defaults to empty which corresponds to the
-    root directory of the repository.
+.. pkg-field:: subdir: VCS subdirectory
 
+    This field is optional but, if given, specifies a single subdirectory.
+
+    .. include:: vcs/subdir.rst
+
+.. _setup-hooks:
+
+Hooks
+-----
+The ``Hooks`` build type allows customising the configuration and the building
+of a package using a collection of **hooks** into the build system.
+
+Introduced in Cabal 3.14, this build type provides an alternative
+to :ref:`Custom setups <custom-setup>` which integrates better with the rest of the
+Haskell ecosystem.
+
+To use this build type in your package, you need to:
+
+  * Declare a ``cabal-version`` of at least 3.14 in your ``.cabal`` file.
+  * Declare ``build-type: Hooks`` in your ``.cabal`` file.
+  * Include a ``custom-setup`` stanza in your ``.cabal`` file, which declares
+    the version of the Hooks API your package is using.
+  * Define a ``SetupHooks`` module in a ``SetupHooks.hs`` file (or
+    ``SetupHooks.lhs`` file, if using literate Haskell) next to your ``.cabal``
+    file. It must export a value ``setupHooks :: SetupHooks``.
+
+More specifically, your ``.cabal`` file should resemble the following:
+
+    .. code-block:: cabal
+
+        cabal-version: 3.14
+        build-type: Hooks
+
+        custom-setup:
+          setup-depends:
+            base        >= 4.18 && < 5,
+            Cabal-hooks >= 0.1  && < 0.2
+
+while a basic ``SetupHooks.hs`` file might look like the following:
+
+    .. code-block:: haskell
+
+        module SetupHooks where
+        import Distribution.Simple.SetupHooks ( SetupHooks, noSetupHooks )
+
+        setupHooks :: SetupHooks
+        setupHooks =
+         noSetupHooks
+           { configureHooks = myConfigureHooks
+           , buildHooks = myBuildHooks }
+
+        -- ...
+
+For a detailed guide on using the ``Hooks`` build type, see
+:ref:`How to use the Hooks build type <setup-hooks-guide>`.
+Refer to the `Hackage documentation for the Distribution.Simple.SetupHooks module <https://hackage.haskell.org/package/Cabal-hooks/docs/Distribution-Simple-SetupHooks.html>`__
+for a full reference of the ``Hooks`` API. Further motivation and a technical overview
+of the design is available in `Haskell Tech Proposal #60 <https://github.com/haskellfoundation/tech-proposals/blob/main/rfc/060-replacing-cabal-custom-build.md>`__.
+
+.. _custom-setup:
 
 Custom setup scripts
 --------------------
+
+Deprecated since Cabal 3.14: prefer using the :ref:`Hooks build type<setup-hooks>` instead.
 
 Since Cabal 1.24, custom ``Setup.hs`` are required to accurately track
 their dependencies by declaring them in the ``.cabal`` file rather than
@@ -2801,23 +2926,28 @@ Declaring a ``custom-setup`` stanza also enables the generation of
 ``MIN_VERSION_package_(A,B,C)`` CPP macros for the Setup component.
 
 .. pkg-section:: custom-setup
-   :synopsis: Custom Setup.hs build information.
+   :synopsis: Build information for ``Custom`` and ``Hooks`` build types
    :since: 1.24
 
-   The optional :pkg-section:`custom-setup` stanza contains information needed
-   for the compilation of custom ``Setup.hs`` scripts,
+   A :pkg-section:`custom-setup` stanza is required for ``Custom`` and ``Hooks``
+   :pkg-field:`build-type`, and will be ignored (with a warning)
+   for other build types.
+
+   The stanza contains information needed for the compilation
+   of custom ``Setup.hs`` scripts, and of ``SetupHooks.hs`` hooks.
+   For example:
 
 ::
 
     custom-setup
       setup-depends:
-        base  >= 4.5 && < 4.11,
-        Cabal >= 1.14 && < 1.25
+        base   >= 4.18 && < 5,
+        Cabal  >= 3.10
 
 .. pkg-field:: setup-depends: package list
     :since: 1.24
 
-    The dependencies needed to compile ``Setup.hs``. See the
+    The dependencies needed to compile ``Setup.hs`` or ``SetupHooks.hs``. See the
     :pkg-field:`build-depends` field for a description of the syntax expected by
     this field.
 
@@ -2838,7 +2968,7 @@ Backward compatibility and ``custom-setup``
 
 Versions prior to Cabal 1.24 don't recognise ``custom-setup`` stanzas,
 and will behave agnostic to them (except for warning about an unknown
-section). Consequently, versions prior to Cabal 1.24 can't ensure the
+'section'). Consequently, versions prior to Cabal 1.24 can't ensure the
 declared dependencies ``setup-depends`` are in scope, and instead
 whatever is registered in the current package database environment
 will become eligible (and resolved by the compiler) for the
@@ -2848,8 +2978,9 @@ The availability of the
 ``MIN_VERSION_package_(A,B,C)`` CPP macros
 inside ``Setup.hs`` scripts depends on the condition that either
 
-- a ``custom-setup`` section has been declared (or ``cabal build`` is being
-  used which injects an implicit hard-coded ``custom-setup`` stanza if it's missing), or
+- a ``custom-setup`` stanza has been declared (or ``cabal build`` is being used
+  which injects an implicit hard-coded ``custom-setup`` stanza if it's missing),
+  or
 - GHC 8.0 or later is used (which natively injects package version CPP macros)
 
 Consequently, if you need to write backward compatible ``Setup.hs``
@@ -2906,25 +3037,36 @@ Autogenerated modules and includes
 
 .. pkg-section:: None
 
-Modules that are built automatically at setup, created with a custom
-setup script, must appear on :pkg-field:`other-modules` for the library,
-executable, test-suite or benchmark stanzas or also on
-:pkg-field:`library:exposed-modules` for libraries to be used, but are not
-really on the package when distributed. This makes commands like sdist fail
-because the file is not found.
+Autogenerated modules are not included with the package source. Instead, they
+are built automatically at setup or created with a custom setup script and must
+appear twice for a component: once to flag them as being autogenerated in an
+:pkg-field:`autogen-modules` field, and again to bring them into the component
+with a listing in :pkg-field:`other-modules` or
+:pkg-field:`library:exposed-modules`.
 
-These special modules must appear again on the :pkg-field:`autogen-modules`
-field of the stanza that is using them, besides :pkg-field:`other-modules` or
-:pkg-field:`library:exposed-modules`. With this there is no need to create
-complex build hooks for this poweruser case.
+.. note::
+
+    Files :file:`Paths_{pkgname}` and :file:`PackageInfo_{pkgname}`,
+    autogenerated modules with package :ref:`version <package-version-info>` and
+    :ref:`package-related <package-related-info>` information, are typically
+    exposed so that they're accessible with the library.
+
+    Creating a source distribution with ``cabal sdist`` reports any source files
+    not found and fails. Listing modules as :pkg-field:`autogen-modules` exempts
+    ``cabal sdist`` from finding files for these modules.
+
+.. error::
+
+    An autogenerated module cannot also be the :pkg-field:`executable:main-is`
+    file. The ``cabal sdist`` command expects to find this file in the source
+    tree and autogenerated modules are generated outside the source tree.
 
 .. pkg-field:: autogen-modules: module list
    :since: 2.0
 
-   .. todo:: document autogen-modules field
-
-Right now :pkg-field:`executable:main-is` modules are not supported on
-:pkg-field:`autogen-modules`.
+   A list of autogenerated modules. Each one of these modules must also be
+   listed elsewhere as if they were modules on disk.  Autogenerated modules are
+   not packaged by the ``cabal sdist`` command.
 
 ::
 
@@ -2952,15 +3094,18 @@ Right now :pkg-field:`executable:main-is` modules are not supported on
 .. pkg-field:: autogen-includes: filename list
    :since: 3.0
 
-   A list of header files from this package which are autogenerated
-   (e.g. by a ``configure`` script). Autogenerated header files are not
-   packaged by ``sdist`` command.
+   A list of header files from this package which are autogenerated (e.g. by a
+   ``configure`` script).  Autogenerated header files are not packaged by
+   the ``cabal sdist`` command.
 
 
 .. _accessing-data-files:
 
 Accessing data files from package code
 --------------------------------------
+
+.. index:: Paths
+.. index:: Paths_
 
 The placement on the target system of files listed in
 the :pkg-field:`data-files` field varies between systems, and in some cases
@@ -2975,9 +3120,10 @@ modules of the package. This module defines a function
 
     getDataFileName :: FilePath -> IO FilePath
 
-If the argument is a filename listed in the :pkg-field:`data-files` field, the
-result is the name of the corresponding file on the system on which the
-program is running.
+If the argument is a filename, the result is the name of a corresponding file on
+the system on which the program is running, if the filename were listed in the
+:pkg-field:`data-files` field. No check is performed that the given filename is
+listed in that field.
 
 .. Note::
 
@@ -3014,16 +3160,23 @@ hyphens converted into underscores, and ``var`` is either ``bindir``,
 the configured data directory for ``pretty-show`` is controlled with the
 ``pretty_show_datadir`` environment variable.
 
+.. _package-version-info:
+
 Accessing the package version
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. index:: PackageInfo
+.. index:: PackageInfo_
 
 The auto generated :file:`PackageInfo_{pkgname}` module exports the constant
 ``version ::`` `Version <http://hackage.haskell.org/package/base/docs/Data-Version.html>`__
 which is defined as the version of your package as specified in the
 ``version`` field.
 
-Accessing package-related informations
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+.. _package-related-info:
+
+Accessing package-related information
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 The auto generated :file:`PackageInfo_{pkgname}` module exports the following
 package-related constants:
@@ -3036,7 +3189,7 @@ package-related constants:
     copyright :: String
     homepage :: String
 
-Unlike :file:`Paths_{pkgname}` (see <#accessing-data-files-from-package-code>),
+Unlike :file:`Paths_{pkgname}` (see :ref:`accessing-data-files`),
 :file:`PackageInfo_{pkgname}` is system- and path-independent. It aims to be
 easier to work with for hash-based tools such as Nix.
 
@@ -3073,10 +3226,11 @@ The :pkg-field:`build-type` ``Configure`` differs from ``Simple`` in two ways:
 -  If the package root directory contains a file called
    *package*\ ``.buildinfo`` after the configuration step, subsequent
    steps will read it to obtain additional settings for `build
-   information`_ fields,to be merged with the ones
-   given in the ``.cabal`` file. In particular, this file may be
-   generated by the ``configure`` script mentioned above, allowing these
-   settings to vary depending on the build environment.
+   information`_ fields.  ``.buildinfo`` settings will be merged with
+   ``.cabal`` file ones, the former taking precedence over the latter.
+   The ``.buildinfo`` file may be generated by the ``configure`` script
+   mentioned above, allowing these settings to vary depending on the
+   build environment.
 
 Note that the package's ``extra-source-files`` are available to the
 ``configure`` script when it is executed. In typical ``autoconf`` fashion,
@@ -3085,7 +3239,9 @@ platform when cross-compiling. Moreover, various bits of build configuration
 will be passed via environment variables:
 
  - ``CC`` will reflect the path to the C compiler
- - ``CFLAGS`` will reflect the path to the C compiler
+ - ``CXX`` will reflect the path to the C++ compiler (if available, it always will be if ghc >= 9.4)
+ - ``CFLAGS`` will reflect the flags to the C compiler
+ - ``CXXFLAGS`` will reflect the flags to the C++ compiler (if available)
  - ``CABAL_FLAGS`` will contain the Cabal flag assignment of the current
    package using traditional Cabal flag syntax (e.g. ``+flagA -flagB``)
  - ``CABAL_FLAG_<flag>`` will be set to either ``0`` or ``1`` depending upon
@@ -3202,7 +3358,7 @@ use different versions of the API?
 
 Haskell lets you preprocess your code using the C preprocessor (either
 the real C preprocessor, or ``cpphs``). To enable this, add
-``extensions: CPP`` to your package description. When using CPP, Cabal
+``default-extensions: CPP`` to your package description. When using CPP, Cabal
 provides some pre-defined macros to let you test the version of
 dependent packages; for example, suppose your package works with either
 version 3 or version 4 of the ``base`` package, you could select the
@@ -3282,24 +3438,6 @@ a few options:
    :pkg-field:`custom-setup:setup-depends` field to ensure that your setup
    script does not break with future dependency versions.
 
--  You could delegate all the work to ``make``, though this is unlikely
-   to be very portable. Cabal supports this with the :pkg-field:`build-type`
-   ``Make`` and a trivial setup library
-   `Distribution.Make <https://hackage.haskell.org/package/Cabal/docs/Distribution-Make.html>`__,
-   which simply parses the command line arguments and invokes ``make``.
-   Here ``Setup.hs`` should look like this:
-
-   .. code-block:: haskell
-
-       import Distribution.Make
-       main = defaultMain
-
-   The root directory of the package should contain a ``configure``
-   script, and, after that has run, a ``Makefile`` with a default target
-   that builds the package, plus targets ``install``, ``register``,
-   ``unregister``, ``clean``, ``dist`` and ``docs``. Some options to
-   commands are passed through as follows:
-
    -  The ``--with-hc-pkg``, ``--prefix``, ``--bindir``, ``--libdir``,
       ``--dynlibdir``, ``--datadir``, ``--libexecdir`` and ``--sysconfdir`` options to
       the ``configure`` command are passed on to the ``configure``
@@ -3333,9 +3471,10 @@ a few options:
 .. rubric:: Footnotes
 
 .. [#old-style-build-tool-depends]
-
-  Some packages (ab)use :pkg-field:`build-depends` on old-style builds, but this has a few major drawbacks:
-
-    - using Nix-style builds it's considered an error if you depend on a exe-only package via build-depends: the solver will refuse it.
-    - it may or may not place the executable on ``PATH``.
-    - it does not ensure the correct version of the package is installed, so you might end up overwriting versions with each other.
+   Some packages (ab)use :pkg-field:`build-depends` on old-style builds, but
+   this has a few major drawbacks. First, with Nix-style builds it's considered
+   an error if you depend on a exe-only package via ``build-depends``: the
+   solver will refuse it.  Next, ``build-depends`` may or may not place the
+   executable on ``PATH``.  Finally, ``build-depends`` does not ensure the
+   correct version of the package is installed, so you might end up overwriting
+   versions with each other.

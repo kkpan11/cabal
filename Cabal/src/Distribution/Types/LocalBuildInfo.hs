@@ -1,10 +1,6 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DuplicateRecordFields #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE PatternSynonyms #-}
-{-# LANGUAGE RankNTypes #-}
 
 module Distribution.Types.LocalBuildInfo
   ( -- * The types
@@ -27,11 +23,13 @@ module Distribution.Types.LocalBuildInfo
       , withPackageDB
       , withVanillaLib
       , withProfLib
-      , withSharedLib
-      , withStaticLib
+      , withProfLibShared
       , withDynExe
       , withFullyStaticExe
       , withProfExe
+      , withSharedLib
+      , withStaticLib
+      , withBytecodeLib
       , withProfLibDetail
       , withProfExeDetail
       , withOptimization
@@ -45,6 +43,8 @@ module Distribution.Types.LocalBuildInfo
       , libCoverage
       , extraCoverageFor
       , relocatable
+      , programPrefix
+      , programSuffix
       , ..
       )
 
@@ -55,8 +55,8 @@ module Distribution.Types.LocalBuildInfo
   , localPackage
   , buildDir
   , buildDirPBD
-  , configFlagsBuildDir
-  , cabalFilePath
+  , setupFlagsBuildDir
+  , distPrefLBI
   , progPrefix
   , progSuffix
 
@@ -80,6 +80,7 @@ module Distribution.Types.LocalBuildInfo
   , neededTargetsInBuildOrder'
   , withNeededTargetsInBuildOrder'
   , testCoverage
+  , buildWays
 
     -- * Functions you SHOULD NOT USE (yet), but are defined here to
 
@@ -99,14 +100,18 @@ import Prelude ()
 import Distribution.Types.ComponentId
 import Distribution.Types.ComponentLocalBuildInfo
 import Distribution.Types.ComponentRequestedSpec
+import Distribution.Types.GivenComponent
 import qualified Distribution.Types.LocalBuildConfig as LBC
 import Distribution.Types.PackageDescription
 import Distribution.Types.PackageId
 import Distribution.Types.TargetInfo
 import Distribution.Types.UnitId
 
+import Distribution.Utils.Path
+
 import Distribution.PackageDescription
 import Distribution.Pretty
+import Distribution.Simple.BuildWay
 import Distribution.Simple.Compiler
 import Distribution.Simple.Flag
 import Distribution.Simple.InstallDirs hiding
@@ -116,13 +121,13 @@ import Distribution.Simple.InstallDirs hiding
   )
 import Distribution.Simple.PackageIndex
 import Distribution.Simple.Program
+import Distribution.Simple.Setup.Common
 import Distribution.Simple.Setup.Config
 import Distribution.System
 
 import qualified Data.Map as Map
 import Distribution.Compat.Graph (Graph)
 import qualified Distribution.Compat.Graph as Graph
-import System.FilePath ((</>))
 
 -- | Data cached after configuration step.  See also
 -- 'Distribution.Simple.Setup.ConfigFlags'.
@@ -134,7 +139,7 @@ data LocalBuildInfo = NewLocalBuildInfo
   -- ^ Information about a package configuration
   -- that can be modified by the user at configuration time.
   }
-  deriving (Generic, Read, Show, Typeable)
+  deriving (Generic, Read, Show)
 
 {-# COMPLETE LocalBuildInfo #-}
 
@@ -148,14 +153,16 @@ pattern LocalBuildInfo
   -> InstallDirTemplates
   -> Compiler
   -> Platform
-  -> Maybe FilePath
+  -> Maybe (SymbolicPath Pkg File)
   -> Graph ComponentLocalBuildInfo
   -> Map ComponentName [ComponentLocalBuildInfo]
-  -> Map (PackageName, ComponentName) ComponentId
+  -> Map (PackageName, ComponentName) PromisedComponent
   -> InstalledPackageIndex
   -> PackageDescription
   -> ProgramDb
   -> PackageDBStack
+  -> Bool
+  -> Bool
   -> Bool
   -> Bool
   -> Bool
@@ -176,6 +183,8 @@ pattern LocalBuildInfo
   -> Bool
   -> [UnitId]
   -> Bool
+  -> Maybe PathTemplate
+  -> Maybe PathTemplate
   -> LocalBuildInfo
 pattern LocalBuildInfo
   { configFlags
@@ -195,8 +204,10 @@ pattern LocalBuildInfo
   , withPackageDB
   , withVanillaLib
   , withProfLib
+  , withProfLibShared
   , withSharedLib
   , withStaticLib
+  , withBytecodeLib
   , withDynExe
   , withFullyStaticExe
   , withProfExe
@@ -213,6 +224,8 @@ pattern LocalBuildInfo
   , libCoverage
   , extraCoverageFor
   , relocatable
+  , programPrefix
+  , programSuffix
   } =
   NewLocalBuildInfo
     { localBuildDescr =
@@ -246,8 +259,10 @@ pattern LocalBuildInfo
           LBC.BuildOptions
             { withVanillaLib
             , withProfLib
+            , withProfLibShared
             , withSharedLib
             , withStaticLib
+            , withBytecodeLib
             , withDynExe
             , withFullyStaticExe
             , withProfExe
@@ -263,6 +278,8 @@ pattern LocalBuildInfo
             , exeCoverage
             , libCoverage
             , relocatable
+            , programPrefix
+            , programSuffix
             }
         }
     }
@@ -273,26 +290,28 @@ instance Structured LocalBuildInfo
 -------------------------------------------------------------------------------
 -- Accessor functions
 
-buildDir :: LocalBuildInfo -> FilePath
+buildDir :: LocalBuildInfo -> SymbolicPath Pkg (Dir Build)
 buildDir lbi =
   buildDirPBD $ LBC.packageBuildDescr $ localBuildDescr lbi
 
-buildDirPBD :: LBC.PackageBuildDescr -> FilePath
+buildDirPBD :: LBC.PackageBuildDescr -> SymbolicPath Pkg (Dir Build)
 buildDirPBD (LBC.PackageBuildDescr{configFlags = cfg}) =
-  configFlagsBuildDir cfg
+  setupFlagsBuildDir $ configCommonFlags cfg
 
-configFlagsBuildDir :: ConfigFlags -> FilePath
-configFlagsBuildDir cfg = fromFlag (configDistPref cfg) </> "build"
+setupFlagsBuildDir :: CommonSetupFlags -> SymbolicPath Pkg (Dir Build)
+setupFlagsBuildDir cfg = fromFlag (setupDistPref cfg) </> makeRelativePathEx "build"
 
-cabalFilePath :: LocalBuildInfo -> Maybe FilePath
-cabalFilePath (LocalBuildInfo{configFlags = cfg}) =
-  flagToMaybe (configCabalFilePath cfg)
+distPrefLBI :: LocalBuildInfo -> SymbolicPath Pkg (Dir Dist)
+distPrefLBI = fromFlag . setupDistPref . configCommonFlags . LBC.configFlags . LBC.packageBuildDescr . localBuildDescr
 
 progPrefix, progSuffix :: LocalBuildInfo -> PathTemplate
-progPrefix (LocalBuildInfo{configFlags = cfg}) =
-  fromFlag $ configProgPrefix cfg
-progSuffix (LocalBuildInfo{configFlags = cfg}) =
-  fromFlag $ configProgSuffix cfg
+-- NB: make sure to read from 'BuildOptions' rather than the 'ConfigFlags'
+-- stored in 'PackageBuildDescr', as the latter are the original command-line
+-- input and are not updated by 'SetupHooks' configure hooks.
+progPrefix (LocalBuildInfo{programPrefix = pfix}) =
+  fromMaybe (toPathTemplate "") pfix
+progSuffix (LocalBuildInfo{programSuffix = sfix}) =
+  fromMaybe (toPathTemplate "") sfix
 
 -- TODO: Get rid of these functions, as much as possible.  They are
 -- a bit useful in some cases, but you should be very careful!
@@ -366,9 +385,7 @@ unitIdTarget' pkg_descr lbi@(LocalBuildInfo{componentGraph = compsGraph}) uid =
 -- In the presence of Backpack there may be more than one!
 componentNameCLBIs :: LocalBuildInfo -> ComponentName -> [ComponentLocalBuildInfo]
 componentNameCLBIs (LocalBuildInfo{componentNameMap = comps}) cname =
-  case Map.lookup cname comps of
-    Just clbis -> clbis
-    Nothing -> []
+  Map.findWithDefault [] cname comps
 
 -- TODO: Maybe cache topsort (Graph can do this)
 
@@ -411,6 +428,49 @@ withNeededTargetsInBuildOrder' pkg_descr lbi uids f =
 testCoverage :: LocalBuildInfo -> Bool
 testCoverage (LocalBuildInfo{exeCoverage = exes, libCoverage = libs}) =
   exes && libs
+
+-- | Returns a list of ways, in the order which they should be built, and the
+-- way we build executable and foreign library components.
+--
+-- Ideally all this info should be fixed at configure time and not dependent on
+-- additional info but `LocalBuildInfo` is per package (not per component) so it's
+-- currently not possible to configure components to be built in certain ways.
+buildWays :: LocalBuildInfo -> (Bool -> [BuildWay], Bool -> BuildWay, BuildWay)
+buildWays lbi =
+  let
+    -- enable-library-profiling (enable (static profiling way)) .p_o
+    -- enable-shared (enabled dynamic way)  .dyn_o
+    -- enable-profiling-shared (enable dynamic profilng way) .p_dyn_o
+    -- enable-library-vanilla (enable vanilla way) .o
+    --
+    -- enable-executable-dynamic => build dynamic executables
+    -- => --enable-profiling + --enable-executable-dynamic => build dynamic profiled executables
+    -- => --enable-profiling => build vanilla profiled executables
+
+    wantedLibWays is_indef =
+      [ProfDynWay | withProfLibShared lbi && not is_indef]
+        <> [ProfWay | withProfLib lbi]
+        -- I don't see why we shouldn't build with dynamic-- indefinite components.
+        <> [DynWay | withSharedLib lbi && not is_indef]
+        -- MP: Ideally we should have `BuildOptions` on a per component basis, in
+        -- which case this `is_indef` check could be moved to configure time.
+        <> [StaticWay | withVanillaLib lbi || withStaticLib lbi]
+
+    wantedFLibWay is_dyn_flib =
+      case (is_dyn_flib, withProfExe lbi) of
+        (True, True) -> ProfDynWay
+        (False, True) -> ProfWay
+        (True, False) -> DynWay
+        (False, False) -> StaticWay
+
+    wantedExeWay =
+      case (withDynExe lbi, withProfExe lbi) of
+        (True, True) -> ProfDynWay
+        (True, False) -> DynWay
+        (False, True) -> ProfWay
+        (False, False) -> StaticWay
+   in
+    (wantedLibWays, wantedFLibWay, wantedExeWay)
 
 -------------------------------------------------------------------------------
 -- Stub functions to prevent someone from accidentally defining them

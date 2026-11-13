@@ -1,9 +1,6 @@
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiWayIf #-}
-
------------------------------------------------------------------------------
-
------------------------------------------------------------------------------
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE RecordWildCards #-}
 
 -- |
 -- Module      :  Distribution.Client.Init.Command
@@ -59,13 +56,14 @@ import Distribution.Client.Types (SourcePackageDb (..))
 import Distribution.FieldGrammar.Newtypes (SpecLicense (..))
 import qualified Distribution.SPDX as SPDX
 import Distribution.Simple.PackageIndex (InstalledPackageIndex)
-import Distribution.Simple.Setup (Flag (..), fromFlagOrDefault)
+import Distribution.Simple.Setup (fromFlagOrDefault, pattern Flag, pattern NoFlag)
 import Distribution.Solver.Types.PackageIndex (elemByPackageName)
 import Distribution.Types.PackageName (PackageName, unPackageName)
 import Distribution.Version (Version)
 
 import Distribution.License (knownLicenses)
 import Distribution.Parsec (simpleParsec')
+import Distribution.Verbosity (verbosityFlags)
 import Language.Haskell.Extension (Language (..))
 
 -- | Main driver for interactive prompt code.
@@ -107,7 +105,7 @@ createProject v pkgIx srcDb initFlags = do
           doOverwrite
           isMinimal
           cs
-          v
+          (verbosityFlags v)
           pkgDir
           pkgType
           pkgName
@@ -191,19 +189,19 @@ genPkgDescription
   -> SourcePackageDb
   -> m PkgDescription
 genPkgDescription flags' srcDb = do
-  csv <- cabalVersionPrompt flags'
-  let flags = flags'{cabalVersion = Flag csv}
-  PkgDescription csv
-    <$> packageNamePrompt srcDb flags
-    <*> versionPrompt flags
-    <*> licensePrompt flags
-    <*> authorPrompt flags
-    <*> emailPrompt flags
-    <*> homepagePrompt flags
-    <*> synopsisPrompt flags
-    <*> categoryPrompt flags
-    <*> getExtraSrcFiles flags
-    <*> getExtraDocFiles flags
+  _pkgCabalVersion <- cabalVersionPrompt flags'
+  let flags = flags'{cabalVersion = Flag _pkgCabalVersion}
+  _pkgName <- packageNamePrompt srcDb flags
+  _pkgVersion <- versionPrompt flags
+  _pkgLicense <- licensePrompt flags
+  _pkgAuthor <- authorPrompt flags
+  _pkgEmail <- emailPrompt flags
+  _pkgHomePage <- homepagePrompt flags
+  _pkgSynopsis <- synopsisPrompt flags
+  _pkgCategory <- categoryPrompt flags
+  _pkgExtraSrcFiles <- getExtraSrcFiles flags
+  _pkgExtraDocFiles <- getExtraDocFiles flags
+  pure PkgDescription{..}
 
 -- | Extract flags relevant to a library target and interactively
 -- generate a 'LibTarget' object for creation. If the user specifies
@@ -214,15 +212,15 @@ genLibTarget
   => InitFlags
   -> InstalledPackageIndex
   -> m LibTarget
-genLibTarget flags pkgs =
-  LibTarget
-    <$> srcDirsPrompt flags
-    <*> languagePrompt flags "library"
-    <*> getExposedModules flags
-    <*> getOtherModules flags
-    <*> getOtherExts flags
-    <*> dependenciesPrompt pkgs flags
-    <*> getBuildTools flags
+genLibTarget flags pkgs = do
+  _libSourceDirs <- srcDirsPrompt flags
+  _libLanguage <- languagePrompt flags "library"
+  _libExposedModules <- getExposedModules flags
+  _libOtherModules <- getOtherModules flags
+  _libOtherExts <- getOtherExts flags
+  _libDependencies <- dependenciesPrompt pkgs flags
+  _libBuildTools <- getBuildTools flags
+  pure LibTarget{..}
 
 -- | Extract flags relevant to a executable target and interactively
 -- generate a 'ExeTarget' object for creation. If the user specifies
@@ -233,15 +231,15 @@ genExeTarget
   => InitFlags
   -> InstalledPackageIndex
   -> m ExeTarget
-genExeTarget flags pkgs =
-  ExeTarget
-    <$> mainFilePrompt flags
-    <*> appDirsPrompt flags
-    <*> languagePrompt flags "executable"
-    <*> getOtherModules flags
-    <*> getOtherExts flags
-    <*> dependenciesPrompt pkgs flags
-    <*> getBuildTools flags
+genExeTarget flags pkgs = do
+  _exeMainIs <- mainFilePrompt flags
+  _exeApplicationDirs <- appDirsPrompt flags
+  _exeLanguage <- languagePrompt flags "executable"
+  _exeOtherModules <- getOtherModules flags
+  _exeOtherExts <- getOtherExts flags
+  _exeDependencies <- dependenciesPrompt pkgs flags
+  _exeBuildTools <- getBuildTools flags
+  pure ExeTarget{..}
 
 -- | Extract flags relevant to a test target and interactively
 -- generate a 'TestTarget' object for creation. If the user specifies
@@ -260,16 +258,15 @@ genTestTarget flags pkgs = initializeTestSuitePrompt flags >>= go
   where
     go initialized
       | not initialized = return Nothing
-      | otherwise =
-          fmap Just $
-            TestTarget
-              <$> testMainPrompt
-              <*> testDirsPrompt flags
-              <*> languagePrompt flags "test suite"
-              <*> getOtherModules flags
-              <*> getOtherExts flags
-              <*> dependenciesPrompt pkgs flags
-              <*> getBuildTools flags
+      | otherwise = do
+          _testMainIs <- testMainPrompt
+          _testDirs <- testDirsPrompt flags
+          _testLanguage <- languagePrompt flags "test suite"
+          _testOtherModules <- getOtherModules flags
+          _testOtherExts <- getOtherExts flags
+          _testDependencies <- dependenciesPrompt pkgs flags
+          _testBuildTools <- getBuildTools flags
+          pure $ Just TestTarget{..}
 
 -- -------------------------------------------------------------------- --
 -- Prompts
@@ -313,6 +310,7 @@ cabalVersionPrompt flags = getCabalVersion flags $ do
     parseCabalVersion "3.0" = CabalSpecV3_0
     parseCabalVersion "3.4" = CabalSpecV3_4
     parseCabalVersion "3.12" = CabalSpecV3_12
+    parseCabalVersion "3.14" = CabalSpecV3_14
     parseCabalVersion _ = defaultCabalVersion -- 2.4
     displayCabalVersion :: CabalSpecVersion -> String
     displayCabalVersion v = case v of
@@ -321,6 +319,7 @@ cabalVersionPrompt flags = getCabalVersion flags $ do
       CabalSpecV2_4 -> "2.4   (+ support for '**' globbing)"
       CabalSpecV3_0 -> "3.0   (+ set notation for ==, common stanzas in ifs, more redundant commas, better pkgconfig-depends)"
       CabalSpecV3_4 -> "3.4   (+ sublibraries in 'mixins', optional 'default-language')"
+      CabalSpecV3_14 -> "3.14  (+ build-type: Hooks)"
       _ -> showCabalSpecVersion v
 
 packageNamePrompt :: Interactive m => SourcePackageDb -> InitFlags -> m PackageName
@@ -458,13 +457,17 @@ languagePrompt flags pkgType = getLanguage flags $ do
       ghc2021 = "GHC2021 (requires at least GHC 9.2)"
       ghc2024 = "GHC2024 (requires at least GHC 9.10)"
 
+  lastChosenLanguage <- getLastChosenLanguage
+
   l <-
     promptList
       ("Choose a language for your " ++ pkgType)
       [h2010, h98, ghc2021, ghc2024]
-      (DefaultPrompt h2010)
+      (DefaultPrompt (fromMaybe h2010 lastChosenLanguage))
       Nothing
       True
+
+  setLastChosenLanguage (Just l)
 
   if
       | l == h2010 -> return Haskell2010

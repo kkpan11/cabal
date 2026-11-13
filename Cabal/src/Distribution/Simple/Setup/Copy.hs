@@ -1,10 +1,8 @@
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE RankNTypes #-}
-
------------------------------------------------------------------------------
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DerivingVia #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
 
 -- |
 -- Module      :  Distribution.Simple.Setup.Copy
@@ -18,7 +16,15 @@
 -- Definition of the copy command-line options.
 -- See: @Distribution.Simple.Setup@
 module Distribution.Simple.Setup.Copy
-  ( CopyFlags (..)
+  ( CopyFlags
+      ( CopyCommonFlags
+      , copyVerbosity
+      , copyDistPref
+      , copyCabalFilePath
+      , copyWorkingDir
+      , copyTargets
+      , ..
+      )
   , emptyCopyFlags
   , defaultCopyFlags
   , copyCommand
@@ -31,10 +37,10 @@ import Distribution.ReadE
 import Distribution.Simple.Command hiding (boolOpt, boolOpt')
 import Distribution.Simple.Flag
 import Distribution.Simple.InstallDirs
-import Distribution.Simple.Utils
-import Distribution.Verbosity
-
 import Distribution.Simple.Setup.Common
+import Distribution.Simple.Utils
+import Distribution.Utils.Path
+import Distribution.Verbosity
 
 -- ------------------------------------------------------------
 
@@ -44,16 +50,35 @@ import Distribution.Simple.Setup.Common
 
 -- | Flags to @copy@: (destdir, copy-prefix (backwards compat), verbosity)
 data CopyFlags = CopyFlags
-  { copyDest :: Flag CopyDest
-  , copyDistPref :: Flag FilePath
-  , copyVerbosity :: Flag Verbosity
-  , -- This is the same hack as in 'buildArgs'.  But I (ezyang) don't
-    -- think it's a hack, it's the right way to make hooks more robust
-    -- TODO: Stop using this eventually when 'UserHooks' gets changed
-    copyArgs :: [String]
-  , copyCabalFilePath :: Flag FilePath
+  { copyCommonFlags :: !CommonSetupFlags
+  , copyDest :: Flag CopyDest
   }
   deriving (Show, Generic)
+  deriving (Semigroup, Monoid) via Generically CopyFlags
+
+pattern CopyCommonFlags
+  :: Flag VerbosityFlags
+  -> Flag (SymbolicPath Pkg (Dir Dist))
+  -> Flag (SymbolicPath CWD (Dir Pkg))
+  -> Flag (SymbolicPath Pkg File)
+  -> [String]
+  -> CopyFlags
+pattern CopyCommonFlags
+  { copyVerbosity
+  , copyDistPref
+  , copyWorkingDir
+  , copyCabalFilePath
+  , copyTargets
+  } <-
+  ( copyCommonFlags ->
+      CommonSetupFlags
+        { setupVerbosity = copyVerbosity
+        , setupDistPref = copyDistPref
+        , setupWorkingDir = copyWorkingDir
+        , setupCabalFilePath = copyCabalFilePath
+        , setupTargets = copyTargets
+        }
+    )
 
 instance Binary CopyFlags
 instance Structured CopyFlags
@@ -61,11 +86,8 @@ instance Structured CopyFlags
 defaultCopyFlags :: CopyFlags
 defaultCopyFlags =
   CopyFlags
-    { copyDest = Flag NoCopyDest
-    , copyDistPref = NoFlag
-    , copyVerbosity = Flag normal
-    , copyArgs = []
-    , copyCabalFilePath = mempty
+    { copyCommonFlags = defaultCommonSetupFlags
+    , copyDest = Flag NoCopyDest
     }
 
 copyCommand :: CommandUI CopyFlags
@@ -89,12 +111,13 @@ copyCommand =
           ++ " copy foo       "
           ++ "    A component (i.e. lib, exe, test suite)"
     , commandUsage =
-        usageAlternatives "copy" $
+        usageAlternatives
+          "copy"
           [ "[FLAGS]"
           , "COMPONENTS [FLAGS]"
           ]
     , commandDefaultFlags = defaultCopyFlags
-    , commandOptions = \showOrParseArgs -> case showOrParseArgs of
+    , commandOptions = \case
         ShowArgs ->
           filter
             ( (`notElem` ["target-package-db"])
@@ -106,48 +129,40 @@ copyCommand =
 
 copyOptions :: ShowOrParseArgs -> [OptionField CopyFlags]
 copyOptions showOrParseArgs =
-  [ optionVerbosity copyVerbosity (\v flags -> flags{copyVerbosity = v})
-  , optionDistPref
-      copyDistPref
-      (\d flags -> flags{copyDistPref = d})
-      showOrParseArgs
-  , option
-      ""
-      ["destdir"]
-      "directory to copy files to, prepended to installation directories"
-      copyDest
-      ( \v flags -> case copyDest flags of
-          Flag (CopyToDb _) -> error "Use either 'destdir' or 'target-package-db'."
-          _ -> flags{copyDest = v}
-      )
-      ( reqArg
-          "DIR"
-          (succeedReadE (Flag . CopyTo))
-          (\f -> case f of Flag (CopyTo p) -> [p]; _ -> [])
-      )
-  , option
-      ""
-      ["target-package-db"]
-      "package database to copy files into. Required when using ${pkgroot} prefix."
-      copyDest
-      ( \v flags -> case copyDest flags of
-          NoFlag -> flags{copyDest = v}
-          Flag NoCopyDest -> flags{copyDest = v}
-          _ -> error "Use either 'destdir' or 'target-package-db'."
-      )
-      ( reqArg
-          "DATABASE"
-          (succeedReadE (Flag . CopyToDb))
-          (\f -> case f of Flag (CopyToDb p) -> [p]; _ -> [])
-      )
-  ]
+  withCommonSetupOptions
+    copyCommonFlags
+    (\c f -> f{copyCommonFlags = c})
+    showOrParseArgs
+    [ option
+        ""
+        ["destdir"]
+        "directory to copy files to, prepended to installation directories"
+        copyDest
+        ( \v flags -> case copyDest flags of
+            Flag (CopyToDb _) -> error "Use either 'destdir' or 'target-package-db'."
+            _ -> flags{copyDest = v}
+        )
+        ( reqArg
+            "DIR"
+            (succeedReadE (Flag . CopyTo))
+            (\case Flag (CopyTo p) -> [p]; _ -> [])
+        )
+    , option
+        ""
+        ["target-package-db"]
+        "package database to copy files into. Required when using ${pkgroot} prefix."
+        copyDest
+        ( \v flags -> case copyDest flags of
+            NoFlag -> flags{copyDest = v}
+            Flag NoCopyDest -> flags{copyDest = v}
+            _ -> error "Use either 'destdir' or 'target-package-db'."
+        )
+        ( reqArg
+            "DATABASE"
+            (succeedReadE (Flag . CopyToDb))
+            (\case Flag (CopyToDb p) -> [p]; _ -> [])
+        )
+    ]
 
 emptyCopyFlags :: CopyFlags
 emptyCopyFlags = mempty
-
-instance Monoid CopyFlags where
-  mempty = gmempty
-  mappend = (<>)
-
-instance Semigroup CopyFlags where
-  (<>) = gmappend

@@ -1,3 +1,5 @@
+{-# LANGUAGE DataKinds #-}
+
 -----------------------------------------------------------------------------
 
 -- |
@@ -16,6 +18,8 @@ module Distribution.Simple.PackageDescription
 
     -- * Utility Parsing function
   , parseString
+  , readAndParseFile
+  , flattenDups
   ) where
 
 import Distribution.Compat.Prelude
@@ -29,23 +33,37 @@ import Distribution.PackageDescription.Parsec
   ( parseGenericPackageDescription
   , parseHookedBuildInfo
   )
-import Distribution.Parsec.Error (showPError)
+import Distribution.Parsec.Error (showPErrorWithSource)
+import Distribution.Parsec.Source
 import Distribution.Parsec.Warning
   ( PWarnType (PWTExperimental)
   , PWarning (..)
-  , showPWarning
+  , PWarningWithSource (..)
+  , showPWarningWithSource
   )
 import Distribution.Simple.Errors
 import Distribution.Simple.Utils (dieWithException, equating, warn)
-import Distribution.Verbosity (Verbosity, normal)
+import Distribution.Utils.Path
+import Distribution.Verbosity (Verbosity, VerbosityLevel (..), verbosityLevel)
 import System.Directory (doesFileExist)
 import Text.Printf (printf)
 
-readGenericPackageDescription :: Verbosity -> FilePath -> IO GenericPackageDescription
-readGenericPackageDescription = readAndParseFile parseGenericPackageDescription
+readGenericPackageDescription
+  :: Verbosity
+  -> Maybe (SymbolicPath CWD (Dir Pkg))
+  -> SymbolicPath Pkg File
+  -> IO GenericPackageDescription
+readGenericPackageDescription =
+  readAndParseFile parseGenericPackageDescription
 
-readHookedBuildInfo :: Verbosity -> FilePath -> IO HookedBuildInfo
-readHookedBuildInfo = readAndParseFile parseHookedBuildInfo
+readHookedBuildInfo
+  :: Verbosity
+  -> Maybe (SymbolicPath CWD (Dir Pkg))
+  -- ^ working directory
+  -> SymbolicPath Pkg File
+  -> IO HookedBuildInfo
+readHookedBuildInfo =
+  readAndParseFile parseHookedBuildInfo
 
 -- | Helper combinator to do parsing plumbing for files.
 --
@@ -54,23 +72,27 @@ readHookedBuildInfo = readAndParseFile parseHookedBuildInfo
 --
 -- Argument order is chosen to encourage partial application.
 readAndParseFile
-  :: (BS.ByteString -> ParseResult a)
+  :: (BS.ByteString -> ParseResult CabalFileSource a)
   -- ^ File contents to final value parser
   -> Verbosity
   -- ^ Verbosity level
-  -> FilePath
+  -> Maybe (SymbolicPath CWD (Dir Pkg))
+  -- ^ Working directory
+  -> SymbolicPath Pkg File
   -- ^ File to read
   -> IO a
-readAndParseFile parser verbosity fpath = do
-  exists <- doesFileExist fpath
+readAndParseFile parser verbosity mbWorkDir fpath = do
+  let ipath = interpretSymbolicPath mbWorkDir fpath
+      upath = getSymbolicPath fpath
+  exists <- doesFileExist ipath
   unless exists $
     dieWithException verbosity $
-      ErrorParsingFileDoesntExist fpath
-  bs <- BS.readFile fpath
-  parseString parser verbosity fpath bs
+      ErrorParsingFileDoesntExist upath
+  bs <- BS.readFile ipath
+  parseString parser verbosity upath bs
 
 parseString
-  :: (BS.ByteString -> ParseResult a)
+  :: (BS.ByteString -> ParseResult CabalFileSource a)
   -- ^ File contents to final value parser
   -> Verbosity
   -- ^ Verbosity level
@@ -79,38 +101,41 @@ parseString
   -> BS.ByteString
   -> IO a
 parseString parser verbosity name bs = do
-  let (warnings, result) = runParseResult (parser bs)
-  traverse_ (warn verbosity . showPWarning name) (flattenDups verbosity warnings)
+  let (warnings, result) = runParseResult $ withSource (PCabalFile (name, bs)) (parser bs)
+  traverse_ (warn verbosity . showPWarningWithSource . fmap renderCabalFileSource) (flattenDups verbosity warnings)
   case result of
     Right x -> return x
     Left (_, errors) -> do
-      traverse_ (warn verbosity . showPError name) errors
+      traverse_ (warn verbosity . showPErrorWithSource . fmap renderCabalFileSource) errors
       dieWithException verbosity $ FailedParsing name
 
 -- | Collapse duplicate experimental feature warnings into single warning, with
 -- a count of further sites
-flattenDups :: Verbosity -> [PWarning] -> [PWarning]
+flattenDups :: Verbosity -> [PWarningWithSource src] -> [PWarningWithSource src]
 flattenDups verbosity ws
-  | verbosity <= normal = rest ++ experimentals
+  | verbosityLevel verbosity <= Normal = rest ++ experimentals
   | otherwise = ws -- show all instances
   where
-    (exps, rest) = partition (\(PWarning w _ _) -> w == PWTExperimental) ws
+    (exps, rest) = partition (\(PWarningWithSource _ (PWarning w _ _)) -> w == PWTExperimental) ws
     experimentals =
       concatMap flatCount
-        . groupBy (equating warningStr)
-        . sortBy (comparing warningStr)
+        . groupBy (equating (warningStr . pwarning))
+        . sortBy (comparing (warningStr . pwarning))
         $ exps
 
     warningStr (PWarning _ _ w) = w
 
     -- flatten if we have 3 or more examples
-    flatCount :: [PWarning] -> [PWarning]
+    flatCount :: [PWarningWithSource src] -> [PWarningWithSource src]
     flatCount w@[] = w
     flatCount w@[_] = w
     flatCount w@[_, _] = w
-    flatCount (PWarning t pos w : xs) =
-      [ PWarning
-          t
-          pos
-          (w <> printf " (and %d more occurrences)" (length xs))
+    flatCount (PWarningWithSource source (PWarning t pos w) : xs) =
+      [ PWarningWithSource
+          source
+          ( PWarning
+              t
+              pos
+              (w <> printf " (and %d more occurrences)" (length xs))
+          )
       ]

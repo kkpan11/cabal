@@ -76,7 +76,7 @@ createProjectTest pkgIx srcDb =
                     , dependencies = Flag []
                     }
 
-            case (_runPrompt $ createProject silent pkgIx srcDb dummyFlags') (fromList ["[]", "3", "quxTest/Main.hs"]) of
+            case (runPrompt $ createProject (mkVerbosity defaultVerbosityHandles silent) pkgIx srcDb dummyFlags') (fromList ["[]", "3", "quxTest/Main.hs"]) of
               Right (ProjectSettings opts desc (Just lib) (Just exe) (Just test), _) -> do
                 _optOverwrite opts @?= False
                 _optMinimal opts @?= False
@@ -96,7 +96,7 @@ createProjectTest pkgIx srcDb =
                 _pkgSynopsis desc @?= "We are Qux, and this is our package"
                 _pkgCategory desc @?= "Control"
                 _pkgExtraSrcFiles desc @?= mempty
-                _pkgExtraDocFiles desc @?= pure (Set.singleton "CHANGELOG.md")
+                _pkgExtraDocFiles desc @?= pure (Set.fromList ["CHANGELOG.md", "README.md"])
 
                 _libSourceDirs lib @?= ["quxSrc"]
                 _libLanguage lib @?= Haskell98
@@ -186,7 +186,7 @@ createProjectTest pkgIx srcDb =
                       "y"
                     ]
 
-            case (_runPrompt $ createProject silent pkgIx srcDb emptyFlags) inputs of
+            case (runPrompt $ createProject (mkVerbosity defaultVerbosityHandles silent) pkgIx srcDb emptyFlags) inputs of
               Right (ProjectSettings opts desc (Just lib) (Just exe) (Just test), _) -> do
                 _optOverwrite opts @?= False
                 _optMinimal opts @?= False
@@ -206,7 +206,7 @@ createProjectTest pkgIx srcDb =
                 _pkgSynopsis desc @?= "Qux's package"
                 _pkgCategory desc @?= "Control"
                 _pkgExtraSrcFiles desc @?= mempty
-                _pkgExtraDocFiles desc @?= pure (Set.singleton "CHANGELOG.md")
+                _pkgExtraDocFiles desc @?= pure (Set.fromList ["CHANGELOG.md", "README.md"])
 
                 _libSourceDirs lib @?= ["src"]
                 _libLanguage lib @?= Haskell98
@@ -286,7 +286,7 @@ createProjectTest pkgIx srcDb =
                       "y"
                     ]
 
-            case (_runPrompt $ createProject silent pkgIx srcDb emptyFlags) inputs of
+            case (runPrompt $ createProject (mkVerbosity defaultVerbosityHandles silent) pkgIx srcDb emptyFlags) inputs of
               Right (ProjectSettings opts desc (Just lib) Nothing (Just test), _) -> do
                 _optOverwrite opts @?= False
                 _optMinimal opts @?= False
@@ -306,7 +306,7 @@ createProjectTest pkgIx srcDb =
                 _pkgSynopsis desc @?= "Qux's package"
                 _pkgCategory desc @?= "Control"
                 _pkgExtraSrcFiles desc @?= mempty
-                _pkgExtraDocFiles desc @?= pure (Set.singleton "CHANGELOG.md")
+                _pkgExtraDocFiles desc @?= pure (Set.fromList ["CHANGELOG.md", "README.md"])
 
                 _libSourceDirs lib @?= ["src"]
                 _libLanguage lib @?= Haskell98
@@ -372,7 +372,7 @@ createProjectTest pkgIx srcDb =
                       "y"
                     ]
 
-            case (_runPrompt $ createProject silent pkgIx srcDb emptyFlags) inputs of
+            case (runPrompt $ createProject (mkVerbosity defaultVerbosityHandles silent) pkgIx srcDb emptyFlags) inputs of
               Right (ProjectSettings opts desc Nothing Nothing (Just test), _) -> do
                 _optOverwrite opts @?= False
                 _optMinimal opts @?= False
@@ -392,7 +392,7 @@ createProjectTest pkgIx srcDb =
                 _pkgSynopsis desc @?= "Qux's package"
                 _pkgCategory desc @?= "Control"
                 _pkgExtraSrcFiles desc @?= mempty
-                _pkgExtraDocFiles desc @?= pure (Set.singleton "CHANGELOG.md")
+                _pkgExtraDocFiles desc @?= pure (Set.fromList ["CHANGELOG.md", "README.md"])
 
                 _testMainIs test @?= HsFilePath "Main.hs" Standard
                 _testDirs test @?= ["test"]
@@ -460,7 +460,7 @@ createProjectTest pkgIx srcDb =
                       "y"
                     ]
 
-            case (_runPrompt $ createProject silent pkgIx srcDb emptyFlags) inputs of
+            case (runPrompt $ createProject (mkVerbosity defaultVerbosityHandles silent) pkgIx srcDb emptyFlags) inputs of
               Right (ProjectSettings opts desc (Just lib) (Just exe) Nothing, _) -> do
                 _optOverwrite opts @?= False
                 _optMinimal opts @?= False
@@ -480,7 +480,7 @@ createProjectTest pkgIx srcDb =
                 _pkgSynopsis desc @?= "Qux's package"
                 _pkgCategory desc @?= "Control"
                 _pkgExtraSrcFiles desc @?= mempty
-                _pkgExtraDocFiles desc @?= pure (Set.singleton "CHANGELOG.md")
+                _pkgExtraDocFiles desc @?= pure (Set.fromList ["CHANGELOG.md", "README.md"])
 
                 _libSourceDirs lib @?= ["src"]
                 _libLanguage lib @?= Haskell98
@@ -546,7 +546,7 @@ createProjectTest pkgIx srcDb =
                       "y"
                     ]
 
-            case (_runPrompt $ createProject silent pkgIx srcDb emptyFlags) inputs of
+            case (runPrompt $ createProject (mkVerbosity defaultVerbosityHandles silent) pkgIx srcDb emptyFlags) inputs of
               Right (ProjectSettings opts desc (Just lib) Nothing Nothing, _) -> do
                 _optOverwrite opts @?= False
                 _optMinimal opts @?= False
@@ -566,7 +566,7 @@ createProjectTest pkgIx srcDb =
                 _pkgSynopsis desc @?= "Qux's package"
                 _pkgCategory desc @?= "Control"
                 _pkgExtraSrcFiles desc @?= mempty
-                _pkgExtraDocFiles desc @?= pure (Set.singleton "CHANGELOG.md")
+                _pkgExtraDocFiles desc @?= pure (Set.fromList ["CHANGELOG.md", "README.md"])
 
                 _libSourceDirs lib @?= ["src"]
                 _libLanguage lib @?= Haskell98
@@ -627,11 +627,11 @@ createProjectTest pkgIx srcDb =
                 flags =
                   emptyFlags
                     { cabalVersion = Flag CabalSpecV1_10
-                    , extraDoc = Flag [defaultChangelog]
+                    , extraDoc = Flag [defaultChangelog, defaultReadme]
                     , extraSrc = Flag ["README.md"]
                     }
 
-            case (_runPrompt $ createProject silent pkgIx srcDb flags) inputs of
+            case (runPrompt $ createProject (mkVerbosity defaultVerbosityHandles silent) pkgIx srcDb flags) inputs of
               Right (ProjectSettings opts desc (Just lib) Nothing Nothing, _) -> do
                 _optOverwrite opts @?= False
                 _optMinimal opts @?= False
@@ -650,7 +650,7 @@ createProjectTest pkgIx srcDb =
                 _pkgHomePage desc @?= "qux.com"
                 _pkgSynopsis desc @?= "Qux's package"
                 _pkgCategory desc @?= "Control"
-                _pkgExtraSrcFiles desc @?= Set.fromList [defaultChangelog, "README.md"]
+                _pkgExtraSrcFiles desc @?= Set.fromList [defaultChangelog, defaultReadme]
                 _pkgExtraDocFiles desc @?= Nothing
 
                 _libSourceDirs lib @?= ["src"]
@@ -709,7 +709,7 @@ createProjectTest pkgIx srcDb =
                       "y"
                     ]
 
-            case (_runPrompt $ createProject silent pkgIx srcDb emptyFlags) inputs of
+            case (runPrompt $ createProject (mkVerbosity defaultVerbosityHandles silent) pkgIx srcDb emptyFlags) inputs of
               Right (ProjectSettings opts desc Nothing (Just exe) Nothing, _) -> do
                 _optOverwrite opts @?= False
                 _optMinimal opts @?= False
@@ -729,7 +729,7 @@ createProjectTest pkgIx srcDb =
                 _pkgSynopsis desc @?= "Qux's package"
                 _pkgCategory desc @?= "Control"
                 _pkgExtraSrcFiles desc @?= mempty
-                _pkgExtraDocFiles desc @?= pure (Set.singleton "CHANGELOG.md")
+                _pkgExtraDocFiles desc @?= pure (Set.fromList ["CHANGELOG.md", "README.md"])
 
                 _exeMainIs exe @?= HsFilePath "Main.hs" Standard
                 _exeApplicationDirs exe @?= ["exe"]
@@ -809,7 +809,7 @@ fileCreatorTests pkgIx srcDb _pkgName =
         ]
     ]
   where
-    runGenTest inputs go = case _runPrompt go inputs of
+    runGenTest inputs go = case runPrompt go inputs of
       Left e -> assertFailure $ show e
       Right{} -> return ()
 
@@ -1031,6 +1031,20 @@ interactiveTests srcDb =
                 ]
             ]
         , testGroup
+            "Check languagePrompt session state"
+            [ testSimplePrompt
+                "Use last language"
+                ( \flags -> do
+                    a <- languagePrompt flags "first language"
+                    b <- languagePrompt flags "second language"
+                    pure (a, b)
+                )
+                (GHC2024, GHC2024)
+                [ "4"
+                , "" -- default
+                ]
+            ]
+        , testGroup
             "Check srcDirsPrompt output"
             [ testNumberedPrompt
                 "Source dirs indices"
@@ -1091,8 +1105,7 @@ testSimplePrompt label f target =
   testPrompt label f (assertFailure . show) (\(a, _) -> target @=? a)
 
 testPromptBreak
-  :: Eq a
-  => Show a
+  :: Show a
   => String
   -> (InitFlags -> PurePrompt a)
   -> [String]
@@ -1104,16 +1117,14 @@ testPromptBreak label f =
       return ()
 
 testPrompt
-  :: Eq a
-  => Show a
-  => String
+  :: String
   -> (InitFlags -> PurePrompt a)
   -> (BreakException -> Assertion)
   -> ((a, NonEmpty String) -> Assertion)
   -> [String]
   -> TestTree
 testPrompt label f g h input = testCase label $
-  case (_runPrompt $ f emptyFlags) (fromList input) of
+  case (runPrompt $ f emptyFlags) (fromList input) of
     Left x -> g x -- :: BreakException
     Right x -> h x -- :: (a, other inputs)
 

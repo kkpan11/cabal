@@ -1,6 +1,3 @@
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE DeriveFunctor #-}
-
 -- Note: This module was copied from cabal-install.
 
 -- | A progress monad, which we use to report failure and logging from
@@ -58,12 +55,11 @@ foldProgress step err done = fold
     fold (Done r) = done r
 
 instance Monad (Progress step fail) where
-  return = pure
   p >>= f = foldProgress Step Fail f p
 
 instance Applicative (Progress step fail) where
   pure a = Done a
-  p <*> x = foldProgress Step Fail (flip fmap x) p
+  p <*> x = foldProgress Step Fail (`fmap` x) p
 
 instance Monoid fail => Alternative (Progress step fail) where
   empty = Fail Mon.mempty

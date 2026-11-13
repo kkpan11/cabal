@@ -1,14 +1,3 @@
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE DeriveFoldable #-}
-{-# LANGUAGE DeriveFunctor #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE DeriveTraversable #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-
------------------------------------------------------------------------------
-
------------------------------------------------------------------------------
-
 -- |
 -- Module      :  Distribution.Client.Targets
 -- Copyright   :  (c) Duncan Coutts 2011
@@ -78,7 +67,7 @@ import Distribution.Client.GlobalFlags
   ( RepoContext (..)
   )
 import qualified Distribution.Client.Tar as Tar
-import Distribution.Client.Utils (tryFindPackageDesc)
+import Distribution.Client.Utils (tryReadGenericPackageDesc)
 import Distribution.Types.PackageVersionConstraint
   ( PackageVersionConstraint (..)
   )
@@ -89,6 +78,7 @@ import Distribution.PackageDescription
 import Distribution.Simple.Utils
   ( dieWithException
   , lowercase
+  , ordNub
   )
 import Distribution.Types.Flag
   ( parsecFlagAssignmentNonEmpty
@@ -100,15 +90,13 @@ import Distribution.Version
 import Distribution.PackageDescription.Parsec
   ( parseGenericPackageDescriptionMaybe
   )
-import Distribution.Simple.PackageDescription
-  ( readGenericPackageDescription
-  )
 
 import qualified Data.ByteString.Lazy as BS
 import qualified Data.Map as Map
 import Distribution.Client.Errors
 import qualified Distribution.Client.GZipUtils as GZipUtils
 import qualified Distribution.Compat.CharParsing as P
+import Distribution.Utils.Path (makeSymbolicPath)
 import Network.URI
   ( URI (..)
   , URIAuth (..)
@@ -173,16 +161,13 @@ data UserTarget
 
 readUserTargets :: Verbosity -> [String] -> IO [UserTarget]
 readUserTargets verbosity targetStrs = do
-  (problems, targets) <-
-    liftM
-      partitionEithers
-      (traverse readUserTarget targetStrs)
+  (problems, targets) <- partitionEithers <$> traverse readUserTarget targetStrs
   reportUserTargetProblems verbosity problems
   return targets
 
 data UserTargetProblem
   = UserTargetUnexpectedFile String
-  | UserTargetNonexistantFile String
+  | UserTargetNonexistentFile String
   | UserTargetUnexpectedUriScheme String
   | UserTargetUnrecognisedUri String
   | UserTargetUnrecognised String
@@ -219,7 +204,7 @@ readUserTarget targetstr =
             | isFile =
                 Just (Left (UserTargetUnexpectedFile filename))
             | parentDirExists =
-                Just (Left (UserTargetNonexistantFile filename))
+                Just (Left (UserTargetNonexistentFile filename))
             | otherwise =
                 Nothing
       return result
@@ -251,10 +236,10 @@ reportUserTargetProblems verbosity problems = do
     [] -> return ()
     target ->
       dieWithException verbosity $ ReportUserTargetProblems target
-  case [target | UserTargetNonexistantFile target <- problems] of
+  case [target | UserTargetNonexistentFile target <- problems] of
     [] -> return ()
     target ->
-      dieWithException verbosity $ ReportUserTargerNonexistantFile target
+      dieWithException verbosity $ ReportUserTargetNonexistentFile target
 
   case [target | UserTargetUnexpectedFile target <- problems] of
     [] -> return ()
@@ -350,7 +335,7 @@ expandUserTarget verbosity userTarget = case userTarget of
     return [PackageTargetLocation (LocalUnpackedPackage dir)]
   UserTargetLocalCabalFile file -> do
     let dir = takeDirectory file
-    _ <- tryFindPackageDesc verbosity dir (localPackageError dir) -- just as a check
+    _ <- tryReadGenericPackageDesc verbosity (makeSymbolicPath dir) (localPackageError dir) -- just as a check
     return [PackageTargetLocation (LocalUnpackedPackage dir)]
   UserTargetLocalTarball tarballFile ->
     return [PackageTargetLocation (LocalTarballPackage tarballFile)]
@@ -389,9 +374,7 @@ readPackageTarget verbosity = traverse modifyLocation
     modifyLocation :: ResolvedPkgLoc -> IO UnresolvedSourcePackage
     modifyLocation location = case location of
       LocalUnpackedPackage dir -> do
-        pkg <-
-          tryFindPackageDesc verbosity dir (localPackageError dir)
-            >>= readGenericPackageDescription verbosity
+        pkg <- tryReadGenericPackageDesc verbosity (makeSymbolicPath dir) (localPackageError dir)
         return
           SourcePackage
             { srcpkgPackageId = packageId pkg
@@ -526,10 +509,7 @@ disambiguatePackageTargets availablePkgIndex availableExtra targets =
 
     -- use any extra specific available packages to help us disambiguate
     packageNameEnv :: PackageNameEnv
-    packageNameEnv =
-      mappend
-        (indexPackageNameEnv availablePkgIndex)
-        (extraPackageNameEnv availableExtra)
+    packageNameEnv = indexPackageNameEnv availablePkgIndex <> extraPackageNameEnv availableExtra
 
 -- | Report problems to the user. That is, if there are any problems
 -- then raise an exception.
@@ -570,7 +550,7 @@ disambiguatePackageName
   -> PackageName
   -> MaybeAmbiguous PackageName
 disambiguatePackageName (PackageNameEnv pkgNameLookup) name =
-  case nub (pkgNameLookup name) of
+  case ordNub (pkgNameLookup name) of
     [] -> None
     names -> case find (name ==) names of
       Just name' -> Unambiguous name'
@@ -580,7 +560,6 @@ newtype PackageNameEnv = PackageNameEnv (PackageName -> [PackageName])
 
 instance Monoid PackageNameEnv where
   mempty = PackageNameEnv (const [])
-  mappend = (<>)
 
 instance Semigroup PackageNameEnv where
   PackageNameEnv lookupA <> PackageNameEnv lookupB =
@@ -620,6 +599,7 @@ data UserQualifier
   deriving (Eq, Show, Generic)
 
 instance Binary UserQualifier
+instance NFData UserQualifier
 instance Structured UserQualifier
 
 -- | Version of 'ConstraintScope' that a user may specify on the
@@ -634,6 +614,7 @@ data UserConstraintScope
   deriving (Eq, Show, Generic)
 
 instance Binary UserConstraintScope
+instance NFData UserConstraintScope
 instance Structured UserConstraintScope
 
 fromUserQualifier :: UserQualifier -> Qualifier
@@ -654,6 +635,7 @@ data UserConstraint
   deriving (Eq, Show, Generic)
 
 instance Binary UserConstraint
+instance NFData UserConstraint
 instance Structured UserConstraint
 
 userConstraintPackageName :: UserConstraint -> PackageName
@@ -680,7 +662,7 @@ readUserConstraint str =
 
 instance Pretty UserConstraint where
   pretty (UserConstraint scope prop) =
-    dispPackageConstraint $ PackageConstraint (fromUserConstraintScope scope) prop
+    pretty $ PackageConstraint (fromUserConstraintScope scope) prop
 
 instance Parsec UserConstraint where
   parsec = do

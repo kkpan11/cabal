@@ -1,5 +1,6 @@
 import Test.Cabal.Prelude
 import Distribution.Simple.Utils
+import Distribution.Verbosity
 
 -- This test ensures the following fix holds:
 -- > Fix project-local build flags being ignored.
@@ -52,22 +53,19 @@ lrun :: [Linking]
 lrun = [Static, Dynamic, Static, Dynamic]
 
 main = cabalTest $ do
-    -- Skip if on Windows, since my default Chocolatey Windows setup (and the CI
-    -- server setup at the time, presumably) lacks support for dynamic builds
-    -- since the base package appears to be static only, lacking e.g. ‘.dyn_o’
-    -- files.  Normal Windows installations would need support for dynamic
-    -- builds, or else this test would fail when it tries to build with the
-    -- dynamic flags.
-    skipIfWindows
-
+    skipIfNoSharedLibraries
     env <- getTestEnv
     withPackageDb $ do
         -- Phase 1: get 4 hashes according to config flags.
         results <- forM (zip [0..] lrun) $ \(idx, linking) -> do
-            liftIO $ copyDirectoryRecursive minBound (testCurrentDir env </> "basic") (testCurrentDir env </> "basic" ++ show idx)
+            liftIO $
+              copyDirectoryRecursive
+                (mkVerbosity defaultVerbosityHandles silent)
+                (testCurrentDir env </> "basic")
+                (testCurrentDir env </> "basic" ++ show idx)
             withDirectory ("basic" ++ show idx) $ do
                         packageEnv <- (</> ("basic" ++ show idx ++ ".env")) . testWorkDir <$> getTestEnv
-                        let installOptions = ["--disable-deterministic", "--lib", "--package-env=" ++ packageEnv] ++ linkConfigFlags linking ++ ["basic"]
+                        let installOptions = ["--lib", "--package-env=" ++ packageEnv] ++ linkConfigFlags linking ++ ["basic"]
                         recordMode RecordMarked $ do
                             recordHeader $ "install options:" : installOptions
                             cabal "v2-install" installOptions
@@ -77,7 +75,7 @@ main = cabalTest $ do
                             cabal "v2-install" $ "--force-reinstalls" : installOptions
                         let exIPID s = takeWhile (/= '\n') . head . filter (\t -> any (`isPrefixOf` t) ["basic-0.1-", "bsc-0.1-"]) $ tails s
                         hashedIpid <- exIPID <$> liftIO (readFile packageEnv)
-                        return $ ((idx, linking), hashedIpid)
+                        return ((idx, linking), hashedIpid)
         -- Phase 2: make sure we have different hashes iff we have different config flags.
         -- In particular make sure the dynamic config flags weren't silently
         -- dropped and ignored, since this is the bug that prompted this test.

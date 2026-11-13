@@ -1,5 +1,3 @@
-{-# LANGUAGE DeriveGeneric #-}
-
 module Distribution.Client.Types.BuildResults
   ( BuildOutcome
   , BuildOutcomes
@@ -32,7 +30,7 @@ data BuildFailure
   | BuildFailed SomeException
   | TestsFailed SomeException
   | InstallFailed SomeException
-  deriving (Show, Typeable, Generic)
+  deriving (Show, Generic)
 
 instance Exception BuildFailure
 
@@ -48,9 +46,9 @@ data BuildResult
   deriving (Show, Generic)
 
 data DocsResult = DocsNotTried | DocsFailed | DocsOk
-  deriving (Show, Generic, Typeable)
+  deriving (Show, Generic)
 data TestsResult = TestsNotTried | TestsOk
-  deriving (Show, Generic, Typeable)
+  deriving (Show, Generic)
 
 instance Binary BuildFailure
 instance Binary BuildResult

@@ -1,6 +1,4 @@
-{-# LANGUAGE ConstraintKinds #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE ApplicativeDo #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 
@@ -11,10 +9,10 @@ module Distribution.Types.InstalledPackageInfo.FieldGrammar
 import Distribution.Compat.Prelude
 import Prelude ()
 
+import Data.Text (Text)
 import Distribution.Backpack
 import Distribution.CabalSpecVersion
 import Distribution.Compat.Lens (Lens', (&), (.~))
-import Distribution.Compat.Newtype
 import Distribution.FieldGrammar
 import Distribution.FieldGrammar.FieldDescrs
 import Distribution.License
@@ -30,6 +28,7 @@ import Distribution.Version
 
 import qualified Data.Char as Char
 import qualified Data.Map as Map
+import qualified Data.Text as T
 import qualified Distribution.Compat.CharParsing as P
 import qualified Distribution.SPDX as SPDX
 import qualified Text.PrettyPrint as Disp
@@ -55,8 +54,6 @@ f <@> x = f <*> x
 
 ipiFieldGrammar
   :: ( FieldGrammar c g
-     , Applicative (g InstalledPackageInfo)
-     , Applicative (g Basic)
      , c (Identity AbiHash)
      , c (Identity LibraryVisibility)
      , c (Identity PackageName)
@@ -66,7 +63,7 @@ ipiFieldGrammar
      , c (List FSep (Identity UnitId) UnitId)
      , c (List FSep (MQuoted ModuleName) ModuleName)
      , c (List FSep FilePathNT String)
-     , c (List FSep Token String)
+     , c (List FSep Token Text)
      , c (MQuoted MungedPackageName)
      , c (MQuoted Version)
      , c CompatPackageKey
@@ -86,17 +83,17 @@ ipiFieldGrammar =
     -- Basic fields
     <@> optionalFieldDef "id" L.installedUnitId (mkUnitId "")
     <@> optionalFieldDefAla "instantiated-with" InstWith L.instantiatedWith []
-    <@> optionalFieldDefAla "key" CompatPackageKey L.compatPackageKey ""
+    <@> (T.pack <$> optionalFieldDefAla "key" CompatPackageKey (L.compatPackageKey . fromTextLens) mempty)
     <@> optionalFieldDefAla "license" SpecLicenseLenient L.license (Left SPDX.NONE)
-    <@> freeTextFieldDefST "copyright" L.copyright
-    <@> freeTextFieldDefST "maintainer" L.maintainer
-    <@> freeTextFieldDefST "author" L.author
-    <@> freeTextFieldDefST "stability" L.stability
-    <@> freeTextFieldDefST "homepage" L.homepage
-    <@> freeTextFieldDefST "package-url" L.pkgUrl
-    <@> freeTextFieldDefST "synopsis" L.synopsis
-    <@> freeTextFieldDefST "description" L.description
-    <@> freeTextFieldDefST "category" L.category
+    <@> freeTextFieldDef "copyright" L.copyright
+    <@> freeTextFieldDef "maintainer" L.maintainer
+    <@> freeTextFieldDef "author" L.author
+    <@> freeTextFieldDef "stability" L.stability
+    <@> freeTextFieldDef "homepage" L.homepage
+    <@> freeTextFieldDef "package-url" L.pkgUrl
+    <@> freeTextFieldDef "synopsis" L.synopsis
+    <@> freeTextFieldDef "description" L.description
+    <@> freeTextFieldDef "category" L.category
     -- Installed fields
     <@> optionalFieldDef "abi" L.abiHash (mkAbiHash "")
     <@> booleanFieldDef "indefinite" L.indefinite False
@@ -108,13 +105,14 @@ ipiFieldGrammar =
     <@> monoidalFieldAla "library-dirs" (alaList' FSep FilePathNT) L.libraryDirs
     <@> monoidalFieldAla "library-dirs-static" (alaList' FSep FilePathNT) L.libraryDirsStatic
     <@> monoidalFieldAla "dynamic-library-dirs" (alaList' FSep FilePathNT) L.libraryDynDirs
+    <@> monoidalFieldAla "bytecode-library-dirs" (alaList' FSep FilePathNT) L.libraryBytecodeDirs
     <@> optionalFieldDefAla "data-dir" FilePathNT L.dataDir ""
     <@> monoidalFieldAla "hs-libraries" (alaList' FSep Token) L.hsLibraries
     <@> monoidalFieldAla "extra-libraries" (alaList' FSep Token) L.extraLibraries
     <@> monoidalFieldAla "extra-libraries-static" (alaList' FSep Token) L.extraLibrariesStatic
     <@> monoidalFieldAla "extra-ghci-libraries" (alaList' FSep Token) L.extraGHCiLibraries
     <@> monoidalFieldAla "include-dirs" (alaList' FSep FilePathNT) L.includeDirs
-    <@> monoidalFieldAla "includes" (alaList' FSep FilePathNT) L.includes
+    <@> (map T.pack <$> monoidalFieldAla "includes" (alaList' FSep FilePathNT) (L.includes . fromTextsLens))
     <@> monoidalFieldAla "depends" (alaList FSep) L.depends
     <@> monoidalFieldAla "abi-depends" (alaList FSep) L.abiDepends
     <@> monoidalFieldAla "cc-options" (alaList' FSep Token) L.ccOptions
@@ -199,8 +197,6 @@ maybePackageName ipi = case sourceLibName ipi of
 
 newtype ExposedModules = ExposedModules {getExposedModules :: [ExposedModule]}
 
-instance Newtype [ExposedModule] ExposedModules
-
 instance Parsec ExposedModules where
   parsec = ExposedModules <$> parsecOptCommaList parsec
 
@@ -208,8 +204,6 @@ instance Pretty ExposedModules where
   pretty = showExposedModules . getExposedModules
 
 newtype CompatPackageKey = CompatPackageKey {getCompatPackageKey :: String}
-
-instance Newtype String CompatPackageKey
 
 instance Pretty CompatPackageKey where
   pretty = Disp.text . getCompatPackageKey
@@ -221,8 +215,6 @@ instance Parsec CompatPackageKey where
 
 newtype InstWith = InstWith {getInstWith :: [(ModuleName, OpenModule)]}
 
-instance Newtype [(ModuleName, OpenModule)] InstWith
-
 instance Pretty InstWith where
   pretty = dispOpenModuleSubst . Map.fromList . getInstWith
 
@@ -231,8 +223,6 @@ instance Parsec InstWith where
 
 -- | SPDX License expression or legacy license. Lenient parser, accepts either.
 newtype SpecLicenseLenient = SpecLicenseLenient {getSpecLicenseLenient :: Either SPDX.License License}
-
-instance Newtype (Either SPDX.License License) SpecLicenseLenient
 
 instance Parsec SpecLicenseLenient where
   parsec = fmap SpecLicenseLenient $ Left <$> P.try parsec <|> Right <$> parsec
@@ -300,7 +290,6 @@ basicLibVisibility f b =
 
 basicFieldGrammar
   :: ( FieldGrammar c g
-     , Applicative (g Basic)
      , c (Identity LibraryVisibility)
      , c (Identity PackageName)
      , c (Identity UnqualComponentName)
@@ -308,27 +297,34 @@ basicFieldGrammar
      , c (MQuoted Version)
      )
   => g Basic Basic
-basicFieldGrammar =
-  mkBasic
-    <$> optionalFieldDefAla "name" MQuoted basicName (mungedPackageName emptyInstalledPackageInfo)
-    <*> optionalFieldDefAla "version" MQuoted basicVersion nullVersion
-    <*> optionalField "package-name" basicPkgName
-    <*> optionalField "lib-name" basicLibName
-    <*> optionalFieldDef "visibility" basicLibVisibility LibraryVisibilityPrivate
-  where
-    mkBasic n v pn ln lv = Basic n v pn ln' lv'
-      where
-        ln' = maybe LMainLibName LSubLibName ln
-        -- Older GHCs (<8.8) always report installed libraries as private
+basicFieldGrammar = do
+  _basicName <- optionalFieldDefAla "name" MQuoted basicName (mungedPackageName emptyInstalledPackageInfo)
+  _basicVersion <- optionalFieldDefAla "version" MQuoted basicVersion nullVersion
+  _basicPkgName <- optionalField "package-name" basicPkgName
+  _basicLibName <- maybe LMainLibName LSubLibName <$> optionalField "lib-name" basicLibName
+  _basicLibVisibility' <- optionalFieldDef "visibility" basicLibVisibility LibraryVisibilityPrivate
+  pure
+    Basic
+      { -- Older GHCs (<8.8) always report installed libraries as private
         -- because their ghc-pkg builds with an older Cabal.
         -- So we always set LibraryVisibilityPublic for main (unnamed) libs.
         -- This can be removed once we stop supporting GHC<8.8, at the
         -- condition that we keep marking main libraries as public when
         -- registering them.
-        lv' =
-          if let MungedPackageName _ mln = n
-              in -- We need to check both because on ghc<8.2 ln' will always
+        _basicLibVisibility =
+          if let MungedPackageName _ mln = _basicName
+              in -- We need to check both because on ghc<8.2 _basicLibName will always
                  -- be LMainLibName
-                 ln' == LMainLibName && mln == LMainLibName
+                 _basicLibName == LMainLibName && mln == LMainLibName
             then LibraryVisibilityPublic
-            else lv
+            else _basicLibVisibility'
+      , ..
+      }
+
+fromTextLens :: Lens' Text String
+fromTextLens f = fmap T.pack . f . T.unpack
+{-# INLINE fromTextLens #-}
+
+fromTextsLens :: Lens' [Text] [String]
+fromTextsLens f = fmap (map T.pack) . f . map T.unpack
+{-# INLINE fromTextsLens #-}

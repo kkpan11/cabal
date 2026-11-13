@@ -1,7 +1,3 @@
-{-# LANGUAGE CPP #-}
-
------------------------------------------------------------------------------
-
 -- |
 -- Module      :  Distribution.Client.Manpage
 -- Copyright   :  (c) Maciek Makowski 2015
@@ -41,6 +37,7 @@ import Distribution.Simple.Utils
   , rawSystemProcAction
   , rawSystemStdInOut
   )
+import Distribution.Verbosity
 import System.Environment (lookupEnv)
 import System.IO (hClose, hPutStr)
 import qualified System.Process as Process
@@ -56,7 +53,7 @@ data FileInfo
 -- | A list of files that should be documented in the manual page.
 files :: [FileInfo]
 files =
-  [ (FileInfo "~/.config/cabal/config" "The defaults that can be overridden with command-line options.")
+  [ FileInfo "~/.config/cabal/config" "The defaults that can be overridden with command-line options."
   ]
 
 manpageCmd :: String -> [CommandSpec a] -> ManpageFlags -> IO ()
@@ -106,7 +103,10 @@ manpageCmd pname commands flags
   where
     contents :: String
     contents = manpage pname commands
-    verbosity = fromFlag $ manpageVerbosity flags
+    verbosity =
+      mkVerbosity defaultVerbosityHandles $
+        fromFlag $
+          manpageVerbosity flags
 
 -- | Produces a manual page with @troff@ markup.
 manpage :: String -> [CommandSpec a] -> String
@@ -154,7 +154,7 @@ manpage pname commands =
 
 commandSynopsisLines :: String -> CommandSpec action -> [String]
 commandSynopsisLines pname (CommandSpec ui _ NormalCommand) =
-  [ ".B " ++ pname ++ " " ++ (commandName ui)
+  [ ".B " ++ pname ++ " " ++ commandName ui
   , "- " ++ commandSynopsis ui
   , ".br"
   ]
@@ -162,7 +162,7 @@ commandSynopsisLines _ (CommandSpec _ _ HiddenCommand) = []
 
 commandDetailsLines :: String -> CommandSpec action -> [String]
 commandDetailsLines pname (CommandSpec ui _ NormalCommand) =
-  [ ".B " ++ pname ++ " " ++ (commandName ui)
+  [ ".B " ++ pname ++ " " ++ commandName ui
   , ""
   , commandUsage ui pname
   , ""

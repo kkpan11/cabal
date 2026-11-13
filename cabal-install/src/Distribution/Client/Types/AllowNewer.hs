@@ -1,5 +1,3 @@
-{-# LANGUAGE DeriveGeneric #-}
-
 module Distribution.Client.Types.AllowNewer
   ( AllowNewer (..)
   , AllowOlder (..)
@@ -101,6 +99,12 @@ instance Pretty RelaxedDep where
 instance Parsec RelaxedDep where
   parsec = P.char '*' *> relaxedDepStarP <|> (parsec >>= relaxedDepPkgidP)
 
+instance Parsec AllowOlder where
+  parsec = AllowOlder <$> parsec
+
+instance Parsec AllowNewer where
+  parsec = AllowNewer <$> parsec
+
 -- continuation after *
 relaxedDepStarP :: CabalParsing m => m RelaxedDep
 relaxedDepStarP =
@@ -197,6 +201,14 @@ instance Structured RelaxedDep
 instance Structured AllowNewer
 instance Structured AllowOlder
 
+instance NFData RelaxDeps
+instance NFData RelaxDepMod
+instance NFData RelaxDepScope
+instance NFData RelaxDepSubject
+instance NFData RelaxedDep
+instance NFData AllowNewer
+instance NFData AllowOlder
+
 -- | Return 'True' if 'RelaxDeps' specifies a non-empty set of relaxations
 --
 -- Equivalent to @isRelaxDeps = (/= 'mempty')@
@@ -208,7 +220,7 @@ isRelaxDeps RelaxDepsAll = True
 -- | A smarter 'RelaxedDepsSome', @*:*@ is the same as @all@.
 mkRelaxDepSome :: [RelaxedDep] -> RelaxDeps
 mkRelaxDepSome xs
-  | any (== RelaxedDep RelaxDepScopeAll RelaxDepModNone RelaxDepSubjectAll) xs =
+  | RelaxedDep RelaxDepScopeAll RelaxDepModNone RelaxDepSubjectAll `elem` xs =
       RelaxDepsAll
   | otherwise =
       RelaxDepsSome xs
@@ -227,7 +239,6 @@ instance Semigroup RelaxDeps where
 -- | @'RelaxDepsSome' []@ is the /identity element/
 instance Monoid RelaxDeps where
   mempty = RelaxDepsSome []
-  mappend = (<>)
 
 instance Semigroup AllowNewer where
   AllowNewer x <> AllowNewer y = AllowNewer (x <> y)
@@ -237,8 +248,6 @@ instance Semigroup AllowOlder where
 
 instance Monoid AllowNewer where
   mempty = AllowNewer mempty
-  mappend = (<>)
 
 instance Monoid AllowOlder where
   mempty = AllowOlder mempty
-  mappend = (<>)

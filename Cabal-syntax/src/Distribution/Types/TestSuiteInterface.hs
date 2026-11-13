@@ -1,5 +1,4 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DataKinds #-}
 
 module Distribution.Types.TestSuiteInterface
   ( TestSuiteInterface (..)
@@ -10,6 +9,7 @@ import Prelude ()
 
 import Distribution.ModuleName
 import Distribution.Types.TestType
+import Distribution.Utils.Path
 import Distribution.Version
 
 -- | The test suite interfaces that are currently defined.
@@ -21,23 +21,22 @@ data TestSuiteInterface
     -- of an executable. It returns a zero exit code for success, non-zero for
     -- failure. The stdout and stderr channels may be logged. Test tooling may
     -- pass command line arguments and/or connect the stdin channel to the test.
-    TestSuiteExeV10 Version FilePath
+    TestSuiteExeV10 Version (RelativePath Source File)
   | -- | Test interface \"detailed-0.9\". The test-suite takes the form of a
     -- library containing a designated module that exports \"tests :: [Test]\".
     TestSuiteLibV09 Version ModuleName
   | -- | A test suite that does not conform to one of the above interfaces for
     -- the given reason (e.g. unknown test type).
     TestSuiteUnsupported TestType
-  deriving (Eq, Ord, Generic, Read, Show, Typeable, Data)
+  deriving (Eq, Ord, Generic, Read, Show, Data)
 
 instance Binary TestSuiteInterface
 instance Structured TestSuiteInterface
 
-instance NFData TestSuiteInterface where rnf = genericRnf
+instance NFData TestSuiteInterface
 
 instance Monoid TestSuiteInterface where
   mempty = TestSuiteUnsupported (TestTypeUnknown mempty nullVersion)
-  mappend = (<>)
 
 instance Semigroup TestSuiteInterface where
   a <> (TestSuiteUnsupported _) = a

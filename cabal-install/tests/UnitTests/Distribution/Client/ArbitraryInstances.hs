@@ -1,7 +1,6 @@
-{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
-{-# LANGUAGE TypeOperators #-}
-{-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# LANGUAGE LambdaCase #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
 
 module UnitTests.Distribution.Client.ArbitraryInstances
   ( adjustSize
@@ -26,6 +25,7 @@ import Prelude ()
 
 import Data.Char (isLetter)
 import Data.List ((\\))
+import Data.Monoid (Last (..))
 
 import Distribution.Simple.Setup
 import Distribution.Types.Flag (mkFlagAssignment)
@@ -110,11 +110,8 @@ instance Arbitrary URI where
       <*> pure ""
 
 instance Arbitrary URIAuth where
-  arbitrary =
-    URIAuth
-      <$> pure "" -- no password as this does not roundtrip
-      <*> arbitraryURIToken
-      <*> arbitraryURIPort
+  -- no password as this does not roundtrip
+  arbitrary = URIAuth "" <$> arbitraryURIToken <*> arbitraryURIPort
 
 arbitraryURIToken :: Gen String
 arbitraryURIToken =
@@ -150,7 +147,7 @@ instance Arbitrary ShortToken where
   arbitrary =
     ShortToken
       <$> ( shortListOf1 5 (choose ('#', '~'))
-              `suchThat` (all (`notElem` "{}"))
+              `suchThat` all (`notElem` "{}")
               `suchThat` (not . ("[]" `isPrefixOf`))
           )
 
@@ -200,7 +197,7 @@ instance Arbitrary WriteGhcEnvironmentFilesPolicy where
   arbitrary = arbitraryBoundedEnum
 
 arbitraryFlag :: Gen a -> Gen (Flag a)
-arbitraryFlag = liftArbitrary
+arbitraryFlag = fmap (fmap Last) liftArbitrary
 
 instance Arbitrary RepoName where
   -- TODO: rename refinement?
@@ -320,7 +317,7 @@ instance Arbitrary a => Arbitrary (OptionalStanzaMap a) where
   arbitrary = do
     x1 <- arbitrary
     x2 <- arbitrary
-    return $ optStanzaTabulate $ \x -> case x of
+    return $ optStanzaTabulate $ \case
       TestStanzas -> x1
       BenchStanzas -> x2
 
@@ -387,9 +384,8 @@ instance Arbitrary Glob where
       take
         (max 1 sz)
         [ pure GlobDirTrailing
-        , GlobFile <$> (getGlobPieces <$> arbitrary)
-        , GlobDir
-            <$> (getGlobPieces <$> arbitrary)
+        , GlobFile . getGlobPieces <$> arbitrary
+        , (GlobDir . getGlobPieces <$> arbitrary)
             <*> resize (sz `div` 2) arbitrary
         ]
 
@@ -421,6 +417,11 @@ instance Arbitrary GlobPieces where
 mergeLiterals :: [GlobPiece] -> [GlobPiece]
 mergeLiterals (Literal a : Literal b : ps) = mergeLiterals (Literal (a ++ b) : ps)
 mergeLiterals (Union as : ps) = Union (map mergeLiterals as) : mergeLiterals ps
+-- Two consecutive wildcards are semantically equivalent to a single one, but
+-- would syntactically produce a recursive wildcard when pretty-printed, so
+-- whenever we end up generating two or more consecutive wildcards, we merge
+-- them together to avoid this problem.
+mergeLiterals (WildCard : WildCard : ps) = mergeLiterals (WildCard : ps)
 mergeLiterals (p : ps) = p : mergeLiterals ps
 mergeLiterals [] = []
 

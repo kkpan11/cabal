@@ -23,6 +23,7 @@ module Distribution.Client.Init.Defaults
   , defaultLicenseIds
   , defaultMainIs
   , defaultChangelog
+  , defaultReadme
   , defaultCategories
   , defaultInitFlags
   , defaultLanguage
@@ -74,6 +75,9 @@ defaultPackageType = Executable
 
 defaultChangelog :: FilePath
 defaultChangelog = "CHANGELOG.md"
+
+defaultReadme :: FilePath
+defaultReadme = "README.md"
 
 defaultLicense :: CabalSpecVersion -> SpecLicense
 defaultLicense csv
@@ -135,6 +139,7 @@ defaultCabalVersions =
   , CabalSpecV2_4
   , CabalSpecV3_0
   , CabalSpecV3_4
+  , CabalSpecV3_14
   ]
 
 defaultInitFlags :: InitFlags
@@ -164,7 +169,7 @@ myLibHs =
 
 myExeHs :: [String]
 myExeHs =
-  [ "module Main where"
+  [ "module Main (main) where"
   , ""
   , "main :: IO ()"
   , "main = putStrLn \"Hello, Haskell!\""
@@ -172,7 +177,7 @@ myExeHs =
 
 myLibExeHs :: [String]
 myLibExeHs =
-  [ "module Main where"
+  [ "module Main (main) where"
   , ""
   , "import qualified MyLib (someFunc)"
   , ""

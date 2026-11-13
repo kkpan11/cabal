@@ -1,6 +1,4 @@
------------------------------------------------------------------------------
-
------------------------------------------------------------------------------
+{-# LANGUAGE PatternSynonyms #-}
 
 -- |
 -- Module      :  Distribution.Client.Get
@@ -26,9 +24,6 @@ module Distribution.Client.Get
 
 import Distribution.Client.Compat.Prelude hiding (get)
 import Distribution.Client.Types.SourceRepo (SourceRepoProxy, SourceRepositoryPackage (..), srpToProxy)
-import Distribution.Compat.Directory
-  ( listDirectory
-  )
 import Distribution.Package
   ( PackageId
   , packageId
@@ -39,10 +34,10 @@ import Distribution.Simple.Program
   ( programName
   )
 import Distribution.Simple.Setup
-  ( Flag (..)
-  , flagToMaybe
+  ( flagToMaybe
   , fromFlag
   , fromFlagOrDefault
+  , pattern NoFlag
   )
 import Distribution.Simple.Utils
   ( dieWithException
@@ -77,6 +72,7 @@ import Distribution.Solver.Types.SourcePackage
 
 import Control.Monad (mapM_)
 import qualified Data.Map as Map
+import qualified Data.Text as Text
 import Distribution.Client.Errors
 import Distribution.Utils.NubList
   ( fromNubList
@@ -85,6 +81,7 @@ import System.Directory
   ( createDirectoryIfMissing
   , doesDirectoryExist
   , doesFileExist
+  , listDirectory
   )
 import System.FilePath
   ( addTrailingPathSeparator
@@ -136,8 +133,7 @@ get verbosity repoCtxt globalFlags getFlags userTargets = do
   if onlyPkgDescr
     then do
       when useSourceRepo $
-        warn verbosity $
-          "Ignoring --source-repository for --only-package-description"
+        warn verbosity "Ignoring --source-repository for --only-package-description"
 
       mapM_ (unpackOnlyPkgDescr verbosity prefix) pkgs
     else
@@ -324,7 +320,7 @@ instance Exception ClonePackageException where
       "Failed to fetch the source repository for package "
         ++ prettyShow pkgid
         ++ ", repository location "
-        ++ srpLocation repo
+        ++ Text.unpack (srpLocation repo)
         ++ " ("
         ++ vcsprogname
         ++ " failed with "

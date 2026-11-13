@@ -1,6 +1,4 @@
-{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 module Distribution.Solver.Modular.Explore (backjumpAndExplore) where
 
 import Distribution.Solver.Compat.Prelude
@@ -194,7 +192,7 @@ assign tree = go tree (A M.empty M.empty M.empty)
         where f k             r = r (A pa (M.insert qfn k fa) sa)
     go (SChoice qsn rdm y t     ts) (A pa fa sa) = SChoice qsn rdm y t     $ W.mapWithKey f (fmap go ts)
         where f k             r = r (A pa fa (M.insert qsn k sa))
-    go (GoalChoice  rdm         ts) a            = GoalChoice  rdm         $ fmap ($ a) (fmap go ts)
+    go (GoalChoice  rdm         ts) a            = GoalChoice  rdm         $ fmap (`go` a) ts
 
 -- | A tree traversal that simultaneously propagates conflict sets up
 -- the tree from the leaves and creates a log.
@@ -301,7 +299,7 @@ exploreLog mbj enableBj fineGrainedConflicts (CountConflicts countConflicts) idx
                    -- set to say that the reverse dependency also excluded this
                    -- version.
                    Just $ CS.singletonWithConflict (P reverseDep) (CS.VersionConstraintConflict currentQPN v)
-      in fmap CS.unions $ traverse couldBeResolved (S.toList conflicts)
+      in CS.unions <$> traverse couldBeResolved (S.toList conflicts)
 
     logSkippedPackage :: QPN -> POption -> ConflictSet -> ExploreState -> ConflictSetLog a
     logSkippedPackage qpn pOption cs es =
